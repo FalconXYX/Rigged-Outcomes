@@ -1,7 +1,22 @@
 [
   {
-    "name": "USIran",
+    "name": "usiran",
     "slug": "us-strikes-iran-by-february-28-2026-227-967-547-688-589-491-592-418-452-924-384-915-464-672-196-157-993-596-269-535-381-391-471-256-988-997-296-225-762-973-292-827-345-182-558-215-794-879-189-761",
     "output": "USxIranStrikesFeb28"
+  },
+  {
+    "name": "superbowl",
+    "slug": "will-tit-me-pregunt-be-played-first-at-the-super-bowl-halftime-show",
+    "output": "SuperbowlFirstSong"
+  },
+  {
+    "name": "tarrif",
+    "slug": "will-the-supreme-court-rule-in-favor-of-trumps-tariffs",
+    "output": "SupremeCourtTariffRuling"
+  },
+  {
+    "name": "talyorswift",
+    "slug": "taylor-swift-and-travis-kelce-engaged-in-2025",
+    "output": "TaylorSwiftTravisKelceEngaged2025"
   }
 ]

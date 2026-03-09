@@ -40,6 +40,8 @@ def visualize(keyword=None, port=5001):
     # ── 2. Whale / crowd split ───────────────────────────────────────────────
     total_vol  = df["dollar_amount"].sum()
     threshold  = min(5000.0, 0.001 * total_vol)
+    if threshold < 1000:
+        threshold = 1000.0
     whale_mask = (df["win_status"] == "WIN") & (df["dollar_amount"] >= threshold)
 
     # Always include highlighted users in the whale set (they may have net $0 after
@@ -51,7 +53,7 @@ def visualize(keyword=None, port=5001):
     if len(raw_whales) >= 4:
         ts     = raw_whales["first_trade"].astype("int64") // 10**9
         q1, q3 = ts.quantile(0.25), ts.quantile(0.75)
-        whales = raw_whales[ts >= q1 - 1.5 * (q3 - q1)].copy()
+        whales = raw_whales[ts >= q1 - 1.5 * (q3 - q1)].copy() # type: ignore
     else:
         whales = raw_whales.copy()
 

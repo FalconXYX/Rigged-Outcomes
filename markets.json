@@ -31,5 +31,15 @@
     "name": "fired",
     "slug": "kristi-noem-out-by-march-31",
     "output": "KristiNoemFiredMarch31"
+  },
+  {
+    "name": "maduro",
+    "slug": "maduro-out-by-january-31-2026-318",
+    "output": "MaduroOut"
+  },
+  {
+    "name": "openai",
+    "slug": "openai-browser-in-2025",
+    "output": "OpenAIBrowser2025"
   }
 ]

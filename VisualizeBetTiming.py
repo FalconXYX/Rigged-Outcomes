@@ -6,17 +6,13 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output
+import dash_mantine_components as dmc
+from template_VisualizeBetTiming import material_layout, stat_block
 
 EASTERN = ZoneInfo("America/New_York")  # handles EST/EDT automatically
 
 def visualize(keyword=None, port=5001):
-    """Run the betting pattern visualization dashboard.
-    
-    Args:
-        keyword: Market name/slug fragment to filter (e.g. 'usiran'). 
-                 If None, uses first market from markets.json.
-        port: Port to run Dash app on (default 5001).
-    """
+ 
     with open("markets.json") as f:
         ALL_MARKETS = json.load(f)
     
@@ -27,6 +23,8 @@ def visualize(keyword=None, port=5001):
         if not matches:
             raise ValueError(f"No market matched '{keyword}'.")
         m = matches[0]
+    else:
+        m = ALL_MARKETS[0]
     
     # ── 1. Load data ─────────────────────────────────────────────────────────
     df = pd.read_csv(f"data/{m['output']}_clean.csv")
@@ -37,12 +35,53 @@ def visualize(keyword=None, port=5001):
     market_title  = df["market_title"].iloc[0] if "market_title" in df.columns else m["name"]
     highlighted   = m.get("highlightedUsers", {})  # { address: label }
 
+    # Build a normalized market-odds series from trade rows.
+    # For "No" outcome trades, flip p -> (1 - p) so everything is event probability.
+    ODDS_ROLLING_WINDOW = 12
+    odds_line = pd.DataFrame(columns=["odds_time", "odds_pct"])
+    if "avg_odds" in df.columns:
+        p = pd.to_numeric(df["avg_odds"], errors="coerce")
+        if p.max(skipna=True) and p.max(skipna=True) > 1.0:
+            p = p / 100.0
+
+        p = p.clip(lower=0.0, upper=1.0)
+        if "outcome" in df.columns:
+            out = df["outcome"].astype(str).str.strip().str.lower()
+            is_no = out.eq("no") | out.str.startswith("no ")
+            p = pd.Series(np.where(is_no, 1.0 - p, p), index=df.index)
+
+        tmp = pd.DataFrame({
+            "odds_time": df["first_trade"].dt.floor("min"),
+            "odds_pct": p * 100.0,
+        }).dropna(subset=["odds_time", "odds_pct"])
+
+        if len(tmp):
+            odds_line = (
+                tmp.groupby("odds_time")["odds_pct"]
+                .median()
+                .reset_index()
+                .sort_values("odds_time")
+            )
+            odds_line["odds_pct"] = (
+                odds_line["odds_pct"]
+                .rolling(window=ODDS_ROLLING_WINDOW, min_periods=1, center=True)
+                .median()
+            )
+
     # ── 2. Whale / crowd split ───────────────────────────────────────────────
     total_vol  = df["dollar_amount"].sum()
     threshold  = min(5000.0, 0.001 * total_vol)
     if threshold < 1000:
         threshold = 1000.0
-    whale_mask = (df["win_status"] == "WIN") & (df["dollar_amount"] >= threshold)
+        
+    correct_outcome = m.get("correct_outcome")
+    if correct_outcome and "outcome" in df.columns:
+        winner_mask = df["outcome"].astype(str).str.lower() == correct_outcome.lower()
+    else:
+        winner_mask = df["win_status"] == "WIN"
+        
+    df["is_winner"] = winner_mask
+    whale_mask = df["is_winner"] & (df["dollar_amount"] >= threshold)
 
     # Always include highlighted users in the whale set (they may have net $0 after
     # hedging but still hold a significant position sized by contracts)
@@ -65,6 +104,25 @@ def visualize(keyword=None, port=5001):
         else float(r["dollar_amount"]),
         axis=1,
     )
+    def gross_winnings(stake, odds):
+        implied_odds = float(odds)
+        if implied_odds > 1:
+            implied_odds = implied_odds / 100.0
+        if implied_odds <= 0:
+            return 0.0
+        return float(stake) / implied_odds    # Total take-home (Stake + Profit)
+
+    # Calculate gross payout for whales using odds as implied probability (0 if they lost)
+    whales["win_amount"] = whales.apply(
+        lambda r: gross_winnings(r["dollar_amount"], r["avg_odds"]) if r.get("is_winner", True) else 0.0,
+        axis=1,
+    )
+    
+    # Calculate total market winnings to correctly denominate the percentage
+    df_winners = df[df["is_winner"]]
+    total_market_winnings = df_winners.apply(
+        lambda r: gross_winnings(r["dollar_amount"], r["avg_odds"]), axis=1
+    ).sum()
 
     crowd["hour"] = crowd["first_trade"].dt.floor("h")
     hourly        = crowd.groupby("hour")["dollar_amount"].sum().reset_index(name="vol")
@@ -79,37 +137,56 @@ def visualize(keyword=None, port=5001):
         except Exception:
             pass
 
+    time_ranges = {}
+    for label, spec in m.get("timeRanges", {}).items():
+        try:
+            time_ranges[label] = {
+                "start": pd.to_datetime(spec["start"], format="%Y-%m-%d-%H:%M"),
+                "end": pd.to_datetime(spec["end"], format="%Y-%m-%d-%H:%M"),
+            }
+        except Exception:
+            continue
+
+    default_range = "Total" if "Total" in time_ranges else (next(iter(time_ranges), None))
+
     # ── 4. Colours ───────────────────────────────────────────────────────────
+    JET_BLACK   = "#223843"
+    PLATINUM    = "#eff1f3"
+    DUST_GREY   = "#dbd3d8"
+    DESERT_SAND = "#d8b4a0"
+    BURNT_PEACH = "#d77a61"
+    
     TEAL  = "#0f766e"
     BLUE  = "#1d4ed8"
     RED   = "#be123c"
     HIGH  = "#ea580c"   # orange — highlighted users
-    GRAY  = "#e5e7eb"
+    
+    GRAY  = DUST_GREY
     MUTED = "#9ca3af"
-    TEXT  = "#374151"
+    TEXT  = JET_BLACK
 
     def base_layout(**extra):
         return dict(
-            font=dict(family="Inter, 'Helvetica Neue', Arial, sans-serif", size=12, color=TEXT),
-            plot_bgcolor="#ffffff",
-            paper_bgcolor="#ffffff",
-            margin=dict(l=72, r=52, t=28, b=52),
+            font=dict(family="Roboto, 'Helvetica Neue', Arial, sans-serif", size=13, color=JET_BLACK),
+            plot_bgcolor=PLATINUM,
+            paper_bgcolor=PLATINUM,
+            margin=dict(l=52, r=48, t=30, b=52),
             xaxis=dict(
-                showgrid=True, gridcolor=GRAY, zeroline=False,
-                linecolor=GRAY, tickcolor=GRAY,
-                tickfont=dict(size=11, color=MUTED),
+                showgrid=True, gridcolor=DUST_GREY, zeroline=False,
+                linecolor=DUST_GREY, tickcolor=DUST_GREY,
+                tickfont=dict(size=12, color=JET_BLACK),
             ),
             yaxis=dict(
-                showgrid=True, gridcolor=GRAY, zeroline=False,
-                linecolor=GRAY, tickcolor=GRAY,
-                tickfont=dict(size=11, color=MUTED),
+                showgrid=True, gridcolor=DUST_GREY, zeroline=False,
+                linecolor=DUST_GREY, tickcolor=DUST_GREY,
+                tickfont=dict(size=12, color=JET_BLACK),
                 tickprefix="$", tickformat=",.0f",
             ),
             showlegend=False,
             hovermode="closest",
             hoverlabel=dict(
-                bgcolor="white", bordercolor=GRAY,
-                font=dict(size=12, color=TEXT),
+                bgcolor=PLATINUM, bordercolor=DUST_GREY,
+                font=dict(size=13, color=JET_BLACK),
             ),
             **extra,
         )
@@ -119,7 +196,7 @@ def visualize(keyword=None, port=5001):
             fig.add_shape(
                 type="line", x0=dt, x1=dt, y0=0, y1=1,
                 xref="x", yref="paper",
-                line=dict(color=RED, width=1.5, dash="dot"),
+                line=dict(color=RED, width=2.4, dash="dot"),
             )
             fig.add_annotation(
                 x=dt, y=0.97, xref="x", yref="paper",
@@ -128,6 +205,26 @@ def visualize(keyword=None, port=5001):
                 showarrow=False, xanchor="right",
                 bgcolor="rgba(255,255,255,0.85)", borderpad=3,
             )
+
+    def apply_time_range(fig, selected_range):
+        if not selected_range or selected_range not in time_ranges:
+            return
+        spec = time_ranges[selected_range]
+        fig.update_xaxes(range=[spec["start"], spec["end"]])
+
+    def _add_odds_line(fig, axis="y2"):
+        if not len(odds_line):
+            return
+
+        fig.add_trace(go.Scatter(
+            x=odds_line["odds_time"],
+            y=odds_line["odds_pct"],
+            mode="lines",
+            line=dict(color=RED, width=4, shape="spline"),
+            name="Odds (% chance)",
+            yaxis=axis,
+            hovertemplate="<b>Odds:</b> %{y:.1f}%<br>%{x|%b %d · %H:%M}<extra></extra>",
+        ))
 
     # ── 5. Figures ───────────────────────────────────────────────────────────
     def _whale_traces(fig, df_w, yaxis=None):
@@ -148,11 +245,23 @@ def visualize(keyword=None, port=5001):
                 x=normal["first_trade"], y=normal["display_dollar"],
                 mode="markers",
                 marker=dict(
-                    size=8 + 36 * np.sqrt(sz / mx),
-                    color=TEAL, opacity=0.7,
-                    line=dict(width=1, color="rgba(15,118,110,0.2)"),
+                    size=9 + 38 * np.sqrt(sz / mx),
+                    color=TEAL, opacity=0.72,
+                    line=dict(width=1.6, color="rgba(15,118,110,0.22)"),
                 ),
-                hovertemplate="<b>$%{y:,.0f}</b><br>%{x|%b %d · %H:%M}<extra></extra>",
+                hovertemplate=(
+                    "<b>User:</b> %{customdata[0]}<br>"
+                    "<b>Bet:</b> $%{customdata[1]:,.0f}<br>"
+                    "<b>Odds:</b> %{customdata[2]:.2f}<br>"
+                    "<b>Winnings:</b> $%{customdata[3]:,.0f}<br>"
+                    "%{x|%b %d · %H:%M}<extra></extra>"
+                ),
+                customdata=np.stack([
+                    normal["user_id"],
+                    normal["dollar_amount"],
+                    normal["avg_odds"],
+                    normal["win_amount"] if "win_amount" in normal else np.zeros(len(normal))
+                ], axis=-1),
                 **extra,
             ))
 
@@ -161,7 +270,6 @@ def visualize(keyword=None, port=5001):
             label   = highlighted.get(row["user_id"], row["user_id"][:8])
             disp    = row["display_dollar"]
             sz      = 8 + 36 * np.sqrt(disp / mx)
-            # Show contracts held in hover for hedged users (net dollar = 0)
             is_hedged = float(row["dollar_amount"]) == 0
             hover_extra = f"<br>{row['contracts']:,.0f} contracts" if is_hedged else ""
             fig.add_trace(go.Scatter(
@@ -169,28 +277,58 @@ def visualize(keyword=None, port=5001):
                 mode="markers+text",
                 text=[label],
                 textposition="top center",
-                textfont=dict(size=11, color=HIGH, family="Inter, sans-serif"),
+                textfont=dict(size=12, color=HIGH, family="Inter, sans-serif"),
                 marker=dict(
                     size=sz, color=HIGH, opacity=0.9,
-                    line=dict(width=2, color="white"),
+                    line=dict(width=2.2, color="white"),
                 ),
-                hovertemplate=f"<b>{label}</b><br><b>$%{{y:,.0f}}</b>{hover_extra}<br>%{{x|%b %d · %H:%M}}<extra></extra>",
+                hovertemplate=(
+                    f"<b>{label}</b><br>"
+                    f"<b>Bet:</b> ${row['dollar_amount']:,.0f}<br>"
+                    f"<b>Odds:</b> {row['avg_odds']:.2f}<br>"
+                    f"<b>Winnings:</b> ${row['win_amount'] if 'win_amount' in row else 0:,.0f}<br>"
+                    f"%{{x|%b %d · %H:%M}}<extra></extra>"
+                ),
                 **extra,
             ))
 
 
-    def fig_whales():
-        fig = go.Figure(layout=base_layout())
+    def fig_whales(show_odds=True):
+        layout_extra = {}
+        if show_odds:
+            layout_extra["yaxis2"] = dict(
+                overlaying="y", side="right",
+                range=[0, 100],
+                showgrid=False, zeroline=False,
+                title="Odds (%)",
+                title_font=dict(color=RED),
+                tickfont=dict(size=11, color=RED),
+                ticksuffix="%",
+            )
+        fig = go.Figure(layout=base_layout(**layout_extra))
         if len(whales):
             _whale_traces(fig, whales)
-            fig.add_hline(y=threshold, line_dash="dot", line_color=GRAY, line_width=1.5)
+            fig.add_hline(y=threshold, line_dash="dot", line_color=GRAY, line_width=2)
+        if show_odds:
+            _add_odds_line(fig, axis="y2")
         add_events(fig)
         fig.update_layout(yaxis_title="Position size (USD)")
         return fig
 
 
-    def fig_crowd():
-        fig = go.Figure(layout=base_layout())
+    def fig_crowd(show_odds=True):
+        layout_extra = {}
+        if show_odds:
+            layout_extra["yaxis2"] = dict(
+                overlaying="y", side="right",
+                range=[0, 100],
+                showgrid=False, zeroline=False,
+                title="Odds (%)",
+                title_font=dict(color=RED),
+                tickfont=dict(size=11, color=RED),
+                ticksuffix="%",
+            )
+        fig = go.Figure(layout=base_layout(**layout_extra))
         if len(hourly):
             fig.add_trace(go.Scatter(
                 x=hourly["hour"], y=hourly["vol"],
@@ -200,35 +338,63 @@ def visualize(keyword=None, port=5001):
             ))
             fig.add_trace(go.Scatter(
                 x=hourly["hour"], y=hourly["avg"],
-                mode="lines", line=dict(color=BLUE, width=2.5),
+                mode="lines", line=dict(color=BLUE, width=3.4),
                 hovertemplate="<b>$%{y:,.0f} / hr</b><br>%{x|%b %d · %H:%M}<extra></extra>",
             ))
+        if show_odds:
+            _add_odds_line(fig, axis="y2")
         add_events(fig)
-        fig.update_layout(yaxis_title="Volume per hour (USD)")
+        # Use same Y axis cap as combined visualization
+        max_y = hourly["avg"].max() if len(hourly) else 0
+        fig.update_layout(yaxis_title="Volume per hour (USD)", yaxis=dict(range=[0, max_y * 1.1]))
         return fig
 
 
-    def fig_comparison():
-        fig = go.Figure(layout=base_layout(
-            yaxis2=dict(
-                overlaying="y", side="right",
-                showgrid=False, zeroline=False,
-                tickfont=dict(size=11, color=TEAL),
-                tickprefix="$", tickformat=",.0f",
-                linecolor="rgba(0,0,0,0)", tickcolor="rgba(0,0,0,0)",
-            ),
-        ))
+    def fig_comparison(show_odds=True):
+        if show_odds:
+            fig = go.Figure(layout=base_layout(
+                yaxis2=dict(
+                    overlaying="y", side="right",
+                    showgrid=False, zeroline=False,
+                    tickfont=dict(size=11, color=TEAL),
+                    tickprefix="$", tickformat=",.0f",
+                    linecolor="rgba(0,0,0,0)", tickcolor="rgba(0,0,0,0)",
+                ),
+                yaxis3=dict(
+                    overlaying="y", side="right",
+                    anchor="free", position=1.0,
+                    range=[0, 100],
+                    showgrid=False, zeroline=False,
+                    title="Odds (%)",
+                    title_font=dict(color=RED),
+                    tickfont=dict(size=11, color=RED),
+                    ticksuffix="%",
+                ),
+            ))
+        else:
+            fig = go.Figure(layout=base_layout(
+                yaxis2=dict(
+                    overlaying="y", side="right",
+                    showgrid=False, zeroline=False,
+                    tickfont=dict(size=11, color=TEAL),
+                    tickprefix="$", tickformat=",.0f",
+                    linecolor="rgba(0,0,0,0)", tickcolor="rgba(0,0,0,0)",
+                ),
+            ))
         if len(hourly):
             fig.add_trace(go.Scatter(
                 x=hourly["hour"], y=hourly["avg"],
-                mode="lines", line=dict(color=BLUE, width=2.5),
+                mode="lines", line=dict(color=BLUE, width=3.4),
                 fill="tozeroy", fillcolor="rgba(29,78,216,0.06)",
                 hovertemplate="<b>Crowd $%{y:,.0f}/hr</b><br>%{x|%b %d · %H:%M}<extra></extra>",
             ))
         if len(whales):
             _whale_traces(fig, whales, yaxis="y2")
+        if show_odds:
+            _add_odds_line(fig, axis="y3")
         add_events(fig)
         fig.update_layout(
+            margin=dict(l=72, r=82 if show_odds else 52, t=28, b=52),
             yaxis=dict(
                 title="Crowd volume / hr",
                 title_font=dict(color=BLUE),
@@ -243,7 +409,13 @@ def visualize(keyword=None, port=5001):
         return fig
 
     # ── 6. Dash app ───────────────────────────────────────────────────────────
-    wpct = round(whales["dollar_amount"].sum() / total_vol * 100, 1) if total_vol else 0.0
+    whale_vol_sum = whales["dollar_amount"].sum()
+    wpct = round(whale_vol_sum / total_vol * 100, 1) if total_vol else 0.0
+    
+    # Calculate exactly how much money the whales "took home" in gross payouts
+    whale_winnings = whales["win_amount"].sum() if len(whales) else 0.0
+    # The percentage of the total market volume that was taken home by the whales
+    whale_winnings_pct = round(whale_winnings / total_vol * 100, 1) if total_vol else 0.0
 
     _T = dict(
         padding="10px 24px 12px",
@@ -265,26 +437,6 @@ def visualize(keyword=None, port=5001):
     }
 
 
-    def stat_block(label, value, color="#111827"):
-        return html.Div(
-            style={"display": "flex", "flexDirection": "column", "gap": "3px"},
-            children=[
-                html.Span(label, style={
-                    "fontSize": "0.62rem",
-                    "fontWeight": "600",
-                    "letterSpacing": "0.09em",
-                    "textTransform": "uppercase",
-                    "color": MUTED,
-                }),
-                html.Span(value, style={
-                    "fontSize": "1.1rem",
-                    "fontWeight": "700",
-                    "color": color,
-                }),
-            ],
-        )
-
-
     app = Dash(__name__, title="Betting Pattern Analysis")
 
     app.index_string = (
@@ -303,127 +455,46 @@ def visualize(keyword=None, port=5001):
         "<footer>{%config%}{%scripts%}{%renderer%}</footer>"
         "</body></html>"
     )
+    app.layout = material_layout(
+        market_title,
+        [
+            stat_block("Total volume",    f"${total_vol:,.0f}"),
+            stat_block("Whale threshold", f"\u2265 ${threshold:,.0f}", TEAL),
+            stat_block("Whale volume",    f"${whales['dollar_amount'].sum():,.0f}", BLUE),
+            stat_block("Crowd volume",    f"${crowd['dollar_amount'].sum():,.0f}", BLUE),
+            stat_block("Whale bettors",   str(len(whales)),            TEAL),
+            stat_block("Whale share",     f"{wpct}%",                  TEAL),
+            stat_block("Whale winnings",  f"${whale_winnings:,.0f}",  TEAL),
+            stat_block("Whale win / vol", f"{whale_winnings_pct}%",   TEAL),
+            stat_block("Crowd bettors",   f"{len(crowd):,}",           BLUE),
+            stat_block("Crowd avg bet",   f"${crowd['dollar_amount'].mean():,.0f}", BLUE),
 
-    app.layout = html.Div(
-        style={
-            "minHeight": "100vh",
-            "background": "#f8fafc",
-            "fontFamily": "Inter, system-ui, sans-serif",
-        },
-        children=[
-            # ── top bar ──────────────────────────────────────────────────────
-            html.Div(
-                style={
-                    "background": "#ffffff",
-                    "borderBottom": "1px solid #e5e7eb",
-                    "padding": "28px 48px 0",
-                },
-                children=[
-                    html.H1(
-                        "Betting Pattern Analysis",
-                        style={
-                            "fontSize": "1.25rem",
-                            "fontWeight": "700",
-                            "color": "#0f172a",
-                            "letterSpacing": "-0.02em",
-                        },
-                    ),
-                    html.P(
-                        market_title,
-                        style={
-                            "fontSize": "0.82rem",
-                            "color": "#6b7280",
-                            "marginTop": "4px",
-                            "maxWidth": "700px",
-                            "lineHeight": "1.5",
-                        },
-                    ),
-                    # stats ───────────────────────────────────────────────────
-                    html.Div(
-                        style={
-                            "display": "flex",
-                            "gap": "44px",
-                            "margin": "22px 0 0",
-                            "flexWrap": "wrap",
-                        },
-                        children=[
-                            stat_block("Total volume",    f"${total_vol:,.0f}"),
-                            stat_block("Whale threshold", f"\u2265 ${threshold:,.0f}", TEAL),
-                            stat_block("Whale bettors",   str(len(whales)),            TEAL),
-                            stat_block("Whale share",     f"{wpct}%",                  TEAL),
-                            stat_block("Crowd bettors",   f"{len(crowd):,}",           BLUE),
-                        ],
-                    ),
-                    # events ──────────────────────────────────────────────────
-                    html.Div(
-                        style={
-                            "display": "flex",
-                            "gap": "24px",
-                            "margin": "14px 0 0",
-                            "flexWrap": "wrap",
-                        },
-                        children=[
-                            html.Span(
-                                f"{lbl}  \u00b7  {dt.strftime('%b %d, %H:%M')}",
-                                style={"fontSize": "0.74rem", "color": RED},
-                            )
-                            for dt, lbl in sorted(events.items())
-                        ],
-                    ),
-                    # tabs ────────────────────────────────────────────────────
-                    dcc.Tabs(
-                        id="tabs",
-                        value="whales",
-                        style={"marginTop": "20px", "border": "none"},
-                        children=[
-                            dcc.Tab(label="Whale Timing", value="whales",
-                                    style=_T, selected_style=_TS),
-                            dcc.Tab(label="Crowd Volume", value="crowd",
-                                    style=_T, selected_style=_TS),
-                            dcc.Tab(label="Comparison",   value="cmp",
-                                    style=_T, selected_style=_TS),
-                        ],
-                    ),
-                ],
-            ),
-            # ── chart ────────────────────────────────────────────────────────
-            html.Div(
-                style={"padding": "0 48px 52px", "background": "#f8fafc"},
-                children=[
-                    html.Div(
-                        id="chart-content",
-                        style={
-                            "background": "#ffffff",
-                            "borderRadius": "0 8px 8px 8px",
-                            "overflow": "hidden",
-                            "boxShadow": "0 1px 3px rgba(0,0,0,0.07)",
-                        },
-                    ),
-                ],
-            ),
-            # ── footer ───────────────────────────────────────────────────────
-            html.Div(
-                "Polymarket \u00b7 Rigged Outcomes \u00b7 Data via Polymarket API",
-                style={
-                    "textAlign": "center",
-                    "padding": "14px 48px",
-                    "fontSize": "0.68rem",
-                    "color": MUTED,
-                    "borderTop": "1px solid #e5e7eb",
-                    "background": "#ffffff",
-                },
-            ),
+
         ],
+        events,
+        time_ranges,
+        default_range
     )
 
 
-    @app.callback(Output("chart-content", "children"), Input("tabs", "value"))
-    def render_tab(tab):
-        fig = {"whales": fig_whales, "crowd": fig_crowd, "cmp": fig_comparison}[tab]()
+    @app.callback(
+        Output("chart-content", "children"),
+        Input("tabs", "value"),
+        Input("show-odds-toggle", "checked"),
+        Input("time-range-selector", "value"),
+    )
+    def render_tab(tab, show_odds_checked, selected_range):
+        show_odds = bool(show_odds_checked)
+        fig = {
+            "whales": lambda: fig_whales(show_odds=show_odds),
+            "crowd": lambda: fig_crowd(show_odds=show_odds),
+            "cmp": lambda: fig_comparison(show_odds=show_odds),
+        }[tab]()
+        apply_time_range(fig, selected_range)
         return dcc.Graph(
             figure=fig,
-            config={"displayModeBar": False},
-            style={"height": "540px"},
+            config={"displayModeBar": True, "responsive": True},
+            style={"height": "640px", "background": "#fff"},
         )
 
     print(f"\n  Market  : {market_title}")

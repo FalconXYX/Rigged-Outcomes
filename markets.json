@@ -14,32 +14,68 @@
       "0xa4eb52229991c074bc560f825bf2776d77acd010": "nothingeverhappens911",
       "0xfe6eee00d36717359578ddb4d6e091d56bc9074e": "Skoobidoobnj",
       "0xb01a466c430119c47b02052d99c859d7bf63f311": "Katzhgvhjbvccxd"
-    }
+    },
+    "timeRanges": {
+      "Total": {
+        "start": "2026-01-19-16:30",
+        "end": "2026-02-28-04:32"
+      },
+      "Normal": {
+        "start": "2026-02-04-00:00",
+        "end": "2026-02-13-06:12"
+      },
+      "Strikes": {
+        "start": "2026-02-28-01:12",
+        "end": "2026-02-28-04:32"
+      },
+      "Leadup": {
+        "start": "2026-02-26-00:00",
+        "end": "2026-02-28-04:00"
+      }
+    },
+    "correct_outcome": "Yes"
   },
   {
     "name": "superbowl",
     "slug": "will-tit-me-pregunt-be-played-first-at-the-super-bowl-halftime-show",
-    "output": "SuperbowlFirstSong"
+    "output": "SuperbowlFirstSong",
+    "correct_outcome": "No"
   },
   {
     "name": "tarrif",
     "slug": "will-the-supreme-court-rule-in-favor-of-trumps-tariffs",
-    "output": "SupremeCourtTariffRuling"
+    "output": "SupremeCourtTariffRuling",
+    "correct_outcome": "No",
+    "importantDates": {
+      "2026-02-20-10:02": "Decision Published"
+    },
+    "timeRanges": {
+      "Total": {
+        "start": "2025-09-02-16:30",
+        "end": "2026-02-20-18:00"
+      },
+      "Leadup": {
+        "start": "2026-02-15-00:00",
+        "end": "2026-02-20-18:00"
+      }
+    }
   },
-
   {
     "name": "fired",
     "slug": "kristi-noem-out-by-march-31",
-    "output": "KristiNoemFiredMarch31"
+    "output": "KristiNoemFiredMarch31",
+    "correct_outcome": "Yes"
   },
   {
     "name": "maduro",
     "slug": "maduro-out-by-january-31-2026-318",
-    "output": "MaduroOut"
+    "output": "MaduroOut",
+    "correct_outcome": "Yes"
   },
   {
     "name": "openai",
     "slug": "openai-browser-in-2025",
-    "output": "OpenAIBrowser2025"
+    "output": "OpenAIBrowser2025",
+    "correct_outcome": "Yes"
   }
 ]

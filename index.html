@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Interactive Threat Radar: Prediction Markets</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+
+<body>
+
+    <div class="app-container">
+        <aside class="sidebar">
+            <h1>Tracking Market Manipulation</h1>
+            <p class="intro">Prediction markets are vulnerable to coordinated attacks. This radar maps betting patterns
+                for the <strong>"US strikes Iran by Feb 28"</strong> market.</p>
+
+            <div class="stats-board">
+                <div class="stat-box">
+                    <span class="stat-label">Total Whale Volume</span>
+                    <span class="stat-value" id="stat-total-vol">$0</span>
+                </div>
+                <div class="stat-row">
+                    <div class="stat-box sub-stat">
+                        <span class="stat-label">Suspicious Vol</span>
+                        <span class="stat-value danger" id="stat-suspicious-vol">$0</span>
+                    </div>
+                    <div class="stat-box sub-stat">
+                        <span class="stat-label">% Suspicious</span>
+                        <span class="stat-value danger" id="stat-pct-suspicious">0%</span>
+                    </div>
+                </div>
+                <div class="stat-row">
+                    <div class="stat-box sub-stat">
+                        <span class="stat-label">Total Whales</span>
+                        <span class="stat-value" id="stat-total-whales">0</span>
+                    </div>
+                    <div class="stat-box sub-stat">
+                        <span class="stat-label">Flagged Accounts</span>
+                        <span class="stat-value danger" id="stat-flagged">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <h3>Threat Clusters</h3>
+                <p class="instruction">Toggle categories to filter the market.</p>
+                <button class="filter-btn active" data-category="Critical Risk (Both Flags)"
+                    style="border-left: 8px solid #be123c;">
+                    <strong>Critical Risk</strong>
+                    <span>>80% Concentration & <10 Bets</span>
+                </button>
+                <button class="filter-btn active" data-category="Suspicious (>80.0% Concentration)"
+                    style="border-left: 8px solid #ea580c;">
+                    <strong>High Concentration</strong>
+                    <span>>80% Portfolio Share</span>
+                </button>
+                <button class="filter-btn active" data-category="Suspicious (New Account(10 Trades))"
+                    style="border-left: 8px solid #d77a61;">
+                    <strong>New Accounts</strong>
+                    <span>
+                        <10 Prior Bets</span>
+                </button>
+                <button class="filter-btn active" data-category="Normal Whale" style="border-left: 8px solid #0f766e;">
+                    <strong>Normal Whales</strong>
+                    <span>Established Traders</span>
+                </button>
+            </div>
+        </aside>
+
+        <main id="viz-container">
+            <div class="tooltip" id="tooltip"></div>
+
+            <div class="timeline-container">
+                <button id="play-btn">▶ Play Time-Lapse</button>
+                <div class="slider-wrapper">
+                    <span id="current-date-display">Date</span>
+                    <input type="range" id="time-slider" min="0" max="100" value="100">
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

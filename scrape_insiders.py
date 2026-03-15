@@ -18,7 +18,6 @@ PAGE_SIZE = 500
 FIRST_X_TRADES = 10
 PERCENT_VOLUME = 80.0
 
-# 1. EXACT API FETCHING FUNCTION FROM THE ACCURATE DATA VERSION
 def fetch_user_history_up_to(user_address, cutoff_ts):
     all_rows = []
     offset = 0
@@ -68,7 +67,9 @@ def analyze_whale(row):
     
     target_pos = float(row["dollar_amount"])
     
-    # Exact timestamp logic from the working version
+    # Extract the temporal element for the CSV
+    trade_time = str(row["first_trade"])
+    
     cutoff_dt = pd.to_datetime(row["first_trade"])
     cutoff_ts = int(cutoff_dt.timestamp())
     
@@ -94,14 +95,15 @@ def analyze_whale(row):
         is_percent = True
         
     return {
-        "user_id": row["user_id"], # Keep original proxy wallet for your visualizer to read
+        "user_id": row["user_id"], 
         "market_position": target_pos,
         "lifetime_portfolio": lifetime_portfolio,
         "prior_bet_count": prior_bet_count,
         "portfolio_concentration": round(concentration, 2),
         "is_first_x": is_first_x,
         "Is_percent": is_percent,
-        "is_suspicious": is_first_x or is_percent
+        "is_suspicious": is_first_x or is_percent,
+        "target_trade_time": trade_time
     }
 
 def main(keyword=None):
@@ -132,7 +134,6 @@ def main(keyword=None):
     market_title = df["market_title"].iloc[0] if "market_title" in df.columns else m["name"]
     highlighted = m.get("highlightedUsers", {})
 
-    # 2. EXACT WHALE SELECTION BLOCK THAT SECURES ALL 642 ENTRIES
     total_vol  = df["dollar_amount"].sum()
     threshold  = min(5000.0, 0.001 * total_vol)
     if threshold < 1000:

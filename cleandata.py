@@ -39,6 +39,7 @@ def main(input_csv: str = INPUT_CSV, output_csv: str = OUTPUT_CSV) -> None:
         assert g.meta is not None
         clean.append({
             "user_id":       user_id,
+            "eoa_address":   g.meta.get("eoa_address", ""),
             "market_id":     g.meta["market_id"],
             "market_title":  g.meta["market_title"],
             "outcome":       outcome,

@@ -124,10 +124,11 @@ def get_win_status(market, outcome_index):
         return "UNRESOLVED"
 
 
-def format_row(activity, market):
+def format_row(activity, market, eoa_address=""):
     ts = int(activity["timestamp"])
     return {
         "user_id":          activity["proxyWallet"],
+        "eoa_address":      eoa_address,
         "side":             activity.get("side", ""),
         "market_id":        market.get("conditionId", ""),
         "market_title":     market.get("question", ""),
@@ -176,9 +177,10 @@ def main(slug=SLUG, output=OUTPUT_CSV):
         futures = {pool.submit(_fetch_user_activity, addr, condition_id): addr
                    for addr in addresses}
         for future in as_completed(futures):
+            addr = futures[future]
             rows = future.result()
             for row in rows:
-                all_trades.append(format_row(row, market))
+                all_trades.append(format_row(row, market, addr))
             done += 1
             if done % 1000 == 0 or done == total:
                 print(f"  {done:,}/{total:,} wallets  |  {len(all_trades):,} trades", flush=True)

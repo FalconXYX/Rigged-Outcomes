@@ -71,7 +71,8 @@ d3.csv("../data/USxIranStrikesFeb28_insiders.csv").then((data) => {
     d.portfolio_concentration = +d.portfolio_concentration;
     d.prior_bet_count = +d.prior_bet_count;
 
-    let parsedDate = new Date(d.trade_date);
+    // FIX: Look for target_trade_time instead of trade_date
+    let parsedDate = new Date(d.target_trade_time);
     if (isNaN(parsedDate.getTime())) {
       parsedDate = new Date(fallbackStartDate + i * 1000 * 60 * 60 * 4);
     }
@@ -180,7 +181,7 @@ d3.csv("../data/USxIranStrikesFeb28_insiders.csv").then((data) => {
                     <div class="tooltip-row"><span class="tooltip-label">Concentration:</span> <span>${d.portfolio_concentration.toFixed(1)}%</span></div>
                 `,
           )
-          .style("left", event.pageX + 20 + "px")
+          .style("left", event.pageX - 300 + "px")
           .style("top", event.pageY - 20 + "px");
       })
       .on("mouseout", function (event, d) {

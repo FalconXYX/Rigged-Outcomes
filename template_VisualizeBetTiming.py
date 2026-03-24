@@ -104,6 +104,14 @@ def material_layout(market_title, stats, events, time_ranges, default_range):
                                         gap=20,
                                         children=[
                                             dmc.Switch(
+                                                id="filter-stats-toggle",
+                                                label="Filter stats to time range",
+                                                checked=False,
+                                                color="custom", # Jet Black
+                                                size="sm",
+                                                fw=600,
+                                            ),
+                                            dmc.Switch(
                                                 id="show-odds-toggle",
                                                 label="Show odds axis",
                                                 checked=True,
@@ -142,6 +150,7 @@ def material_layout(market_title, stats, events, time_ranges, default_range):
                             dmc.Divider(my="lg", color="#dbd3d8"),
 
                             dmc.Stack(
+                                id="stats-container",
                                 gap="md",
                                 children=[
                                     dmc.Group(

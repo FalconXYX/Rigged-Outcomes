@@ -25,12 +25,16 @@
         "end": "2026-02-13-06:12"
       },
       "Strikes": {
-        "start": "2026-02-28-01:12",
+        "start": "2026-02-28-01:10",
         "end": "2026-02-28-04:32"
       },
       "Leadup": {
         "start": "2026-02-26-00:00",
-        "end": "2026-02-28-04:00"
+        "end": "2026-02-28-01:08"
+      },
+      "PreArbitrage": {
+        "start": "2026-01-19-16:30",
+        "end": "2026-02-28-01:08"
       }
     },
     "correct_outcome": "Yes"
@@ -76,6 +80,12 @@
     "name": "openai",
     "slug": "openai-browser-in-2025",
     "output": "OpenAIBrowser2025",
+    "correct_outcome": "Yes"
+  },
+  {
+    "name": "oscars",
+    "slug": "oscars-2026-best-actor-winner/will-michael-b-jordan-win-best-actor-at-the-98th-academy-awards#qFhj5vcG",
+    "output": "OscarsBestActor",
     "correct_outcome": "Yes"
   }
 ]

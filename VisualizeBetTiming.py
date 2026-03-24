@@ -26,7 +26,7 @@ def visualize(keyword=None, port=5001):
     else:
         m = ALL_MARKETS[0]
     
-    # ── 1. Load data ─────────────────────────────────────────────────────────
+    # -- 1. Load data ---------------------------------------------------------
     df = pd.read_csv(f"data/{m['output']}_clean.csv")
     for col in ("first_trade", "last_trade"):
         df[col] = (pd.to_datetime(df[col], utc=True)
@@ -68,7 +68,7 @@ def visualize(keyword=None, port=5001):
                 .median()
             )
 
-    # ── 2. Whale / crowd split ───────────────────────────────────────────────
+    # -- 2. Whale / crowd split -----------------------------------------------
     total_vol  = df["dollar_amount"].sum()
     threshold  = min(5000.0, 0.001 * total_vol)
     if threshold < 1000:
@@ -104,35 +104,42 @@ def visualize(keyword=None, port=5001):
         else float(r["dollar_amount"]),
         axis=1,
     )
-    def gross_winnings(stake, odds):
-        implied_odds = float(odds)
-        if implied_odds > 1:
-            implied_odds = implied_odds / 100.0
-        if implied_odds <= 0:
-            return 0.0
-        return float(stake) / implied_odds    # Total take-home (Stake + Profit)
 
-    # Calculate gross payout for whales using odds as implied probability (0 if they lost)
+    def get_net_profit(row):
+        stake = float(row["dollar_amount"])
+        # Prefer using contracts as it's the literal payout on Polymarket ($1 per contract)
+        if "contracts" in row and pd.notnull(row["contracts"]):
+            payout = float(row["contracts"])
+        else:
+            implied_odds = float(row["avg_odds"])
+            if implied_odds > 1:
+                implied_odds = implied_odds / 100.0
+            if implied_odds <= 0.001: # Prevent division by zero or extreme ballooning
+                implied_odds = 0.001
+            payout = stake / implied_odds
+            
+        # Return Net Profit rather than Gross Payout
+        return max(0.0, payout - stake)
+
+    # Calculate net profit for whales (0 if they lost)
     whales["win_amount"] = whales.apply(
-        lambda r: gross_winnings(r["dollar_amount"], r["avg_odds"]) if r.get("is_winner", True) else 0.0,
+        lambda r: get_net_profit(r) if r.get("is_winner", True) else 0.0,
         axis=1,
     )
     
-    # Calculate total market winnings to correctly denominate the percentage
+    # Calculate total market net profit to correctly denominate the percentage
     df_winners = df[df["is_winner"]]
-    total_market_winnings = df_winners.apply(
-        lambda r: gross_winnings(r["dollar_amount"], r["avg_odds"]), axis=1
-    ).sum()
+    total_market_winnings = df_winners.apply(get_net_profit, axis=1).sum()
 
     crowd["hour"] = crowd["first_trade"].dt.floor("h")
     hourly        = crowd.groupby("hour")["dollar_amount"].sum().reset_index(name="vol")
     hourly["avg"] = hourly["vol"].rolling(6, min_periods=1, center=True).mean()
 
-    # ── 3. Key events ────────────────────────────────────────────────────────
+    # -- 3. Key events --------------------------------------------------------
     events = {}
     for k, v in m.get("importantDates", {}).items():
         try:
-            # JSON times are EST — trades are now also in EST, so use directly
+            # JSON times are EST - trades are now also in EST, so use directly
             events[pd.to_datetime(k, format="%Y-%m-%d-%H:%M")] = v
         except Exception:
             pass
@@ -149,7 +156,7 @@ def visualize(keyword=None, port=5001):
 
     default_range = "Total" if "Total" in time_ranges else (next(iter(time_ranges), None))
 
-    # ── 4. Colours ───────────────────────────────────────────────────────────
+    # -- 4. Colours -----------------------------------------------------------
     JET_BLACK   = "#223843"
     PLATINUM    = "#eff1f3"
     DUST_GREY   = "#dbd3d8"
@@ -159,7 +166,7 @@ def visualize(keyword=None, port=5001):
     TEAL  = "#0f766e"
     BLUE  = "#1d4ed8"
     RED   = "#be123c"
-    HIGH  = "#ea580c"   # orange — highlighted users
+    HIGH  = "#ea580c"   # orange - highlighted users
     
     GRAY  = DUST_GREY
     MUTED = "#9ca3af"
@@ -226,9 +233,9 @@ def visualize(keyword=None, port=5001):
             hovertemplate="<b>Odds:</b> %{y:.1f}%<br>%{x|%b %d · %H:%M}<extra></extra>",
         ))
 
-    # ── 5. Figures ───────────────────────────────────────────────────────────
+    # -- 5. Figures -----------------------------------------------------------
     def _whale_traces(fig, df_w, yaxis=None):
-        """Add whale scatter traces to fig — teal for normal, orange+label for highlighted."""
+        """Add whale scatter traces to fig - teal for normal, orange+label for highlighted."""
         if not len(df_w):
             return
         mx    = df_w["display_dollar"].max() or 1
@@ -238,7 +245,7 @@ def visualize(keyword=None, port=5001):
         normal   = df_w[~hi_mask]
         hi_users = df_w[hi_mask]
 
-        # Normal whales — teal dots
+        # Normal whales - teal dots
         if len(normal):
             sz = normal["display_dollar"].values
             fig.add_trace(go.Scatter(
@@ -253,7 +260,7 @@ def visualize(keyword=None, port=5001):
                     "<b>User:</b> %{customdata[0]}<br>"
                     "<b>Bet:</b> $%{customdata[1]:,.0f}<br>"
                     "<b>Odds:</b> %{customdata[2]:.2f}<br>"
-                    "<b>Winnings:</b> $%{customdata[3]:,.0f}<br>"
+                    "<b>Net Profit:</b> $%{customdata[3]:,.0f}<br>"
                     "%{x|%b %d · %H:%M}<extra></extra>"
                 ),
                 customdata=np.stack([
@@ -265,7 +272,7 @@ def visualize(keyword=None, port=5001):
                 **extra,
             ))
 
-        # Highlighted users — orange dots with name label above
+        # Highlighted users - orange dots with name label above
         for _, row in hi_users.iterrows():
             label   = highlighted.get(row["user_id"], row["user_id"][:8])
             disp    = row["display_dollar"]
@@ -286,7 +293,7 @@ def visualize(keyword=None, port=5001):
                     f"<b>{label}</b><br>"
                     f"<b>Bet:</b> ${row['dollar_amount']:,.0f}<br>"
                     f"<b>Odds:</b> {row['avg_odds']:.2f}<br>"
-                    f"<b>Winnings:</b> ${row['win_amount'] if 'win_amount' in row else 0:,.0f}<br>"
+                    f"<b>Net Profit:</b> ${row['win_amount'] if 'win_amount' in row else 0:,.0f}<br>"
                     f"%{{x|%b %d · %H:%M}}<extra></extra>"
                 ),
                 **extra,
@@ -408,14 +415,15 @@ def visualize(keyword=None, port=5001):
         )
         return fig
 
-    # ── 6. Dash app ───────────────────────────────────────────────────────────
+    # -- 6. Dash app ----------------------------------------------------------
     whale_vol_sum = whales["dollar_amount"].sum()
     wpct = round(whale_vol_sum / total_vol * 100, 1) if total_vol else 0.0
     
-    # Calculate exactly how much money the whales "took home" in gross payouts
+    # Calculate exactly how much money the whales "took home" in net profit
     whale_winnings = whales["win_amount"].sum() if len(whales) else 0.0
-    # The percentage of the total market volume that was taken home by the whales
-    whale_winnings_pct = round(whale_winnings / total_vol * 100, 1) if total_vol else 0.0
+    
+    # The percentage of the total market profit that was taken home by the whales
+    whale_winnings_pct = round(whale_winnings / total_market_winnings * 100, 1) if total_market_winnings else 0.0
 
     _T = dict(
         padding="10px 24px 12px",
@@ -467,9 +475,7 @@ def visualize(keyword=None, port=5001):
             stat_block("Whale winnings",  f"${whale_winnings:,.0f}",  TEAL),
             stat_block("Whale win / vol", f"{whale_winnings_pct}%",   TEAL),
             stat_block("Crowd bettors",   f"{len(crowd):,}",           BLUE),
-            stat_block("Crowd avg bet",   f"${crowd['dollar_amount'].mean():,.0f}", BLUE),
-
-
+            stat_block("Average bet",   f"${crowd['dollar_amount'].mean():,.0f}", BLUE),
         ],
         events,
         time_ranges,
@@ -496,6 +502,66 @@ def visualize(keyword=None, port=5001):
             config={"displayModeBar": True, "responsive": True},
             style={"height": "640px", "background": "#fff"},
         )
+
+    @app.callback(
+        Output("stats-container", "children"),
+        Input("time-range-selector", "value"),
+        Input("filter-stats-toggle", "checked")
+    )
+    def update_stats(selected_range, is_filtered):
+        if is_filtered and selected_range and selected_range in time_ranges:
+            spec = time_ranges[selected_range]
+            
+            def filter_df(d):
+                return d[(d["first_trade"] >= spec["start"]) & (d["first_trade"] <= spec["end"])]
+                
+            f_whales = filter_df(whales)
+            f_crowd = filter_df(crowd)
+            f_df_winners = filter_df(df_winners)
+            
+            f_total_vol = f_whales["dollar_amount"].sum() + f_crowd["dollar_amount"].sum()
+            f_whale_winnings = f_whales["win_amount"].sum() if len(f_whales) else 0.0
+            f_total_market_winnings = f_df_winners.apply(get_net_profit, axis=1).sum() if len(f_df_winners) else 0.0
+        else:
+            f_whales = whales
+            f_crowd = crowd
+            f_total_vol = total_vol
+            f_whale_winnings = whale_winnings
+            f_total_market_winnings = total_market_winnings
+            
+        wpct = round(f_whales["dollar_amount"].sum() / f_total_vol * 100, 1) if f_total_vol else 0.0
+        wwpct = round(f_whale_winnings / f_total_market_winnings * 100, 1) if f_total_market_winnings else 0.0
+        
+        crowd_mean = f_crowd['dollar_amount'].mean()
+        crowd_mean_val = f"${crowd_mean:,.0f}" if pd.notnull(crowd_mean) else "$0"
+
+        updated_stats = [
+            stat_block("Total volume",    f"${f_total_vol:,.0f}"),
+            stat_block("Whale threshold", f"\u2265 ${threshold:,.0f}", TEAL),
+            stat_block("Whale volume",    f"${f_whales['dollar_amount'].sum():,.0f}", BLUE),
+            stat_block("Crowd volume",    f"${f_crowd['dollar_amount'].sum():,.0f}", BLUE),
+            stat_block("Whale bettors",   str(len(f_whales)),            TEAL),
+            stat_block("Whale share",     f"{wpct}%",                  TEAL),
+            stat_block("Whale winnings",  f"${f_whale_winnings:,.0f}",  TEAL),
+            stat_block("Whale win / vol", f"{wwpct}%",   TEAL),
+            stat_block("Crowd bettors",   f"{len(f_crowd):,}",           BLUE),
+            stat_block("Crowd avg bet",   crowd_mean_val, BLUE),
+        ]
+        
+        return [
+            dmc.Group(
+                children=updated_stats[:len(updated_stats)//2] if updated_stats else [],
+                gap=12,
+                grow=True,
+                wrap="nowrap",
+            ),
+            dmc.Group(
+                children=updated_stats[len(updated_stats)//2:] if updated_stats else [],
+                gap=12,
+                grow=True,
+                wrap="nowrap",
+            )
+        ]
 
     print(f"\n  Market  : {market_title}")
     print(f"  Rows    : {len(df):,}")

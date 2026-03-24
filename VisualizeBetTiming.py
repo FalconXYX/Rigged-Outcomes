@@ -475,7 +475,7 @@ def visualize(keyword=None, port=5001):
             stat_block("Whale winnings",  f"${whale_winnings:,.0f}",  TEAL),
             stat_block("Whale win / vol", f"{whale_winnings_pct}%",   TEAL),
             stat_block("Crowd bettors",   f"{len(crowd):,}",           BLUE),
-            stat_block("Crowd avg bet",   f"${crowd['dollar_amount'].mean():,.0f}", BLUE),
+            stat_block("Average bet",   f"${crowd['dollar_amount'].mean():,.0f}", BLUE),
         ],
         events,
         time_ranges,

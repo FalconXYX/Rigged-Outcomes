@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>The Story: Insider Trading Radar</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body class="intro-body">
+
+    <div class="intro-layout">
+        <div class="narrative-card">
+            <div class="radar-icon-container">
+                <div class="radar-pulse"></div>
+            </div>
+
+            <h1 class="intro-title" id="type-title"></h1>
+
+            <div id="briefing-content">
+            </div>
+
+            <div id="scroll-indicator"
+                style="opacity: 0; transition: opacity 1s ease; text-align: center; margin-top: 40px; color: #64748b; font-weight: bold; font-size: 16px;">
+                ↓ Scroll down to enter the radar ↓
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const titleText = "The Anatomy of a Rigged Market";
+
+        // Updated with your exact narrative text
+        const paragraphs = [
+            { text: "Prediction markets allow people to bet money on real world events. However, increasingly insiders are betting with information that no one else has.", type: "p" },
+            { text: "In 2026, amid rising geopolitical tensions a market was created: Will the US strike Iran by February 28th?", type: "p" },
+            { text: "Polymarket claims this is to \"harness the wisdom of the crowd to forecasts for the most important events to society\" buzz, but is it actually the wisdom of the crowd they are using or are these markets being manipulated by people with insider information and a lot of money to throw around?", type: "p" },
+            { text: "Research Question: To what extent do bets on prediction markets exhibit patterns consistent with insider trading?", type: "box" },
+            { text: "This visualization provides a comprehensive view of the market dynamics and helps identify potential manipulation.", type: "p" }
+        ];
+
+        let currentPIndex = 0;
+        let currentCharIndex = 0;
+        const speed = 20; // Typing speed in milliseconds
+
+        // This lock prevents scrolling until the text is finished
+        let typingDone = false;
+
+        function typeTitle() {
+            if (currentCharIndex < titleText.length) {
+                document.getElementById("type-title").innerHTML += titleText.charAt(currentCharIndex);
+                currentCharIndex++;
+                setTimeout(typeTitle, speed * 2);
+            } else {
+                currentCharIndex = 0;
+                setTimeout(typeParagraphs, 500);
+            }
+        }
+
+        function typeParagraphs() {
+            if (currentPIndex < paragraphs.length) {
+                const pData = paragraphs[currentPIndex];
+
+                if (currentCharIndex === 0) {
+                    const el = document.createElement("div");
+                    el.className = pData.type === "box" ? "highlight-box" : "story-text";
+                    el.id = "p-" + currentPIndex;
+                    document.getElementById("briefing-content").appendChild(el);
+                }
+
+                if (currentCharIndex < pData.text.length) {
+                    document.getElementById("p-" + currentPIndex).innerHTML += pData.text.charAt(currentCharIndex);
+                    currentCharIndex++;
+                    setTimeout(typeParagraphs, speed);
+                } else {
+                    currentPIndex++;
+                    currentCharIndex = 0;
+                    setTimeout(typeParagraphs, 400);
+                }
+            } else {
+                // Reveal the scroll instruction and unlock the page
+                document.getElementById("scroll-indicator").style.opacity = "1";
+                typingDone = true;
+            }
+        }
+
+        // Start the animation when the page loads
+        window.onload = () => setTimeout(typeTitle, 500);
+
+        // --- NAVIGATION LOGIC ---
+
+        // 1. Mouse Wheel Scrolling
+        window.addEventListener('wheel', (e) => {
+            if (typingDone && e.deltaY > 0) {
+                window.location.href = 'index.html';
+            }
+        });
+
+        // 2. Keyboard Arrows / Spacebar
+        window.addEventListener('keydown', (e) => {
+            if (typingDone && (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === ' ')) {
+                window.location.href = 'index.html';
+            }
+        });
+
+        // 3. Mobile Touch Swiping
+        let touchstartY = 0;
+        window.addEventListener('touchstart', e => {
+            touchstartY = e.changedTouches[0].screenY;
+        });
+        window.addEventListener('touchend', e => {
+            let touchendY = e.changedTouches[0].screenY;
+            // If they swiped upwards (scrolling down the page)
+            if (typingDone && touchendY < touchstartY - 30) {
+                window.location.href = 'index.html';
+            }
+        });
+    </script>
+</body>
+
+</html>

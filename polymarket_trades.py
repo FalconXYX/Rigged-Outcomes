@@ -12,7 +12,6 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -31,10 +30,7 @@ PAGE_SIZE = 500   # Data API page size (max 500)
 OPERATORS = {
     "0x4bfb41d5b357570702fe9f19e29c4a26df9a28d6",
 }
-
-
 # ── Step 1: subgraph — addresses only ─────────────────────────────────────────
-
 def get_market(slug):
     resp = requests.get(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=15)
     resp.raise_for_status()
@@ -42,8 +38,6 @@ def get_market(slug):
     if not results:
         raise ValueError(f"Market not found: {slug}")
     return results[0]
-
-
 def _paginate_addresses(token_id, asset_field):
     """Minimal subgraph query — only fetches maker/taker addresses, no amounts."""
     addresses = set()
@@ -80,7 +74,6 @@ def get_all_addresses(market):
     addresses -= OPERATORS
     return addresses
 
-
 # ── Step 2: Data API — per-user activity ──────────────────────────────────────
 
 def _fetch_user_activity(address, condition_id):
@@ -113,7 +106,6 @@ def _fetch_user_activity(address, condition_id):
             time.sleep(1)
     return all_rows
 
-
 def get_win_status(market, outcome_index):
     if not market.get("closed"):
         return "UNRESOLVED"
@@ -122,7 +114,6 @@ def get_win_status(market, outcome_index):
         return "WIN" if prices[int(outcome_index)] == "1" else "LOSS"
     except (IndexError, ValueError, TypeError):
         return "UNRESOLVED"
-
 
 def format_row(activity, market, eoa_address=""):
     ts = int(activity["timestamp"])
@@ -141,7 +132,6 @@ def format_row(activity, market, eoa_address=""):
         "transaction_hash": activity.get("transactionHash", ""),
     }
 
-
 # ── Save ──────────────────────────────────────────────────────────────────────
 
 def save_csv(trades, path):
@@ -155,20 +145,16 @@ def save_csv(trades, path):
         writer.writerows(trades)
     print(f"Saved {len(trades):,} trades -> {path}")
 
-
 # ── Main ──────────────────────────────────────────────────────────────────────
-
 def main(slug=SLUG, output=OUTPUT_CSV):
     market       = get_market(slug)
     condition_id = market["conditionId"]
     print(f"Market : {market.get('question')}")
     print(f"Status : {'Resolved' if market.get('closed') else 'Open'}")
-
     # Step 1
     print("\nStep 1: Collecting wallet addresses from subgraph...")
     addresses = get_all_addresses(market)
     print(f"Found {len(addresses):,} unique wallets\n")
-
     # Step 2
     print(f"Step 2: Fetching activity from Data API ({WORKERS} workers)...")
     all_trades, done, total = [], 0, len(addresses)
@@ -190,8 +176,6 @@ def main(slug=SLUG, output=OUTPUT_CSV):
     if output:
         save_csv(all_trades, output)
     return all_trades
-
-
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()

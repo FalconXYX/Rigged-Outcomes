@@ -326,14 +326,24 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
   let playing = false;
   let playInterval;
 
+  // Calculate 4 increments per day
+  const totalDays = (maxTime - minTime) / (1000 * 60 * 60 * 24);
+  const totalSteps = Math.max(100, Math.ceil(totalDays * 4));
+  slider.max = totalSteps;
   slider.value = 0;
+
+  // Keep the same ~10 second total playback speed
+  const msPerStep = 10000 / totalSteps;
 
   function updateFromSlider() {
     const val = +slider.value;
-    currentFilterTime = minTime + (val / 100) * (maxTime - minTime);
+    currentFilterTime = minTime + (val / totalSteps) * (maxTime - minTime);
+
+    // Update display to show time for granularity (YYYY-MM-DD HH:mm)
     dateDisplay.innerText = new Date(currentFilterTime)
       .toISOString()
-      .split("T")[0];
+      .replace("T", " ")
+      .substring(0, 16);
     updateViz();
   }
 
@@ -346,20 +356,20 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
       playBtn.innerText = "▶ Play Time-Lapse";
       playing = false;
     } else {
-      if (+slider.value === 100) slider.value = 0;
+      if (+slider.value >= totalSteps) slider.value = 0;
       playBtn.innerText = "⏸ Pause";
       playing = true;
       playInterval = setInterval(() => {
         let nextVal = +slider.value + 1;
-        if (nextVal > 100) {
+        if (nextVal >= totalSteps) {
           clearInterval(playInterval);
           playBtn.innerText = "▶ Play Time-Lapse";
           playing = false;
-          nextVal = 100;
+          nextVal = totalSteps;
         }
         slider.value = nextVal;
         updateFromSlider();
-      }, 100);
+      }, msPerStep);
     }
   });
 

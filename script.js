@@ -242,8 +242,8 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
             <div class="tooltip-row"><span class="tooltip-label">Concentration:</span> <span>${d.portfolio_concentration.toFixed(1)}%</span></div>
         `,
       )
-      .style("left", event.pageX + -500 + "px")
-      .style("top", event.pageY - 20 + "px");
+      .style("left", event.pageX + -350 + "px")
+      .style("top", event.pageY + "px");
   };
 
   const hideTooltip = function (event, d) {

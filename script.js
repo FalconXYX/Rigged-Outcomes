@@ -2,9 +2,9 @@ const container = document.getElementById("viz-container");
 const width = container.clientWidth;
 const height = container.clientHeight;
 
-// Split the screen vertically: Top for Radar, Bottom for Timeline
-const radarHeight = height - 260;
-const timingHeight = 260;
+// Reduced height slightly so the timeline container fits underneath without overlapping
+const radarHeight = height - 190;
+const timingHeight = 170;
 
 const colors = {
   "Normal Whale": "#0f766e",
@@ -13,8 +13,6 @@ const colors = {
   "Critical Risk (Both Flags)": "#be123c",
 };
 
-// 1. Setup Top Radar SVG
-// Safely insert right before the size legend to ensure it is a direct child
 const svg = d3
   .select("#viz-container")
   .insert("svg", ".size-legend")
@@ -30,9 +28,13 @@ const zoom = d3
   .scaleExtent([0.3, 5])
   .on("zoom", (event) => zoomGroup.attr("transform", event.transform));
 svg.call(zoom);
-svg.call(zoom.transform, d3.zoomIdentity.translate(width / 2, radarHeight / 2));
 
-const maxRadius = Math.min(width, radarHeight) / 2 - 80;
+svg.call(
+  zoom.transform,
+  d3.zoomIdentity.translate(width / 2, radarHeight / 2).scale(0.85),
+);
+
+const maxRadius = Math.min(width, radarHeight) / 2 - 40;
 
 zoomGroup
   .append("circle")
@@ -68,15 +70,13 @@ zoomGroup
   .attr("fill", "#0f766e")
   .text("NORMAL ORBIT");
 
-// 2. Setup Bottom Timing SVG
-// Safely insert right before the size legend
 const timingSvg = d3
   .select("#viz-container")
   .insert("svg", ".size-legend")
   .attr("width", width)
   .attr("height", timingHeight)
   .style("position", "absolute")
-  .style("bottom", "80px")
+  .style("bottom", "55px")
   .style("left", "0")
   .style("background", "white")
   .style("border-top", "2px solid #e2e8f0");
@@ -136,7 +136,7 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
     const radiusScale = d3
       .scaleLinear()
       .domain([0, 100])
-      .range([maxRadius, 20]);
+      .range([maxRadius, 15]);
     d.r_dist = radiusScale(risk_score) + (Math.random() * 40 - 20);
 
     let hash = parseInt(d.user_id.substring(2, 8), 16);
@@ -156,11 +156,10 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
   const minTime = data[0].date.getTime();
   const maxTime = data[data.length - 1].date.getTime();
 
-  const sizeScale = d3.scaleSqrt().domain([0, maxPos]).range([5, 35]);
+  const sizeScale = d3.scaleSqrt().domain([0, maxPos]).range([3, 22]);
   let activeCategories = new Set(Object.keys(colors));
 
-  // 3. Setup Timing Chart Scales and Axes
-  const tMargin = { top: 20, right: 40, bottom: 30, left: 80 };
+  const tMargin = { top: 20, right: 40, bottom: 25, left: 80 };
   const xTime = d3
     .scaleTime()
     .domain([minTime, maxTime])
@@ -188,7 +187,6 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
         .tickFormat((d) => "$" + d3.format(".2s")(d)),
     );
 
-  // Add the playhead line
   const playhead = timingSvg
     .append("line")
     .attr("y1", tMargin.top)
@@ -220,11 +218,9 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
     document.getElementById("stat-flagged").innerText = uniqueFlagged;
   }
 
-  // Define the tooltip function so both charts can share it
   const showTooltip = function (event, d) {
     d3.select(this).attr("stroke", "#223843").attr("stroke-width", 3);
 
-    // Dim other nodes
     zoomGroup
       .selectAll(".node")
       .filter((n) => n !== d)
@@ -268,12 +264,10 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
 
     updateStatsPanel(visibleData);
 
-    // Update Playhead on bottom chart
     playhead
       .attr("x1", xTime(currentFilterTime))
       .attr("x2", xTime(currentFilterTime));
 
-    // Update Top Radar Nodes
     const nodes = zoomGroup
       .selectAll(".node")
       .data(visibleData, (d) => d.unique_id);
@@ -295,7 +289,6 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
 
     nodes.exit().remove();
 
-    // Update Bottom Timing Nodes
     const tNodes = timingDotsGroup
       .selectAll(".t-node")
       .data(visibleData, (d) => d.unique_id);
@@ -326,20 +319,17 @@ d3.csv("data/USxIranStrikesFeb28_insiders.csv").then((data) => {
   let playing = false;
   let playInterval;
 
-  // Calculate 4 increments per day
   const totalDays = (maxTime - minTime) / (1000 * 60 * 60 * 24);
   const totalSteps = Math.max(100, Math.ceil(totalDays * 4));
   slider.max = totalSteps;
   slider.value = 0;
 
-  // Keep the same ~10 second total playback speed
   const msPerStep = 10000 / totalSteps;
 
   function updateFromSlider() {
     const val = +slider.value;
     currentFilterTime = minTime + (val / totalSteps) * (maxTime - minTime);
 
-    // Update display to show time for granularity (YYYY-MM-DD HH:mm)
     dateDisplay.innerText = new Date(currentFilterTime)
       .toISOString()
       .replace("T", " ")

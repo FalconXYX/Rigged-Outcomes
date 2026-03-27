@@ -21,7 +21,7 @@
             </div>
 
             <div id="scroll-indicator"
-                style="opacity: 0; transition: opacity 1s ease; text-align: center; margin-top: 40px; color: #64748b; font-weight: bold; font-size: 16px;">
+                style="opacity: 0; transition: opacity 1s ease; text-align: center; margin-top: 30px; color: #64748b; font-weight: bold; font-size: 13px;">
                 ↓ Scroll down to enter the radar ↓
             </div>
         </div>
@@ -30,7 +30,6 @@
     <script>
         const titleText = "The Anatomy of a Rigged Market";
 
-        // Updated with your exact narrative text
         const paragraphs = [
             { text: "Prediction markets allow people to bet money on real world events. However, increasingly insiders are betting with information that no one else has.", type: "p" },
             { text: "In 2026, amid rising geopolitical tensions a market was created: Will the US strike Iran by February 28th?", type: "p" },
@@ -41,9 +40,8 @@
 
         let currentPIndex = 0;
         let currentCharIndex = 0;
-        const speed = 20; // Typing speed in milliseconds
+        const speed = 20;
 
-        // This lock prevents scrolling until the text is finished
         let typingDone = false;
 
         function typeTitle() {
@@ -78,39 +76,31 @@
                     setTimeout(typeParagraphs, 400);
                 }
             } else {
-                // Reveal the scroll instruction and unlock the page
                 document.getElementById("scroll-indicator").style.opacity = "1";
                 typingDone = true;
             }
         }
 
-        // Start the animation when the page loads
         window.onload = () => setTimeout(typeTitle, 500);
 
-        // --- NAVIGATION LOGIC ---
-
-        // 1. Mouse Wheel Scrolling
         window.addEventListener('wheel', (e) => {
             if (typingDone && e.deltaY > 0) {
                 window.location.href = 'vis.html';
             }
         });
 
-        // 2. Keyboard Arrows / Spacebar
         window.addEventListener('keydown', (e) => {
             if (typingDone && (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === ' ')) {
                 window.location.href = 'vis.html';
             }
         });
 
-        // 3. Mobile Touch Swiping
         let touchstartY = 0;
         window.addEventListener('touchstart', e => {
             touchstartY = e.changedTouches[0].screenY;
         });
         window.addEventListener('touchend', e => {
             let touchendY = e.changedTouches[0].screenY;
-            // If they swiped upwards (scrolling down the page)
             if (typingDone && touchendY < touchstartY - 30) {
                 window.location.href = 'vis.html';
             }

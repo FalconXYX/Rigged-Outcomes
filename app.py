@@ -1,9 +1,8 @@
 import json
-from dash import Dash, dcc, html, Input, Output
-
+from dash import Dash, dcc, html, Input, Output, _dash_renderer
 import VisualizeBetTiming
 import VisualizeInsiders
-
+_dash_renderer._set_react_version("18.2.0")
 # 1. Initialize the Master App
 # suppress_callback_exceptions is required because we are dynamically swapping layouts
 app = Dash(__name__, suppress_callback_exceptions=True)

@@ -12,6 +12,20 @@
   }
 }
 
+/* "← All markets": the way back to the list, small caps above the title. */
+.market-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  text-decoration: none;
+  transition: color var(--dur) var(--ease);
+}
+
+.market-back:hover {
+  color: var(--text);
+}
+
 .market-title {
   max-width: 40ch;
   overflow-wrap: anywhere;
@@ -45,7 +59,7 @@
   width: min(380px, 60%);
 }
 
-/* ── Toolbar: view tabs + market switcher ──────────────────────────── */
+/* ── Toolbar: view tabs ────────────────────────────────────────────── */
 
 .market-toolbar {
   position: relative;
@@ -129,21 +143,8 @@
   color: var(--text-2);
 }
 
-/* Market switcher: a flat select. */
-.switcher {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  margin-bottom: 7px;
-}
-
-.switcher .select select {
-  min-width: 200px;
-}
-
 @media (max-width: 639px) {
   .market-toolbar {
-    flex-direction: column-reverse;
     align-items: stretch;
   }
   .view-tabs {
@@ -153,19 +154,6 @@
   .view-tab:first-child {
     flex: 1 1 0;
     padding: 6px 6px 9px;
-  }
-  .switcher {
-    display: flex;
-    margin-bottom: 10px;
-  }
-  .switcher .select {
-    flex: 1;
-  }
-  .switcher .select select {
-    width: 100%;
-    min-width: 0;
-    padding-top: 7px;
-    padding-bottom: 7px;
   }
 }
 

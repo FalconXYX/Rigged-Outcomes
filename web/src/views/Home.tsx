@@ -40,7 +40,7 @@ const SHORT_TITLES: Record<string, string> = {
   oscars: "Oscars Best Actor",
 };
 
-/** Compact market name for the switcher; falls back to the full title. */
+/** Compact market name (loading labels); falls back to the full title. */
 /** "Will Saudi Arabia take military action against Yemen on October 18?" → "Saudi Arabia take military action…" */
 function compactTitle(title: string): string {
   let t = title.trim().replace(/^will\s+/i, "").replace(/\?$/, "");

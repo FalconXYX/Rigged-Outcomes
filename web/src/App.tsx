@@ -114,7 +114,7 @@ class ViewBoundary extends Component<{ resetKey: string; children: ReactNode }, 
 
 export default function App() {
   const route = useRoute();
-  // Loaded once for the whole session: home grid, market header and switcher, titles.
+  // Loaded once for the whole session: home grid, market header, titles.
   const index = useAsync(loadIndex, "index");
 
   const page = route.page;
@@ -160,10 +160,10 @@ export default function App() {
     if (prevKey.current === scrollKey) return;
     prevKey.current = scrollKey;
     window.scrollTo({ top: scrollKey === "home" ? homeY.current : 0, behavior: "instant" });
-    // The link that was activated (a card, the breadcrumb) is gone, so focus
+    // The link that was activated (a card, "All markets") is gone, so focus
     // fell to <body>. Move it to the new page's heading so keyboard and
-    // screen-reader users land on, and hear, the new page. Controls that stay
-    // mounted (the market switcher) keep their focus.
+    // screen-reader users land on, and hear, the new page. A control that stays
+    // mounted keeps its focus.
     const active = document.activeElement;
     if (active && active !== document.body && active.isConnected) return;
     const main = document.getElementById("main");

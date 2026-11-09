@@ -25,7 +25,7 @@ type Toggles = Omit<Visibility, "odds">;
 
 /**
  * The session's last view / odds / filter choice. A bare market URL (no
- * timeline keys — the market switcher, the Timeline tab) opens with these, so
+ * timeline keys — a home card, the Timeline tab) opens with these, so
  * moving between markets keeps the way you were looking at them; a link that
  * spells out any state starts from the defaults for the rest.
  */

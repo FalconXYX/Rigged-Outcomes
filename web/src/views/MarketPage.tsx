@@ -1,9 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import type { MarketData, MarketIndex, MarketIndexEntry } from "../types";
 import { loadIndex, loadMarket, useAsync, type Async } from "../lib/data";
 import { fmtInt, polymarketMarket, smartQuotes } from "../lib/format";
-import { href, navigate, useQuery, type Query } from "../lib/router";
-import { ErrorNote, Loading, Select } from "../components/ui";
+import { href, useQuery, type Query } from "../lib/router";
+import { ErrorNote, Loading } from "../components/ui";
 import { TimelineView } from "./timeline/TimelineView";
 import { TradersView } from "./traders/TradersView";
 import { NotFound } from "./NotFound";
@@ -28,7 +35,8 @@ async function fetchMarket(name: string): Promise<MarketData> {
       (e: unknown) => ({ ok: false as const, e }),
     ),
   ]);
-  if (idx && !idx.markets.some((m) => m.name === name)) throw new MarketNotFound(name);
+  if (idx && !idx.markets.some((m) => m.name === name))
+    throw new MarketNotFound(name);
   if (!data.ok) throw data.e;
   return data.d;
 }
@@ -68,15 +76,6 @@ const fromData = (d: MarketData): HeaderInfo => ({
 
 /** The flagged count's key: critical red, as a dot beside the (ink) number. */
 const CRITICAL_KEY = { "--key": "var(--c-critical)" } as CSSProperties;
-
-/** Timeline preferences worth carrying to another market (the rest — zoom, pin, replay — is market-specific). */
-const CARRY_KEYS = ["view", "odds", "filter"] as const;
-
-const pick = (q: Query, keys: readonly string[]): Query | undefined => {
-  let out: Query | undefined;
-  for (const k of keys) if (k in q) (out ??= {})[k] = q[k];
-  return out;
-};
 
 /* ── View tabs (real links, text + sliding underline) ───────────────────── */
 
@@ -118,19 +117,38 @@ function ViewTabs({
   ];
 
   return (
-    <nav ref={ref} className={`view-tabs${ind ? " measured" : ""}`} aria-label="Market views">
-      {ind && <span className="view-tabs-ind" style={{ width: ind.w, transform: `translateX(${ind.x}px)` }} aria-hidden />}
+    <nav
+      ref={ref}
+      className={`view-tabs${ind ? " measured" : ""}`}
+      aria-label="Market views"
+    >
+      {ind && (
+        <span
+          className="view-tabs-ind"
+          style={{ width: ind.w, transform: `translateX(${ind.x}px)` }}
+          aria-hidden
+        />
+      )}
       {tabs.map((t) => (
         <a
           key={t.key}
           className="view-tab"
-          href={href.market(name, t.key, t.key === "timeline" ? timelineQuery : undefined)}
+          href={href.market(
+            name,
+            t.key,
+            t.key === "timeline" ? timelineQuery : undefined,
+          )}
           aria-current={view === t.key ? "page" : undefined}
         >
           {t.label}
           {t.count != null && (
-            <span className="tab-count tabular" title={`${fmtInt(t.count)} flagged accounts`}>
-              {t.count > 0 && <span className="key-dot" style={CRITICAL_KEY} aria-hidden />}
+            <span
+              className="tab-count tabular"
+              title={`${fmtInt(t.count)} flagged accounts`}
+            >
+              {t.count > 0 && (
+                <span className="key-dot" style={CRITICAL_KEY} aria-hidden />
+              )}
               {fmtInt(t.count)}
             </span>
           )}
@@ -146,12 +164,10 @@ function MarketHeader({
   name,
   view,
   info,
-  markets,
 }: {
   name: string;
   view: View;
   info: HeaderInfo | null;
-  markets: MarketIndexEntry[] | undefined;
 }) {
   // The timeline keeps its state (zoom, pin, toggles, paused replay) in the
   // query string and unmounts on the traders view. Remember its last query
@@ -162,11 +178,20 @@ function MarketHeader({
   useEffect(() => {
     if (view === "timeline") lastTimeline.current = { name, query };
   }, [name, view, query]);
-  const timelineQuery = view === "timeline" ? query : lastTimeline.current?.name === name ? lastTimeline.current.query : undefined;
+  const timelineQuery =
+    view === "timeline"
+      ? query
+      : lastTimeline.current?.name === name
+        ? lastTimeline.current.query
+        : undefined;
 
   return (
     <header className="market-head">
       <div className="container">
+        {/* Home restores its own scroll position, so this lands back where the visitor left the list. */}
+        <a className="market-back label" href={href.home()}>
+          <span aria-hidden>←</span> All markets
+        </a>
         {info ? (
           <>
             <h1 className="market-title">{smartQuotes(info.title)}</h1>
@@ -178,8 +203,13 @@ function MarketHeader({
               <span title="Every position in the market, whales and crowd">
                 <b className="tabular">{fmtInt(info.positions)}</b> positions
               </span>
-              <a href={polymarketMarket(info.slug)} target="_blank" rel="noopener noreferrer">
-                Polymarket ↗<span className="visually-hidden"> (opens in a new tab)</span>
+              <a
+                href={polymarketMarket(info.slug)}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Polymarket ↗
+                <span className="visually-hidden"> (opens in a new tab)</span>
               </a>
             </div>
           </>
@@ -191,18 +221,12 @@ function MarketHeader({
         )}
 
         <div className="market-toolbar">
-          <ViewTabs name={name} view={view} flagged={info?.flagged} timelineQuery={timelineQuery} />
-          {markets && markets.length > 1 && (
-            <div className="switcher">
-              <Select
-                value={name}
-                label="Switch market"
-                options={markets.map((m) => ({ value: m.name, label: shortTitle(m) }))}
-                // Carry the view / odds / filter choice in the URL; zoom, pin and replay belong to the market left behind.
-                onChange={(v) => v !== name && navigate(href.market(v, view, view === "timeline" ? pick(query, CARRY_KEYS) : undefined))}
-              />
-            </div>
-          )}
+          <ViewTabs
+            name={name}
+            view={view}
+            flagged={info?.flagged}
+            timelineQuery={timelineQuery}
+          />
         </div>
       </div>
     </header>
@@ -211,7 +235,15 @@ function MarketHeader({
 
 /* ── Page ───────────────────────────────────────────────────────────────── */
 
-export function MarketPage({ name, view, index }: { name: string; view: View; index: Async<MarketIndex> }) {
+export function MarketPage({
+  name,
+  view,
+  index,
+}: {
+  name: string;
+  view: View;
+  index: Async<MarketIndex>;
+}) {
   const entry = index.data?.markets.find((m) => m.name === name);
   const market = useAsync(() => fetchMarket(name), name);
   if (market.status === "ready") resolved.set(name, market.data);
@@ -224,11 +256,13 @@ export function MarketPage({ name, view, index }: { name: string; view: View; in
   const stale = !data && display != null;
 
   const unknown =
-    (index.status === "ready" && !entry) || (market.status === "error" && market.error instanceof MarketNotFound);
+    (index.status === "ready" && !entry) ||
+    (market.status === "error" && market.error instanceof MarketNotFound);
   if (unknown) {
     return (
       <NotFound title="Market not found">
-        There’s no market called <code>{name}</code> here. Pick one of the analyzed markets from the home page.
+        There’s no market called <code>{name}</code> here. Pick one of the
+        analyzed markets from the home page.
       </NotFound>
     );
   }
@@ -237,10 +271,15 @@ export function MarketPage({ name, view, index }: { name: string; view: View; in
   const loadingLabel = `Loading ${info ? shortTitle(info) : "market"}…`;
 
   let body: ReactNode;
-  if (market.status === "error" && !data) body = <ErrorNote error={market.error} />;
+  if (market.status === "error" && !data)
+    body = <ErrorNote error={market.error} />;
   else if (display)
     body = (
-      <div className={`market-view${stale ? " is-stale" : ""}`} aria-busy={stale || undefined} inert={stale || undefined}>
+      <div
+        className={`market-view${stale ? " is-stale" : ""}`}
+        aria-busy={stale || undefined}
+        inert={stale || undefined}
+      >
         {view === "traders" ? (
           <TradersView key={display.name} market={display} />
         ) : (
@@ -252,7 +291,7 @@ export function MarketPage({ name, view, index }: { name: string; view: View; in
 
   return (
     <div className="market-page">
-      <MarketHeader name={name} view={view} info={info} markets={index.data?.markets} />
+      <MarketHeader name={name} view={view} info={info} />
       <div className="container market-body">
         {stale && (
           <div className="stale-note" role="status">

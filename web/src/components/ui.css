@@ -1,0 +1,643 @@
+/* ── Stat strip ────────────────────────────────────────────────────── */
+
+/* One ruled row of cells: 1px grid lines drawn by the gap over a --border
+   background, square corners, no shadow. 2 columns on phones (an odd last
+   cell spans the row), --cols (default 5) from 900px. .stat-grid is the old
+   name and stays an alias. */
+.stat-strip,
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.stat-strip > :last-child:nth-child(odd),
+.stat-grid > :last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 900px) {
+  .stat-strip,
+  .stat-grid {
+    grid-template-columns: repeat(var(--cols, 5), minmax(0, 1fr));
+  }
+  .stat-strip > :last-child:nth-child(odd),
+  .stat-grid > :last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
+
+/* A cell. Keyed (StatTile color=…): a 6px dot in the series hue before the
+   label; surface, border and text never take the hue. */
+.stat {
+  position: relative;
+  background: var(--surface);
+  padding: 10px 12px 11px;
+  min-width: 0;
+}
+
+.stat-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.stat-label-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Optional 12px line icon before the label, drawn in the key. */
+.stat-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--key, var(--text-3));
+}
+
+.stat-icon svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
+.stat-value {
+  margin-top: 3px;
+  font-size: var(--fs-stat);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stat.emph .stat-value {
+  font-weight: 700;
+}
+
+/* ── Segmented ─────────────────────────────────────────────────────── */
+
+/* A hairline box of options separated by hairlines; the active option is an
+   inverted ink cell. No track, no raised face, no hue. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.segmented button {
+  flex: none;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  padding: 5px 10px;
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+  white-space: nowrap;
+}
+
+.segmented button:first-child {
+  border-left: 0;
+}
+
+.segmented button:hover {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+.segmented button.on,
+.segmented button.on:hover {
+  background: var(--text);
+  border-left-color: var(--text);
+  color: var(--text-inverse);
+  font-weight: 600;
+}
+
+.segmented button.on + button {
+  border-left-color: var(--text);
+}
+
+.segmented button:focus-visible {
+  outline-offset: -2px;
+  border-radius: 0;
+}
+
+/* ── Switch ────────────────────────────────────────────────────────── */
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.switch:hover {
+  color: var(--text);
+}
+
+/* the one pill in the app */
+.switch-track {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background-color: var(--border-strong);
+  transition: background-color var(--dur) var(--ease);
+}
+
+.switch:hover .switch-track {
+  background-color: var(--text-3);
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform var(--dur) var(--ease);
+}
+
+/* on: solid accent track; the thumb stays white in both themes */
+.switch input:checked + .switch-track,
+.switch:hover input:checked + .switch-track {
+  background-color: var(--accent);
+}
+
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(12px);
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ── Select ────────────────────────────────────────────────────────── */
+
+.select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.select select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  border-radius: var(--radius-xs);
+  padding: 5px 26px 5px 9px;
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text);
+  cursor: pointer;
+  min-width: 0;
+  transition: border-color var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.select select:hover {
+  background: var(--surface-2);
+  border-color: var(--text-3);
+}
+
+.select select:focus-visible {
+  border-color: var(--focus);
+  outline-offset: 0;
+}
+
+.select-chevron {
+  position: absolute;
+  right: 9px;
+  pointer-events: none;
+  color: var(--text-3);
+  transition: color var(--dur) var(--ease);
+}
+
+.select:hover .select-chevron,
+.select:focus-within .select-chevron {
+  color: var(--text);
+}
+
+/* ── Button ────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--radius-xs);
+  padding: 5px 10px;
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), opacity var(--dur) var(--ease);
+  text-decoration: none;
+}
+
+.btn-sm {
+  padding: 3px 8px;
+  font-size: var(--fs-sm);
+}
+
+.btn-ghost {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--text-3);
+}
+
+/* Primary action: ink fill, one per view. .btn-brand is an alias. */
+.btn-solid,
+.btn-brand {
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--text-inverse);
+  font-weight: 600;
+}
+
+.btn-solid:hover:not(:disabled),
+.btn-brand:hover:not(:disabled) {
+  background: var(--text-2);
+  border-color: var(--text-2);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── Toolbar (sort / filter behind one button) ─────────────────────── */
+
+/* The button is a ghost button; the bar is a --surface-2 band on one hairline,
+   square corners. `.mtools*` are the names home.css used before the move. */
+.toolbar,
+.mtools {
+  margin: 0 0 12px;
+}
+
+.toolbar-btn,
+.mtools-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.toolbar-btn:hover,
+.toolbar-btn.is-open,
+.mtools-btn:hover,
+.mtools-btn.is-open {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--text-3);
+}
+
+.toolbar-dot,
+.mtools-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.toolbar-bar,
+.mtools-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--surface-2);
+}
+
+.toolbar-group,
+.mtools-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* A Segmented in the bar wraps instead of scrolling: the same box, but the
+   hairlines between options are a 1px gap over a --border background (the
+   stat-strip technique) so every row of cells is ruled, and the cells grow to
+   fill their row. Single row (the room to spare) = pixel-identical to the
+   inline control; the active cell's 1px ink outline covers the seams beside it. */
+.toolbar-bar .segmented {
+  flex-wrap: wrap;
+  gap: 1px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.toolbar-bar .segmented button {
+  flex: 1 1 auto;
+  border-left: 0;
+  background: var(--surface);
+}
+
+.toolbar-bar .segmented button:hover {
+  background-color: var(--surface-3);
+}
+
+.toolbar-bar .segmented button.on,
+.toolbar-bar .segmented button.on:hover {
+  background: var(--text);
+  outline: 1px solid var(--text);
+  outline-offset: 0;
+}
+
+.toolbar-bar .segmented button.on:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+/* Phones: a group with a Segmented stacks its label above the control and
+   takes the whole bar, so the cells wrap in the widest box available. */
+@media (max-width: 639px) {
+  .toolbar-group:has(.segmented) {
+    flex: 1 1 100%;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+}
+
+.toolbar-label,
+.mtools-label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  color: var(--text-3);
+}
+
+.toolbar-clear,
+.mtools-clear {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.toolbar-clear:hover,
+.mtools-clear:hover {
+  color: var(--text);
+  text-decoration-color: var(--text-3);
+}
+
+/* ── Legend ────────────────────────────────────────────────────────── */
+
+.legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+button.legend-item {
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button.legend-item:hover {
+  color: var(--text);
+}
+
+/* Toggle: a tag with a hairline; the colored mark carries identity. */
+button.legend-item.keyed {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+button.legend-item.keyed:hover {
+  border-color: var(--text-3);
+  background: var(--surface-2);
+}
+
+/* Off: struck label, mark faded; the hairline stays so the row keeps its shape. */
+.legend-item.off {
+  color: var(--text-3);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+button.legend-item.keyed.off {
+  color: var(--text-3);
+}
+
+.legend-item.off svg {
+  opacity: 0.35;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.legend-key {
+  flex: none;
+}
+
+/* ── Tooltip ───────────────────────────────────────────────────────── */
+
+.tooltip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 20;
+  min-width: 150px;
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-2);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  will-change: transform;
+}
+
+.tooltip.show {
+  opacity: 1;
+}
+
+/* Optional 2px top rule in the hovered series (Tooltip accent prop sets --tip-accent). */
+.tooltip.has-accent {
+  background: var(--tip-accent) top / 100% 2px no-repeat border-box, var(--surface);
+}
+
+.tooltip .tip-title {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 5px;
+  overflow-wrap: anywhere;
+}
+
+.tooltip .tip-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  margin-top: 5px;
+}
+
+.tip-row {
+  display: grid;
+  grid-template-columns: 16px auto 1fr;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.tip-row + .tip-row {
+  margin-top: 2px;
+}
+
+.tip-value {
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tip-label {
+  color: var(--text-3);
+}
+
+.tip-nokey {
+  width: 16px;
+}
+
+/* ── Loading / error ───────────────────────────────────────────────── */
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 40vh;
+  color: var(--text-3);
+  font-size: var(--fs-ui);
+  font-weight: 500;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Neutral note with a 2px critical rule along its left edge. */
+.error-note {
+  margin: 24px auto;
+  max-width: 560px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--c-critical);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: var(--fs-ui);
+  font-weight: 500;
+}
+
+.error-note strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}

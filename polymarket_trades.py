@@ -1,110 +1,63 @@
 #!/usr/bin/env python3
 """
-Fetch Polymarket trade data in two steps:
-  1. Subgraph  -> collect every unique wallet address that touched the market
-  2. Data API  -> fetch each wallet's actual activity (accurate, no routing artifacts)
+Fetch every fill of one Polymarket market and save it as the pipeline's raw
+trade CSV (data/<Output>.csv):
 
-This produces numbers that match Polymarket's own UI exactly.
+  1. Gamma        -> the market object for the slug (condition id, question,
+                     outcomes, resolution)
+  2. Data API v2  -> GET /v2/trades?condition=<id>&taker_only=false: every
+                     fill in the market, maker AND taker rows, in one
+                     cursor-paginated walk (polymarket_api.fetch_trades)
+  3. to_trade_rows -> the v2 rows in the v1 shape format_row reads, oldest
+                     first, then save_csv.
+
+Until November 2026 this script crawled wallet addresses from the Goldsky
+orderbook subgraph and then pulled each wallet's activity from Data API v1;
+Polymarket retired both (the subgraph answers 429 "paused and deprecated",
+v1 answers 410 "retired"). The row shape and the CSV schema are unchanged,
+so cleandata.py, export.py and the site are untouched. A v2 dump holds both
+counterparties of every fill, exactly like the old per-wallet crawl did, so
+positions aggregate the same way; the old crawl was lossy (a wallet's walk
+stopped early on rate limits or the v1 offset cap and silently kept the
+newest rows only), so a re-fetch of an old market can hold MORE rows than
+the committed CSV, never fewer (see tests/test_v2_parity.py).
 """
 import csv
 import json
 import os
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-import requests
+
+import polymarket_api
+from polymarket_api import GAMMA_API, OPERATORS  # noqa: F401
 
 # ── Config ────────────────────────────────────────────────────────────────────
-GAMMA_API    = "https://gamma-api.polymarket.com"
-SUBGRAPH_URL = "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/orderbook-subgraph/0.0.1/gn"
-DATA_API     = "https://data-api.polymarket.com"
-
 SLUG       = "us-strikes-iran-by-february-28-2026-227-967-547-688-589-491-592-418-452-924-384-915-464-672-196-157-993-596-269-535-381-391-471-256-988-997-296-225-762-973-292-827-345-182-558-215-794-879-189-761"
 OUTPUT_CSV = "data/USxIranStrikesFeb28.csv"
 
-WORKERS   = 10    # concurrent Data API requests
-RETRY     = 3     # retries per failed request
-PAGE_SIZE = 500   # Data API page size (max 500)
+PROGRESS_EVERY = 10   # print a progress line every N pages (1 000 rows each)
 
-# Known CLOB operator/router addresses — infrastructure, not traders
-OPERATORS = {
-    "0x4bfb41d5b357570702fe9f19e29c4a26df9a28d6",
-}
-# ── Step 1: subgraph — addresses only ─────────────────────────────────────────
+
+# ── Step 1: Gamma — the market ────────────────────────────────────────────────
 def get_market(slug):
-    resp = requests.get(f"{GAMMA_API}/markets", params={"slug": slug}, timeout=15)
-    resp.raise_for_status()
-    results = resp.json()
-    if not results:
-        raise ValueError(f"Market not found: {slug}")
-    return results[0]
-def _paginate_addresses(token_id, asset_field):
-    """Minimal subgraph query — only fetches maker/taker addresses, no amounts."""
-    addresses = set()
-    last_id = ""
-    while True:
-        query = ('{ orderFilledEvents(first: 1000, where: {%s: "%s", id_gt: "%s"}) '
-                 '{ id maker taker } }') % (asset_field, token_id, last_id)
-        resp = requests.post(SUBGRAPH_URL, json={"query": query}, timeout=30)
-        resp.raise_for_status()
-        events = resp.json().get("data", {}).get("orderFilledEvents", [])
-        if not events:
-            break
-        for e in events:
-            if e.get("maker"):
-                addresses.add(e["maker"].lower())
-            if e.get("taker"):
-                addresses.add(e["taker"].lower())
-        last_id = events[-1]["id"]
-        if len(events) < 1000:
-            break
-    return addresses
+    """Gamma market object (open or closed) for a markets.json slug."""
+    return polymarket_api.fetch_market(slug)
 
 
-def get_all_addresses(market):
-    """Collect every unique wallet that participated in this market."""
-    token_ids = json.loads(market.get("clobTokenIds", "[]"))
-    outcomes  = json.loads(market.get("outcomes", "[]"))
-    addresses = set()
-    for i, token_id in enumerate(token_ids):
-        name = outcomes[i] if i < len(outcomes) else f"token {i}"
-        print(f"  Scanning '{name}' token...", flush=True)
-        for field in ("makerAssetId", "takerAssetId"):
-            addresses |= _paginate_addresses(token_id, field)
-    addresses -= OPERATORS
-    return addresses
+# ── Step 2: Data API v2 — every fill in the market ────────────────────────────
+def fetch_market_trades(market, max_rows=None):
+    """Raw-CSV rows (format_row) for every fill in `market`, oldest first.
+    max_rows caps the fetch (newest rows kept; the cap is announced, never
+    silent). Errors from the API raise."""
+    condition_id = market["conditionId"]
 
-# ── Step 2: Data API — per-user activity ──────────────────────────────────────
+    def progress(n_rows, pages):
+        if pages % PROGRESS_EVERY == 0:
+            print(f"  page {pages:,}  |  {n_rows:,} rows", flush=True)
 
-def _fetch_user_activity(address, condition_id):
-    """Fetch all TRADE rows for one user in this market."""
-    all_rows, offset = [], 0
-    for attempt in range(RETRY):
-        try:
-            while True:
-                resp = requests.get(
-                    f"{DATA_API}/activity",
-                    params={"user": address, "limit": PAGE_SIZE, "offset": offset},
-                    timeout=15,
-                )
-                if resp.status_code == 429:
-                    time.sleep(2 ** attempt)
-                    break
-                resp.raise_for_status()
-                page = resp.json()
-                for row in page:
-                    if (row.get("conditionId", "").lower() == condition_id.lower()
-                            and row.get("type") == "TRADE"):
-                        all_rows.append(row)
-                if len(page) < PAGE_SIZE:
-                    return all_rows
-                offset += PAGE_SIZE
-            break
-        except Exception:
-            if attempt == RETRY - 1:
-                return all_rows
-            time.sleep(1)
-    return all_rows
+    # polymarket_api announces a cap on stdout itself (one notice, not two).
+    v2_rows, _capped = polymarket_api.fetch_trades(condition_id, max_rows=max_rows, on_progress=progress)
+    return to_trade_rows(v2_rows, market)
+
 
 def get_win_status(market, outcome_index):
     if not market.get("closed"):
@@ -114,6 +67,7 @@ def get_win_status(market, outcome_index):
         return "WIN" if prices[int(outcome_index)] == "1" else "LOSS"
     except (IndexError, ValueError, TypeError):
         return "UNRESOLVED"
+
 
 def format_row(activity, market, eoa_address=""):
     ts = int(activity["timestamp"])
@@ -132,6 +86,17 @@ def format_row(activity, market, eoa_address=""):
         "transaction_hash": activity.get("transactionHash", ""),
     }
 
+
+def to_trade_rows(v2_rows, market):
+    """Raw-CSV rows (format_row) for v2 trade rows, oldest first. The subgraph
+    crawl recorded the proxy wallet as eoa_address; v2 has no separate signer
+    field, so the proxy wallet goes there too."""
+    trades = [format_row(polymarket_api.as_v1(r), market, eoa_address=str(r.get("proxy_wallet") or "").lower())
+              for r in v2_rows]
+    trades.sort(key=lambda t: t["timestamp"])
+    return trades
+
+
 # ── Save ──────────────────────────────────────────────────────────────────────
 
 def save_csv(trades, path):
@@ -145,41 +110,30 @@ def save_csv(trades, path):
         writer.writerows(trades)
     print(f"Saved {len(trades):,} trades -> {path}")
 
+
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(slug=SLUG, output=OUTPUT_CSV):
+def main(slug=SLUG, output=OUTPUT_CSV, max_rows=None):
     market       = get_market(slug)
     condition_id = market["conditionId"]
     print(f"Market : {market.get('question')}")
     print(f"Status : {'Resolved' if market.get('closed') else 'Open'}")
-    # Step 1
-    print("\nStep 1: Collecting wallet addresses from subgraph...")
-    addresses = get_all_addresses(market)
-    print(f"Found {len(addresses):,} unique wallets\n")
-    # Step 2
-    print(f"Step 2: Fetching activity from Data API ({WORKERS} workers)...")
-    all_trades, done, total = [], 0, len(addresses)
-
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(_fetch_user_activity, addr, condition_id): addr
-                   for addr in addresses}
-        for future in as_completed(futures):
-            addr = futures[future]
-            rows = future.result()
-            for row in rows:
-                all_trades.append(format_row(row, market, addr))
-            done += 1
-            if done % 1000 == 0 or done == total:
-                print(f"  {done:,}/{total:,} wallets  |  {len(all_trades):,} trades", flush=True)
-
-    all_trades.sort(key=lambda r: r["timestamp"])
+    print(f"\nFetching every fill from Data API v2 ({polymarket_api.DATA_API_V2}/trades, condition {condition_id[:10]}…, maker + taker rows)...")
+    all_trades = fetch_market_trades(market, max_rows=max_rows)
+    wallets = {t["user_id"] for t in all_trades}
+    print(f"Found {len(wallets):,} unique wallets")
     print(f"\nTotal trades: {len(all_trades):,}")
+    if not all_trades:
+        print("  ! the v2 feed served no fills for this market (an error would have raised)")
     if output:
         save_csv(all_trades, output)
     return all_trades
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--slug",   default=SLUG)
     ap.add_argument("--output", default=OUTPUT_CSV)
+    ap.add_argument("--max-rows", type=int, default=None, help="cap the fetch at this many fills (newest kept; announced)")
     args = ap.parse_args()
-    main(slug=args.slug, output=args.output)
+    main(slug=args.slug, output=args.output, max_rows=args.max_rows)

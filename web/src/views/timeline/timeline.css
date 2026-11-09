@@ -1,0 +1,1041 @@
+/* ── Timeline view ─────────────────────────────────────────────────────
+   DESIGN.md v3: neutral surfaces, hairlines not shadows, 2–4px corners,
+   ink controls. A hue appears in chrome only as a key mark (dots, 2px
+   rules) and as --accent on state (scrubber, brush window). */
+
+.tl {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* one heading line: the title, and the one hint for the chart at the right */
+.tl-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+
+.tl-hint {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+@media (max-width: 639px) {
+  .tl-hint {
+    white-space: normal;
+  }
+}
+
+/* ── The chart card ────────────────────────────────────────────────── */
+
+.tl-card {
+  --card-x: 14px;
+  position: relative;
+  padding: 0 var(--card-x) 12px;
+  min-width: 0;
+}
+
+@media (min-width: 720px) {
+  .tl-card {
+    --card-x: 16px;
+    padding-bottom: 14px;
+  }
+}
+
+/* the card takes focus from a click inside it (Space / Esc / ← → reach the replay) */
+.tl-card:focus {
+  outline: none;
+}
+
+/* controls: one flat row on a hairline — view, range, switches … reset, copy */
+.tl-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tl-ctrl {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.tl-switches {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+/* right end of the row: reset zoom (while zoomed) + copy link */
+.tl-ctrl-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.tl-copy {
+  margin-right: -6px;
+}
+
+.tl-copy.on {
+  color: var(--text);
+}
+
+.tl-reset {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(2px);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease),
+    visibility 0s linear var(--dur);
+}
+
+.tl-reset.show {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease),
+    visibility 0s;
+}
+
+/* phones: the view fills a row; the range and the reset / copy end share the
+   next (the range gives way when "Reset zoom" appears); the switches take
+   the last (visual order only: the tab order is unchanged) */
+@media (max-width: 639px) {
+  .tl-controls {
+    gap: 8px 10px;
+  }
+  .tl-ctrl-view {
+    width: 100%;
+  }
+  .tl-ctrl-view .segmented {
+    display: flex;
+    width: 100%;
+  }
+  .tl-ctrl-view .segmented button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 6px 4px;
+    font-size: var(--fs-sm);
+  }
+  .tl-ctrl-range {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .tl-ctrl-range .select {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .tl-ctrl-range .select select {
+    width: 100%;
+    min-width: 0;
+  }
+  .tl-switches {
+    order: 1;
+    flex-wrap: nowrap;
+    gap: 12px;
+    width: 100%;
+  }
+  .tl-switches .switch {
+    gap: 7px;
+    font-size: var(--fs-sm);
+  }
+  .tl-reset:not(.show) {
+    display: none;
+  }
+}
+
+/* ── Legend row: key + name, no boxes at rest; off = struck ────────── */
+
+.tl-legend-row {
+  display: flex;
+  align-items: center;
+  padding: 6px 0 0;
+  margin-left: -7px; /* the first item's text sits on the card's left edge */
+}
+
+.tl-legend-row .legend {
+  gap: 2px 6px;
+}
+
+.tl-legend-row button.legend-item.keyed {
+  border-color: transparent;
+}
+
+.tl-legend-row button.legend-item.keyed:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+
+@media (max-width: 639px) {
+  .tl-legend-row {
+    margin-right: calc(-1 * var(--card-x));
+  }
+  /* one row that scrolls sideways, fading out at the card edge */
+  .tl-legend-row .legend {
+    flex-wrap: nowrap;
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-right: 28px;
+    mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+  }
+  .tl-legend-row .legend::-webkit-scrollbar {
+    display: none;
+  }
+  .tl-legend-row .legend li {
+    flex: none;
+  }
+  .tl-legend-row .legend-item {
+    white-space: nowrap;
+  }
+}
+
+/* ── Replay transport: play · speed · scrubber · clock · reset ─────── */
+
+.tl-transport {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 6px 0 0;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.tl-play {
+  min-width: 76px;
+  justify-content: center;
+  padding-left: 8px;
+}
+
+.tl-play svg {
+  flex: none;
+  fill: currentColor;
+}
+
+.tl-speed .segmented button {
+  font-variant-numeric: tabular-nums;
+}
+
+/* the scrubber: a 2px track, --accent up to the playhead (--p), an ink thumb */
+.tl-scrub {
+  --p: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  min-width: 80px;
+  height: 24px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+.tl-scrub:focus {
+  outline: none;
+}
+
+.tl-scrub::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 0;
+  background: linear-gradient(90deg, var(--accent) var(--p), var(--border-strong) var(--p));
+}
+
+.tl-scrub::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 4px;
+  height: 14px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 1px;
+  background: var(--text);
+  transition: transform 120ms var(--ease);
+}
+
+.tl-scrub:hover::-webkit-slider-thumb,
+.tl-scrub:active::-webkit-slider-thumb {
+  transform: scaleY(1.2);
+}
+
+.tl-scrub:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tl-scrub::-moz-range-track {
+  height: 2px;
+  border-radius: 0;
+  background: var(--border-strong);
+}
+
+.tl-scrub::-moz-range-progress {
+  height: 2px;
+  border-radius: 0;
+  background: var(--accent);
+}
+
+.tl-scrub::-moz-range-thumb {
+  width: 4px;
+  height: 14px;
+  border: 0;
+  border-radius: 1px;
+  background: var(--text);
+}
+
+.tl-scrub:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tl-transport-time {
+  min-width: 12ch;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-3);
+  text-align: right;
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease);
+}
+
+.tl-transport.on .tl-transport-time {
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (max-width: 639px) {
+  .tl-transport {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "play speed reset"
+      "scrub scrub time";
+    gap: 4px 10px;
+  }
+  .tl-play {
+    grid-area: play;
+    min-width: 0;
+  }
+  .tl-speed {
+    grid-area: speed;
+    justify-self: start;
+  }
+  .tl-scrub {
+    grid-area: scrub;
+  }
+  .tl-transport-time {
+    grid-area: time;
+  }
+  .tl-transport-reset {
+    grid-area: reset;
+  }
+}
+
+/* ── Chart ─────────────────────────────────────────────────────────── */
+
+.tl-chart {
+  margin-top: 4px;
+}
+
+.tl-chart-body {
+  position: relative;
+  outline: none;
+  border-radius: var(--radius-xs);
+}
+
+.tl-chart-body:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 4px;
+}
+
+.tl-svg {
+  display: block;
+}
+
+.tl-chart .tl-x-axis .tick line {
+  stroke: var(--axis);
+}
+
+.tl-axis-title .axis-title {
+  fill: var(--text-2);
+}
+
+.tl-overlay {
+  fill: transparent;
+  cursor: grab;
+  touch-action: pan-y;
+}
+
+.is-over-dot .tl-overlay {
+  cursor: pointer;
+}
+
+.is-dragging .tl-overlay {
+  cursor: grabbing;
+}
+
+/* layers fade in when they appear (tab switch / legend toggle) */
+@keyframes tl-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.tl-layer {
+  animation: tl-fade-in var(--dur) var(--ease) both;
+}
+
+.tl-crowd-raw {
+  fill: var(--wash-crowd);
+  stroke: none;
+}
+
+.tl-crowd-wash {
+  fill: var(--wash-crowd);
+  stroke: none;
+}
+
+.tl-crowd-line {
+  fill: none;
+  stroke: var(--c-crowd);
+  stroke-width: 2.25px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.tl-odds {
+  fill: none;
+  stroke: var(--c-odds);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.tl-threshold {
+  stroke: var(--text-3);
+  stroke-width: 1.5px;
+  stroke-dasharray: 1.5 4;
+  stroke-linecap: round;
+}
+
+/* threshold and event labels: plain 11px text on a surface knockout (no box);
+   the measurement strings in TimelineChart.tsx mirror this font */
+.tl-threshold-tag {
+  pointer-events: none;
+}
+
+.tl-threshold-label,
+.tl-event-label {
+  fill: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* when the label is lifted off a crowded line, a hairline ties it back */
+.tl-threshold-leader {
+  stroke: var(--text-3);
+  stroke-width: 1px;
+  stroke-linecap: round;
+}
+
+.tl-dot {
+  fill: var(--c-whale);
+  fill-opacity: 0.75;
+  stroke: var(--surface);
+  stroke-width: 1.25px;
+  transition: opacity 140ms ease;
+}
+
+.tl-dot.hi {
+  fill: var(--c-highlight);
+  fill-opacity: 0.9;
+  stroke-width: 2px;
+}
+
+.tl-dots.dim .tl-dot:not(.on) {
+  opacity: 0.32;
+}
+
+.tl-dot.on {
+  fill-opacity: 1;
+}
+
+/* ── Replay: marks appear as the playhead reaches them ─────────────── */
+
+/* a dot the playhead has not reached is scaled away (instantly: no
+   transition on the hidden state); reaching it pops it in with overshoot */
+.is-replay .tl-dot {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.is-replay .tl-dot:not([data-on]) {
+  transform: scale(0);
+  transition: opacity 140ms ease;
+}
+
+.is-replay .tl-dot[data-on] {
+  transform: scale(1);
+  transition:
+    opacity 140ms ease,
+    transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* named users: a ring pulses out of the dot when playback reaches them */
+.tl-pulse {
+  fill: none;
+  stroke: var(--c-highlight);
+  stroke-width: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.is-replay .tl-pulse[data-on]:not([data-quiet]) {
+  animation: tl-pulse 900ms var(--ease) both;
+}
+
+@keyframes tl-pulse {
+  0% {
+    opacity: 0.95;
+    transform: scale(0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.6);
+  }
+}
+
+/* their names wait for their dot */
+.is-replay .tl-labels g:not([data-on]) {
+  opacity: 0;
+  transition: none;
+}
+
+.is-replay .tl-labels g[data-on] {
+  transition: opacity 260ms var(--ease) 120ms;
+}
+
+/* events ahead of the playhead fade; the one the playhead rests on turns ink */
+.tl-event-label,
+.tl-event-line {
+  transition:
+    opacity 260ms var(--ease),
+    fill 260ms var(--ease),
+    stroke 260ms var(--ease);
+}
+
+.is-replay .tl-event-label[data-state="future"],
+.is-replay .tl-event-line[data-state="future"] {
+  opacity: 0.3;
+}
+
+.is-replay .tl-event-label[data-state="now"] {
+  fill: var(--text);
+}
+
+.is-replay .tl-event-line[data-state="now"] {
+  stroke: var(--text);
+  stroke-dasharray: none;
+  stroke-width: 1.5px;
+  opacity: 1;
+}
+
+/* the playhead: ink hairline + time tag */
+.tl-playhead {
+  pointer-events: none;
+}
+
+.tl-playhead-line {
+  stroke: var(--text);
+  stroke-width: 1.5px;
+  stroke-linecap: round;
+}
+
+.tl-playhead-chip rect {
+  fill: var(--text);
+}
+
+.tl-playhead-chip text {
+  fill: var(--text-inverse);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-replay .tl-dot[data-on],
+  .is-replay .tl-labels g[data-on],
+  .tl-event-label,
+  .tl-event-line {
+    transition: none;
+  }
+  .is-replay .tl-pulse[data-on]:not([data-quiet]) {
+    animation: none;
+  }
+}
+
+.tl-ring {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 1.5px;
+  pointer-events: none;
+}
+
+.tl-ring.pinned {
+  stroke-width: 2px;
+  stroke-dasharray: none;
+  transition: opacity 140ms ease;
+}
+
+/* a pinned bet the replay has not reached keeps its card, not its ring */
+.is-replay .tl-ring.pinned:not([data-on]) {
+  opacity: 0;
+}
+
+.tl-labels g {
+  transition: opacity 140ms ease;
+}
+
+.tl-labels g.dim {
+  opacity: 0.4;
+}
+
+.tl-label {
+  fill: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.tl-leader {
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 1px;
+  stroke-linejoin: round;
+}
+
+.tl-event-line {
+  stroke: var(--c-event);
+  stroke-width: 1px;
+  stroke-dasharray: 4 4;
+  shape-rendering: crispEdges;
+  opacity: 0.85;
+}
+
+.tl-focus-pt {
+  stroke: var(--surface);
+  stroke-width: 2px;
+  pointer-events: none;
+}
+
+/* the hover time tag on the x axis: ink */
+.tl-pill rect {
+  fill: var(--text);
+}
+
+.tl-pill text {
+  fill: var(--text-inverse);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* tooltip extras */
+.tl-tip-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.tl-tip-addr {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.tl-tip-hint {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+@media (hover: none) {
+  .tl-tip-hint {
+    display: none;
+  }
+}
+
+/* ── Overview strip ────────────────────────────────────────────────── */
+
+.tl-ov {
+  margin-top: 6px;
+}
+
+.tl-ov svg {
+  display: block;
+  overflow: visible;
+  touch-action: pan-y;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tl-ov-bg {
+  fill: var(--surface-2);
+  stroke: var(--border);
+}
+
+/* a chart wash (data, not chrome): the series hue at a quarter strength */
+.tl-ov-crowd-area {
+  fill: color-mix(in oklab, var(--c-crowd) 24%, transparent);
+}
+
+.tl-ov-crowd {
+  fill: none;
+  stroke: var(--c-crowd);
+  stroke-width: 1.25px;
+}
+
+.tl-ov-odds {
+  fill: none;
+  stroke: var(--c-odds);
+  stroke-width: 1.4px;
+  opacity: 0.9;
+}
+
+.tl-ov-event {
+  stroke: var(--c-event);
+  stroke-dasharray: 2 2;
+  stroke-width: 1px;
+}
+
+.tl-ov-dim {
+  fill: var(--surface);
+  opacity: 0.62;
+  pointer-events: none;
+}
+
+/* the window: the selection state (--accent) — a wash under the data, a
+   solid outline and two square grips */
+.tl-ov-window-fill {
+  fill: var(--accent-wash);
+  pointer-events: none;
+}
+
+.tl-ov-window {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5px;
+  pointer-events: none;
+  transition: stroke-width 120ms ease;
+}
+
+.tl-ov-grips rect {
+  fill: var(--accent);
+  stroke: var(--surface);
+  stroke-width: 1.5px;
+  pointer-events: none;
+}
+
+/* hit targets (transparent); pan-y keeps vertical swipes scrolling the page */
+.tl-ov-hit rect {
+  fill: transparent;
+  touch-action: pan-y;
+}
+
+.tl-ov-overlay {
+  cursor: crosshair;
+}
+
+.tl-ov-move {
+  cursor: grab;
+}
+
+.tl-ov-handle {
+  cursor: ew-resize;
+}
+
+.tl-ov.is-moving,
+.tl-ov.is-moving .tl-ov-hit rect {
+  cursor: grabbing;
+}
+
+.tl-ov.is-resizing .tl-ov-hit rect {
+  cursor: ew-resize;
+}
+
+.tl-ov.is-drawing .tl-ov-hit rect {
+  cursor: crosshair;
+}
+
+.tl-ov.is-moving .tl-ov-window,
+.tl-ov.is-resizing .tl-ov-window,
+.tl-ov.is-drawing .tl-ov-window {
+  stroke-width: 2.25px;
+}
+
+/* ── Pinned whale card: popover chrome with a 2px key rule ─────────── */
+
+/* --key is set inline: whale teal or highlight orange */
+.tl-pin {
+  --key: var(--c-whale);
+  position: absolute;
+  z-index: 25;
+  width: 320px; /* the full address fits one 11px mono line */
+  max-width: calc(100% - 16px);
+  padding: 10px 12px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-top: 2px solid var(--key);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-2);
+  animation: tl-pin-in var(--dur) var(--ease) both;
+}
+
+.tl-pin:not(.docked) {
+  transition:
+    left var(--dur) var(--ease),
+    top var(--dur) var(--ease);
+}
+
+.tl-pin:focus {
+  outline: none;
+}
+
+/* narrow screens: in flow under the chart instead of over the plot */
+.tl-pin.docked {
+  position: relative;
+  width: auto;
+  max-width: none;
+  margin-top: 12px;
+  border-color: var(--border);
+  border-top-color: var(--key);
+  box-shadow: none;
+}
+
+@keyframes tl-pin-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tl-pin {
+    animation: none;
+  }
+}
+
+/* the name (or the short address) beside the close button; the full address
+   runs the card's width underneath */
+.tl-pin-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tl-pin-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.tl-pin-name .mono {
+  font-size: 13px;
+}
+
+.tl-pin-addr {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.tl-pin-close {
+  flex: none;
+  margin: -4px -6px 0 0;
+}
+
+/* four figures in two columns */
+.tl-pin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin: 10px 0 0;
+}
+
+.tl-pin-grid > div {
+  min-width: 0;
+}
+
+.tl-pin-grid dt {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  color: var(--text-3);
+}
+
+.tl-pin-grid dd {
+  margin: 1px 0 0;
+  font-size: var(--fs-ui);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.tl-pin-note {
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+/* links: ink, a hairline underline that darkens on hover (no key hue) */
+.tl-pin-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  border: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--dur) var(--ease);
+}
+
+.tl-pin-link:hover {
+  text-decoration-color: var(--text);
+}
+
+/* ── Stats: three ruled strips under small-caps group labels ───────── */
+
+.tl-stats {
+  display: grid;
+  gap: 10px;
+}
+
+/* shown only while "Filter stats" is on: what the strips cover */
+.tl-caption {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Overall (ink rule) · Whales (teal) · Crowd (indigo). Stacked on phones;
+   Overall beside Crowd over Whales from 720px. */
+.tl-stat-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "all" "whale" "crowd";
+  gap: 14px;
+}
+
+.tl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tl-group-all {
+  --key: var(--text);
+  grid-area: all;
+}
+
+.tl-group-whale {
+  --key: var(--c-whale);
+  grid-area: whale;
+}
+
+.tl-group-crowd {
+  --key: var(--c-crowd);
+  grid-area: crowd;
+}
+
+/* OVERALL / WHALES / CROWD */
+.tl-group-head {
+  margin: 0;
+  padding: 0 1px;
+  color: var(--text-2);
+}
+
+.tl-group .stat-strip {
+  flex: 1 1 auto;
+  align-content: start;
+}
+
+@media (min-width: 720px) {
+  .tl-stat-groups {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
+    grid-template-areas:
+      "all crowd"
+      "whale whale";
+  }
+  /* every cell in a row is the same width: 1 + 3 above, 3 × 2 below */
+  .tl-group-all .stat-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tl-group-crowd .stat-strip,
+  .tl-group-whale .stat-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .tl-group-crowd .stat-strip > :last-child:nth-child(odd),
+  .tl-group-whale .stat-strip > :last-child:nth-child(odd) {
+    grid-column: auto;
+  }
+}
+
+@media (min-width: 1240px) {
+  .tl-group-whale .stat-strip {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}

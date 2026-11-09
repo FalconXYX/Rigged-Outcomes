@@ -1,0 +1,719 @@
+/* ── Traders view (port of VisualizeInsiders.py) ───────────────────── */
+
+/* DESIGN.md v3: neutral surfaces, hairlines, 2–4px corners. The only hue in
+   chrome is --c-critical: stat keys, the key sentence's rule,
+   legend keys and the pinned card's top rule. Chart marks keep the category
+   palette. */
+
+.traders {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ── Narrative: a ruled text block, not a card ──────────────────────── */
+
+.tr-narrative {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/* Wide enough that the key sentence runs two lines on a laptop, not three. */
+.tr-narrative p {
+  max-width: 120ch;
+  text-wrap: pretty;
+}
+
+/* Lead sentence: bold ink. */
+.tr-lead {
+  font-size: var(--fs-h2);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+  color: var(--text);
+}
+
+/* The key sentence: the one place the critical hue rules a block (.rule-key). */
+.tr-callout {
+  font-size: var(--fs-body);
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.tr-callout strong {
+  font-weight: 600;
+}
+
+/* The flag rule beside the category key both charts share. */
+.tr-keyrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+}
+
+.tr-def {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* ── Chart cards ───────────────────────────────────────────────────── */
+
+.tr-charts {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 1100px) {
+  .tr-charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Side by side, the cards share row tracks so titles and charts line up. */
+@supports (grid-template-rows: subgrid) {
+  @media (min-width: 1100px) {
+    .tr-charts {
+      grid-template-rows: auto 1fr;
+    }
+    .tr-charts > .tr-card {
+      display: grid;
+      grid-row: span 2;
+      grid-template-rows: subgrid;
+      align-content: start;
+    }
+  }
+}
+
+.tr-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* Small-caps panel heading with the interaction hint at the right, over a one-sentence description. */
+.tr-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 12px;
+}
+
+.tr-card-head h2 {
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  color: var(--text);
+}
+
+.tr-card-desc {
+  margin-top: 4px;
+  max-width: 72ch;
+  font-size: var(--fs-ui);
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+/* Category toggles: the shared hairline legend tags; the dot carries identity. */
+.tr-legend {
+  gap: 4px 6px;
+}
+
+.tr-legend-count {
+  margin-left: 1px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.tr-key {
+  flex: none;
+  display: block;
+}
+
+/* The interaction hint, on the title row. */
+.tr-hint {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.tr-hint-coarse {
+  display: none;
+}
+
+@media (pointer: coarse) {
+  .tr-hint-fine {
+    display: none;
+  }
+  .tr-hint-coarse {
+    display: inline;
+  }
+}
+
+/* ── Treemap breadcrumb (text, on the title row once zoomed) ───────── */
+
+.tr-crumbs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tr-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text-2);
+}
+
+.tr-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tr-crumb.current {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.tr-crumb.link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+  transition: color var(--dur) var(--ease), text-decoration-color var(--dur) var(--ease);
+}
+
+.tr-crumb.link:hover {
+  color: var(--text);
+  text-decoration-color: var(--text-3);
+}
+
+.tr-crumb-sep {
+  color: var(--border-strong);
+}
+
+.tr-crumbs-meta {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* ── Shared SVG chrome ─────────────────────────────────────────────── */
+
+.tr-chart {
+  border-radius: 0;
+}
+
+.tr-chart svg.tr-svg {
+  overflow: hidden;
+  border-radius: 0;
+  font-family: var(--font-sans);
+}
+
+.tr-svg:focus {
+  outline: none;
+}
+
+.tr-svg:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tr-bg {
+  fill: transparent;
+}
+
+/* ── Constellation ─────────────────────────────────────────────────── */
+
+.tr-constellation .tr-chart {
+  max-width: 100%;
+}
+
+.tr-constellation .rings circle {
+  fill: none;
+  stroke: var(--grid);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.tr-constellation .rings circle:first-child {
+  stroke: var(--axis);
+  stroke-dasharray: 2 4;
+}
+
+/* Centred on its ring; the halo cuts the ring line under the text. */
+.tr-constellation .ring-label {
+  font-size: 11px;
+  font-weight: 500;
+  fill: var(--text-3);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.tr-constellation .spokes line {
+  stroke-width: 0.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.spoke-cat {
+  opacity: 0.25;
+  transition: opacity 180ms var(--ease);
+}
+
+.spoke-cat.on {
+  opacity: 0.6;
+}
+
+.spoke-cat.dim {
+  opacity: 0.08;
+}
+
+.spoke-cat.off {
+  opacity: 0;
+}
+
+.spoke-hl {
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.95;
+  pointer-events: none;
+}
+
+.dot-cat {
+  transition: opacity 260ms var(--ease);
+}
+
+.dot-cat.off {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tr-constellation .dot {
+  stroke: var(--surface);
+  stroke-width: 1.5;
+}
+
+.dot-cat .dot {
+  fill-opacity: 0.95;
+}
+
+.tr-constellation .dot-core {
+  fill: var(--surface);
+  stroke: none;
+}
+
+.dot-cat > g {
+  transition: opacity 140ms var(--ease);
+}
+
+.dot-cat > g.dim {
+  opacity: 0.16;
+}
+
+.dot-overlay .dot {
+  stroke-width: 2;
+}
+
+.focus-ring {
+  fill: none !important;
+  stroke: var(--text);
+  stroke-width: 1.25;
+  opacity: 0.55;
+}
+
+.focus-ring.pinned {
+  stroke-width: 2;
+  opacity: 1;
+}
+
+.market-hex {
+  fill: var(--text);
+  stroke: var(--c-critical);
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.market-label {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  fill: var(--text);
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.market,
+.annots,
+.dot-overlay,
+.ring-labels {
+  pointer-events: none;
+}
+
+/* Callouts: a neutral box with a hairline; the arrow alone carries the hue. */
+.annot-box {
+  fill: var(--surface);
+  fill-opacity: 0.94;
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.annot-title {
+  font-weight: 600;
+  fill: var(--text);
+}
+
+.annot-sub {
+  font-weight: 500;
+  fill: var(--text-2);
+}
+
+.annot-line {
+  stroke-linecap: round;
+}
+
+/* The way back, floated over the chart once it is zoomed. */
+.tr-zoom {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 5;
+}
+
+.tr-reset {
+  animation: tr-fade-in 180ms var(--ease);
+}
+
+.tr-reset .tabular {
+  color: var(--text-3);
+  font-weight: 500;
+}
+
+/* ── Treemap ───────────────────────────────────────────────────────── */
+
+.tr-tm .tile {
+  cursor: pointer;
+  transition: filter 160ms var(--ease);
+}
+
+.tr-tm .tile:focus {
+  outline: none;
+}
+
+.tr-tm .tile rect {
+  transition: opacity 180ms var(--ease);
+}
+
+.tr-tm .tile.dim rect,
+.tr-tm .tile.dim text,
+.tr-tm .tile.dim circle {
+  opacity: 0.38;
+}
+
+.tr-tm.animating .tile {
+  pointer-events: none;
+}
+
+.tr-tm .tile:hover:not(.tile-header) rect {
+  filter: brightness(1.06) saturate(1.04);
+}
+
+/* Category bands: the key dot names the category, the text stays ink. */
+.tr-tm .hdr-l {
+  font-weight: 600;
+}
+
+.tr-tm .hdr-p,
+.tr-tm .hdr-r {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.tr-tm .hdr-key {
+  stroke: none;
+}
+
+.tr-tm .hdr-key-core {
+  fill: var(--surface);
+}
+
+/* Remainder tiles ("N more wallets"): hatch lines over a light wash. */
+.tr-tm .hatch-line {
+  stroke-width: 1.6;
+  stroke-opacity: 0.34;
+}
+
+/* Label halo in the wash color keeps text clean over the hatch. */
+.tr-tm .leaf-text.on-hatch {
+  paint-order: stroke;
+  stroke-width: 3.5px;
+  stroke-linejoin: round;
+}
+
+.tr-tm .leaf-text {
+  pointer-events: none;
+}
+
+.tr-tm .leaf-text .l1 {
+  font-weight: 600;
+}
+
+/* Full-strength ink: weight alone sets the $ line apart (a fade drops it under 4.5:1 on light tiles). */
+.tr-tm .leaf-text .l2 {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.tr-tm .hdr-label {
+  pointer-events: none;
+}
+
+/* Labels fade in only as a zoom settles (Treemap toggles .labels-fade), never on a resize or font swap. */
+.tr-tm.labels-fade .leaf-text,
+.tr-tm.labels-fade .hdr-label {
+  animation: tr-fade-in 220ms var(--ease);
+}
+
+.tile-outline {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.tile-outline.pinned {
+  stroke-width: 2.5;
+}
+
+@keyframes tr-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ── Tooltip extras ────────────────────────────────────────────────── */
+
+.tr-tip-title {
+  margin-bottom: 2px !important;
+}
+
+.tr-tip-cat-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px !important;
+}
+
+.tr-tip-cat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 7px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* ── Pinned card ───────────────────────────────────────────────────── */
+
+/* A popover: hairline + faint shadow, 3px corners, and a 2px top rule in the
+   wallet's category (inline --key). Surface and text stay neutral. */
+.tr-pin {
+  --key: var(--text-3);
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 30;
+  width: 300px;
+  max-width: calc(100% - 12px);
+  padding: 12px 14px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-top: 2px solid var(--key);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  animation: tr-pop 200ms var(--ease);
+}
+
+.tr-pin:focus {
+  outline: none;
+}
+
+/* In flow under a narrow chart: a keyed card, no shadow. */
+.tr-pin.docked {
+  position: relative;
+  width: auto;
+  max-width: none;
+  margin-top: 12px;
+  border-color: var(--border);
+  border-top-color: var(--key);
+  box-shadow: none;
+}
+
+@keyframes tr-pop {
+  from {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tr-pin,
+  .tr-reset,
+  .tr-tm .leaf-text,
+  .tr-tm .hdr-label {
+    animation: none;
+  }
+}
+
+.tr-pin-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -4px -8px 6px 0;
+}
+
+.tr-pin-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* The full address in a neutral well; one click selects all of it. */
+.tr-pin-addr {
+  display: block;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+  word-break: break-all;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+/* Figures: ruled rows, label left, tabular value right. */
+.tr-figs {
+  display: grid;
+  margin: 10px 0 12px;
+  border-top: 1px solid var(--border);
+}
+
+.tr-fig {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tr-fig-label {
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tr-fig-value {
+  flex: none;
+  font-size: var(--fs-ui);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tr-fig-unit {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+/* Dossier (in-site, solid) and Polymarket (ghost) side by side. */
+.tr-pin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ── Empty state ───────────────────────────────────────────────────── */
+
+.card-pad.tr-empty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.tr-empty h2 {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tr-empty p {
+  max-width: 52ch;
+  font-size: var(--fs-body);
+  color: var(--text-2);
+}
+
+.tr-empty-ring {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+}
+
+.tr-empty-dot {
+  fill: var(--text-3);
+}

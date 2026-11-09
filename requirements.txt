@@ -1,0 +1,10 @@
+# Python dependencies for the analysis pipeline and the scheduled workflows
+# (.github/workflows/watch.yml installs exactly this).
+#
+#   pip install -r requirements.txt
+#
+# The two Dash visualizers (VisualizeBetTiming.py, VisualizeInsiders.py) also
+# need `plotly` and `dash`; they are optional and not used by the site or CI.
+requests
+pandas
+numpy

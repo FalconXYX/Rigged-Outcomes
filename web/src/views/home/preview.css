@@ -1,0 +1,279 @@
+/* ── Mini timeline (card preview) ──────────────────────────────────── */
+
+/* Inset panel: --surface-2 inside one hairline, 2px corners. The card's one
+   flexible part: grows to keep the rows below level with a neighbour whose
+   title wrapped (home.css .mc-item). */
+.mt {
+  position: relative;
+  flex: 1 0 auto;
+  height: auto;
+  min-height: 140px;
+  min-width: 0;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+@media (min-width: 560px) {
+  .mt {
+    min-height: 180px;
+  }
+}
+
+/* Unbordered box inside the panel: what useSize measures and the svg fills. */
+.mt-plot {
+  position: absolute;
+  inset: 0;
+}
+
+.mt-plot svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.mt-guide {
+  stroke: var(--grid);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  shape-rendering: crispEdges;
+}
+
+.mt-base {
+  stroke: var(--axis);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.mt-stop-a {
+  stop-color: var(--c-crowd);
+  stop-opacity: 0.3;
+}
+
+.mt-stop-b {
+  stop-color: var(--c-crowd);
+  stop-opacity: 0.06;
+}
+
+.mt-crowd-edge {
+  fill: none;
+  stroke: var(--c-crowd);
+  stroke-opacity: 0.5;
+  stroke-width: 1;
+}
+
+.mt-event-line {
+  stroke: var(--c-event);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  opacity: 0.75;
+}
+
+.mt-odds {
+  fill: none;
+  stroke: var(--c-odds);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.mt-dot {
+  fill: var(--c-whale);
+  fill-opacity: 0.88;
+  stroke: var(--surface-2);
+  stroke-width: 1;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mt-dot.is-hi {
+  fill: var(--c-highlight);
+  fill-opacity: 1;
+  stroke: var(--surface);
+  stroke-width: 1.5;
+}
+
+.mt-ticks text {
+  fill: var(--text-3);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Event name at the top of its hairline (HTML, so it sizes itself). */
+.mt-event {
+  position: absolute;
+  top: 6px;
+  max-width: 60%;
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.mt-event[data-align="end"] {
+  transform: translateX(calc(-100% + 8px));
+}
+
+.mt-event[data-align="start"] {
+  transform: translateX(-8px);
+}
+
+/* ── Flag mix (Flagged-traders preview) ────────────────────────────── */
+
+.fm {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 2px surface gaps between segments, square ends. */
+.fm-bar {
+  display: flex;
+  gap: 2px;
+  height: 6px;
+}
+
+.fm-seg {
+  flex: 0 1 0px;
+  min-width: 2px;
+}
+
+.fm-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+
+.fm-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.fm-legend b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ── Entrance (once, when the card first scrolls into view) ────────── */
+
+.market-card[data-phase="armed"] :is(.mt-dot, .mt-crowd, .mt-event, .mt-event-line) {
+  opacity: 0;
+}
+
+.market-card[data-phase="armed"] .mt-odds {
+  stroke-dasharray: 1 1;
+  stroke-dashoffset: 1;
+}
+
+.market-card[data-phase="armed"] .fm-bar {
+  clip-path: inset(0 100% 0 0);
+}
+
+.market-card[data-phase="play"] .mt-odds {
+  animation: mt-draw 1150ms cubic-bezier(0.35, 0.15, 0.3, 1) 80ms backwards;
+}
+
+.market-card[data-phase="play"] .mt-crowd {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: mt-rise 700ms var(--ease) backwards;
+}
+
+.market-card[data-phase="play"] .mt-dot {
+  animation: mt-pop 460ms var(--ease) backwards;
+  animation-delay: var(--d, 0ms);
+}
+
+.market-card[data-phase="play"] :is(.mt-event, .mt-event-line) {
+  animation: mt-fade 400ms var(--ease) 950ms backwards;
+}
+
+.market-card[data-phase="play"] .fm-bar {
+  animation: fm-grow 900ms var(--ease) 250ms backwards;
+}
+
+@keyframes mt-draw {
+  from {
+    stroke-dasharray: 1 1;
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dasharray: 1 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes mt-rise {
+  from {
+    opacity: 0;
+    transform: scaleY(0.15);
+  }
+}
+
+@keyframes mt-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+}
+
+@keyframes mt-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes fm-grow {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .market-card[data-phase] :is(.mt-odds, .mt-crowd, .mt-dot, .mt-event, .mt-event-line, .fm-bar) {
+    animation: none;
+  }
+}
+
+/* ── Dark: the crowd wash needs a touch more opacity to read ───────── */
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .mt-stop-a {
+    stop-opacity: 0.42;
+  }
+  :root:where(:not([data-theme="light"])) .mt-stop-b {
+    stop-opacity: 0.08;
+  }
+}
+
+:root[data-theme="dark"] .mt-stop-a {
+  stop-opacity: 0.42;
+}
+
+:root[data-theme="dark"] .mt-stop-b {
+  stop-opacity: 0.08;
+}

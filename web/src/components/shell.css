@@ -1,0 +1,461 @@
+/* ── App frame ─────────────────────────────────────────────────────── */
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.site-main {
+  flex: 1 0 auto;
+  outline: none;
+}
+
+/* "backwards" fill: no transform lingers after the entrance, so fixed/sticky children behave. */
+.page-enter {
+  animation: page-in 200ms var(--ease) backwards;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter {
+    animation: none;
+  }
+}
+
+/* Theme cross-fade (View Transitions API; skipped under reduced motion in theme.ts) */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 200ms;
+  animation-timing-function: var(--ease);
+}
+
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 100;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: var(--text);
+  color: var(--text-inverse);
+  font-size: var(--fs-ui);
+  font-weight: 600;
+  cursor: pointer;
+  transform: translateY(-160%);
+  transition: transform 160ms var(--ease);
+}
+
+.skip-link:focus-visible {
+  transform: none;
+}
+
+/* ── Header ────────────────────────────────────────────────────────── */
+
+/* 52px, translucent, one hairline. The brand mark is the only color besides
+   the accent underline under the current section. */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: color-mix(in oklab, var(--page) 88%, transparent);
+  -webkit-backdrop-filter: saturate(1.2) blur(12px);
+  backdrop-filter: saturate(1.2) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .site-header {
+    background: var(--page);
+  }
+}
+
+.site-header-inner {
+  height: var(--header-h);
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  text-decoration: none;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.brand-name {
+  white-space: nowrap;
+}
+
+.brand-mark {
+  display: block;
+  flex: none;
+}
+
+/* Ink inside the gradient tile: white reads on both brand stops. */
+.brand-mark-ink {
+  fill: none;
+  stroke: white;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.brand-mark-dot {
+  fill: white;
+}
+
+.site-nav {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex: none;
+}
+
+/* Section links run the header's full height so the current one's 2px
+   underline sits on the header rule. Same weight on and off: no width shift. */
+.nav-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text-2);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease);
+}
+
+.nav-link:hover {
+  color: var(--text);
+}
+
+.nav-link:focus-visible {
+  outline-offset: -2px;
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.icon-btn:hover,
+.icon-btn.on {
+  color: var(--text);
+  background-color: var(--surface-3);
+}
+
+.icon-btn:active {
+  background-color: var(--border);
+}
+
+.icon-btn.sm {
+  width: 28px;
+  height: 28px;
+}
+
+.theme-icon {
+  animation: icon-in 240ms var(--ease) both;
+}
+
+@keyframes icon-in {
+  from {
+    opacity: 0;
+    transform: rotate(-40deg) scale(0.7);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-icon {
+    animation: none;
+  }
+}
+
+/* ── Section nav (Markets / Watch / Scout / Wallets) ───────────────── */
+
+.site-nav-pages {
+  margin-left: 10px;
+  margin-right: auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.site-nav-pages .nav-link[aria-current="page"] {
+  color: var(--text);
+}
+
+/* sits directly on the header rule (the nav clips its own overflow) */
+.site-nav-pages .nav-link[aria-current="page"]::after {
+  content: "";
+  position: absolute;
+  left: 9px;
+  right: 9px;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+}
+
+@media (max-width: 400px) {
+  .site-header-inner {
+    gap: 6px;
+  }
+  .brand {
+    gap: 7px;
+  }
+  .icon-btn {
+    width: 30px;
+    height: 30px;
+  }
+}
+
+/* Phones: the mark stands in for the wordmark so the four section links fit on one row. */
+@media (max-width: 719px) {
+  .site-nav-pages {
+    margin-left: 2px;
+  }
+
+  .site-nav-pages .nav-link {
+    padding-inline: 7px;
+  }
+
+  .site-nav-pages .nav-link[aria-current="page"]::after {
+    left: 7px;
+    right: 7px;
+  }
+
+  .site-header-inner .brand-name {
+    display: none;
+  }
+}
+
+/* Below 380px the GitHub link drops out of the header (the footer keeps one)
+   and the section nav may shrink and scroll instead of pushing the page wider. */
+@media (max-width: 379px) {
+  .site-header-inner {
+    gap: 4px;
+  }
+
+  .site-nav-pages {
+    flex: 0 1 auto;
+    margin-left: 0;
+  }
+
+  .site-nav-pages .nav-link {
+    padding-inline: 5px;
+    font-size: 12px;
+  }
+
+  .site-nav-pages .nav-link[aria-current="page"]::after {
+    left: 5px;
+    right: 5px;
+  }
+
+  .site-header a.icon-btn {
+    display: none;
+  }
+}
+
+/* ── Footer: one ruled strip ───────────────────────────────────────── */
+
+.site-footer {
+  margin-top: var(--sp-6);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.site-footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding-top: 14px;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom));
+}
+
+.footer-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.footer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+}
+
+.footer-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+.footer-link {
+  color: var(--text-2);
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+  transition: color var(--dur) var(--ease), text-decoration-color var(--dur) var(--ease);
+}
+
+.footer-link:hover {
+  color: var(--text);
+  text-decoration-color: var(--text-3);
+}
+
+.footer-gh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.footer-sep {
+  color: var(--border-strong);
+}
+
+/* ── .chip: alias of .tag.sentence for one round (DESIGN.md §4) ────── */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text-2);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.chip.raised {
+  background: transparent;
+}
+
+.chip b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chip svg {
+  flex: none;
+  color: var(--text-3);
+}
+
+/* Keyed chip: .chip.tinted + inline --key keys the icon only. */
+.chip.tinted svg {
+  color: var(--key);
+}
+
+/* "● Resolved · Yes" (ResolvedChip in Home.tsx): a key dot in Polymarket's
+   Yes/No colors (teal / red) before label text. No box, no fill. */
+.resolved {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* As a .meta-line item its own 6px gap (not the usual 5) feeds the separator:
+   trim the dot's margin so it still sits 8px from the text. */
+.meta-line > .resolved:not(:last-child)::after {
+  margin-left: 2px;
+}
+
+.resolved b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.resolved[data-outcome="yes"] {
+  --key: var(--c-whale);
+}
+
+.resolved[data-outcome="no"] {
+  --key: var(--c-odds);
+}
+
+/* ── Not found ─────────────────────────────────────────────────────── */
+
+.notfound {
+  position: relative;
+  padding-top: clamp(40px, 10vh, 96px);
+  padding-bottom: 32px;
+  max-width: 640px;
+}
+
+.notfound-code {
+  display: inline-block;
+  font-size: clamp(56px, 10vw, 96px);
+  font-weight: 700;
+  letter-spacing: -0.05em;
+  line-height: 1;
+}
+
+.notfound h1 {
+  margin-top: 12px;
+}
+
+.notfound p {
+  margin-top: 8px;
+  color: var(--text-2);
+  font-size: var(--fs-body);
+  overflow-wrap: anywhere;
+}
+
+.notfound .btn {
+  margin-top: 20px;
+}
+
+.notfound code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+  color: var(--text);
+}

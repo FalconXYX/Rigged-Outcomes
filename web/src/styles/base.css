@@ -1,0 +1,478 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Montserrat: 400 for prose only; UI text is 500+ (set per component). */
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-body);
+  font-weight: 400;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+/* Heading defaults (DESIGN.md §2); views set only what differs. */
+h1 {
+  font-size: var(--fs-h1);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+  text-wrap: balance;
+}
+
+h2 {
+  font-size: var(--fs-h2);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+h3 {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-radius: var(--radius-xs);
+}
+
+/* Page headings receive focus on navigation (App.tsx) but aren't controls. */
+h1[tabindex="-1"]:focus {
+  outline: none;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--accent) 28%, transparent);
+}
+
+/* Tabular figures wherever digits align (columns, stat values, ticks, counts). */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Layout primitives ─────────────────────────────────────────────── */
+
+.container {
+  width: 100%;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+@media (min-width: 720px) {
+  .container {
+    padding: 0 28px;
+  }
+}
+
+/* Card: surface, one hairline, 4px corners, no shadow. Never a tint, a
+   gradient bar or a colored border; an interactive card darkens its hairline. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.card-pad {
+  padding: 14px;
+}
+
+@media (min-width: 720px) {
+  .card-pad {
+    padding: 16px;
+  }
+}
+
+/* Keyed strip or card: a 2px top rule in --key (inline style). The only way a
+   container carries a series hue. */
+.accent-rule,
+.card.keyed {
+  border-top: 2px solid var(--key, var(--accent));
+}
+
+/* Sections are separated by a hairline, not by air. */
+.section-head {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+/* ── Type utilities ────────────────────────────────────────────────── */
+
+/* The label style: eyebrows, stat labels, table headers, tag text. */
+.eyebrow,
+.label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.3;
+  color: var(--text-3);
+}
+
+/* One line of facts separated by " · " — card tops, page meta, hero facts.
+   Layout only: add `.label` for the small-caps style. A <b> is ink. */
+.meta-line {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 0;
+  min-width: 0;
+}
+
+.meta-line > * {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* The separator belongs to the item BEFORE it (an ::after inside its nowrap
+   box), so a wrapped line never opens with "·". The item's 5px gap plus 3px
+   puts the dot 8px from both neighbours. */
+.meta-line > *:not(:last-child)::after {
+  content: "·";
+  margin: 0 8px 0 3px;
+  color: var(--text-3);
+}
+
+.meta-line b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.meta-line a {
+  color: var(--text-2);
+  text-decoration: none;
+  transition: color var(--dur) var(--ease);
+}
+
+.meta-line a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--text-3);
+  text-underline-offset: 3px;
+}
+
+.section-title {
+  font-size: var(--fs-h2);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.lede {
+  font-size: var(--fs-lede);
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* Brand gradient on text: the home hero title and the 404 numeral only. */
+.gradient-text {
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ── Tag (replaces every chip / pill) ──────────────────────────────── */
+
+/* Rectangular, one hairline, no fill. Default = label style (uppercase);
+   .sentence = 12px sentence case for data ("Jan 19 – Feb 28, 2026").
+   Identity is a .key-dot inside; a <b> is ink. */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.4;
+  color: var(--text-2);
+  white-space: nowrap;
+  text-decoration: none;
+  transition: border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.tag.sentence {
+  padding: 2px 7px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.tag b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.tag svg {
+  flex: none;
+  color: var(--text-3);
+}
+
+/* only when the tag itself sits on --surface-2 */
+.tag.filled {
+  background: var(--surface-2);
+}
+
+a.tag:hover,
+button.tag:hover,
+.tag.link:hover {
+  border-color: var(--text-3);
+  color: var(--text);
+}
+
+/* ── Keyed marks (the only places a hue appears in chrome) ─────────── */
+
+/* 6px identity dot: style={{ "--key": "var(--c-whale)" }} */
+.key-dot {
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--key, currentColor);
+  vertical-align: 0.1em;
+}
+
+/* Heading icon: a 16px line glyph stroked in the key. No square behind it. */
+.section-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--key, var(--text-3));
+}
+
+.section-icon svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+/* Meter: 4px neutral track, square ends, the fill carries the hue.
+   <div class="meter"><div class="meter-fill" style={{ width: "58%", "--key": … }} /></div> */
+.meter {
+  width: 100%;
+  height: 4px;
+  border-radius: 0;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--key, var(--accent));
+  transition: width var(--dur) var(--ease);
+}
+
+/* 2px keyed rule on a block of text (pull quotes, notes). */
+.rule-key {
+  border-left: 2px solid var(--key, var(--text-2));
+  padding-left: 12px;
+}
+
+/* Legacy: .tinted once tinted a surface; now it only keys the icon inside. */
+.tinted {
+  background: transparent;
+  border-color: var(--border);
+}
+
+.tinted > svg,
+.tinted > .stat-icon {
+  color: var(--key, var(--text-3));
+}
+
+/* ── Table ─────────────────────────────────────────────────────────── */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.table th {
+  padding: 6px 10px;
+  text-align: left;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--border-strong);
+  white-space: nowrap;
+}
+
+.table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table .ink {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.table tbody tr:hover {
+  background: var(--surface-2);
+}
+
+/* ── Popover ───────────────────────────────────────────────────────── */
+
+/* The one floating chrome besides tooltips: hairline + faint shadow, 3px. */
+.popover {
+  position: absolute;
+  z-index: 40;
+  min-width: 220px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+}
+
+.popover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.popover-row + .popover-row {
+  margin-top: 8px;
+}
+
+/* ── Chart chrome (shared by every D3 chart) ───────────────────────── */
+
+.chart {
+  position: relative;
+  width: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: pan-y;
+}
+
+.chart svg {
+  display: block;
+  overflow: visible;
+}
+
+.chart .grid line {
+  stroke: var(--grid);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.chart .grid .domain {
+  display: none;
+}
+
+.chart .axis text {
+  fill: var(--text-3);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart .axis .domain,
+.chart .axis line {
+  stroke: var(--axis);
+  shape-rendering: crispEdges;
+}
+
+.chart .axis-title {
+  fill: var(--text-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.chart .crosshair {
+  stroke: var(--crosshair);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  pointer-events: none;
+  shape-rendering: crispEdges;
+}
+
+.chart-empty {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  color: var(--text-3);
+  font-size: var(--fs-ui);
+  font-weight: 500;
+}

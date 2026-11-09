@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Rigged Outcomes · Polymarket insider-trading signals</title>
+    <meta
+      name="description"
+      content="Detects potential insider trading on Polymarket prediction markets by analyzing who traded profitably before major outcomes occurred."
+    />
+    <meta name="author" content="Parth Jain" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f4f4f7" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Every page needs the market index; start it alongside the JS bundle (lib/data.ts reuses it). -->
+    <link rel="preload" href="/data/index.json" as="fetch" type="application/json" crossorigin />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Rigged Outcomes" />
+    <meta property="og:title" content="Rigged Outcomes · Polymarket insider-trading signals" />
+    <meta
+      property="og:description"
+      content="Who traded profitably before the news? Interactive timelines of whale bets and flagged accounts across seven resolved Polymarket markets."
+    />
+    <meta property="og:url" content="https://parthjain.ca/Rigged-Outcomes/" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Rigged Outcomes · Polymarket insider-trading signals" />
+    <meta
+      name="twitter:description"
+      content="Who traded profitably before the news? Interactive timelines of whale bets and flagged accounts across seven resolved Polymarket markets."
+    />
+
+    <!-- Apply the saved theme before first paint (mirrors src/lib/theme.ts). -->
+    <script>
+      (function () {
+        var root = document.documentElement;
+        var t = null;
+        try {
+          t = window.localStorage.getItem("ro-theme");
+        } catch (e) {}
+        if (t === "light" || t === "dark") root.setAttribute("data-theme", t);
+        var dark = t === "dark";
+        try {
+          if (t !== "light" && t !== "dark") dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        } catch (e) {}
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute("content", dark ? "#0e0f13" : "#f4f4f7");
+      })();
+    </script>
+    <style>
+      /* Page color before the stylesheet arrives (values mirror --page in tokens.css). */
+      html { background: #f4f4f7; }
+      html[data-theme="dark"] { background: #0e0f13; }
+      @media (prefers-color-scheme: dark) {
+        html:not([data-theme="light"]) { background: #0e0f13; }
+      }
+    </style>
+  </head>
+  <body>
+    <noscript>
+      <p style="padding: 24px; font-family: system-ui, sans-serif">
+        Rigged Outcomes is an interactive dashboard and needs JavaScript enabled.
+      </p>
+    </noscript>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

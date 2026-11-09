@@ -104,11 +104,11 @@ user_id,market_position,lifetime_portfolio,prior_bet_count,portfolio_concentrati
 0xf5c49ad254b1d53ea0b86fb285dd3f11dc800926,3499.979,671198.7650199996,947,0.52,False,False,False,2026-01-22T19:31:20+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x0aae5c4ec45339a64a1dd2fe4ba98c2a19eb251c,3899.9818,2047558.9700669937,2203,0.19,False,False,False,2026-01-20T15:21:58+00:00,Supreme Court rules in favor of Trump's tariffs?
 0xee390501bf496241f84996c958f5373488f6a40a,3400.0,165537.5470080002,195,2.05,False,False,False,2026-01-25T04:01:44+00:00,Supreme Court rules in favor of Trump's tariffs?
-0xb51b3beffd13cde071ed799e70a7b0b598e8b4d9,6298.5767,6298.5767,0,100.0,True,True,True,2026-01-20T14:27:16+00:00,Supreme Court rules in favor of Trump's tariffs?
+0xb51b3beffd13cde071ed799e70a7b0b598e8b4d9,6298.5767,984744.5728429576,6896,0.64,False,False,False,2026-01-20T14:27:16+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x59506f839022561f48eec644d3460439bc508c48,7582.594,166009.77580799934,1521,4.57,False,False,False,2026-01-20T15:03:12+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x090a0d3fc9d68d3e16db70e3460e3e4b510801b4,3838.7448,941472.5754669982,1705,0.41,False,False,False,2026-01-20T14:50:44+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x59506f839022561f48eec644d3460439bc508c48,7412.9379,171340.6292079993,1527,4.33,False,False,False,2026-01-20T16:08:30+00:00,Supreme Court rules in favor of Trump's tariffs?
-0x9cb98fc57fe8a3bdf75c3b48bd419e5d262f7b80,7236.7112,7236.7112,0,100.0,True,True,True,2026-01-20T15:17:12+00:00,Supreme Court rules in favor of Trump's tariffs?
+0x9cb98fc57fe8a3bdf75c3b48bd419e5d262f7b80,7236.7112,898756.2379289975,8668,0.81,False,False,False,2026-01-20T15:17:12+00:00,Supreme Court rules in favor of Trump's tariffs?
 0xa43956813bbcc603543eeda2b755600cea82d01d,2988.3954,32613.872081999973,287,9.16,False,False,False,2026-01-28T06:08:33+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x35f9d99e8e1694797631e9ce69847fd1a85ae09d,3270.0,23973.608199999984,139,13.64,False,False,False,2026-01-27T05:20:39+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x5060b41a1be40a63b7da2075e42479b29157a780,30529.4566,30529.4566,52,100.0,False,True,True,2026-01-25T04:11:16+00:00,Supreme Court rules in favor of Trump's tariffs?
@@ -118,7 +118,7 @@ user_id,market_position,lifetime_portfolio,prior_bet_count,portfolio_concentrati
 0x4124f6919daa006632c70edd120aa1b4b8fe5827,4750.4844,444328.7245589993,1818,1.07,False,False,False,2026-02-06T03:11:17+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x56c950d29fbc829f4633c8b440d6891cfa5eafe7,37000.0,763582.2038019999,63,4.85,False,False,False,2026-02-08T07:12:27+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x2aac99d0ee5b8d95fbd48e16ce37d90bbd7f1b36,50916.0093,5433245.046190995,3075,0.94,False,False,False,2026-01-19T05:02:56+00:00,Supreme Court rules in favor of Trump's tariffs?
-0xa82b0e89cf734e2fa70cbd52ca65c77d64595220,3475.5481,3475.5481,0,100.0,True,True,True,2026-01-20T20:04:36+00:00,Supreme Court rules in favor of Trump's tariffs?
+0xa82b0e89cf734e2fa70cbd52ca65c77d64595220,3475.5481,3760037.0678760563,26550,0.09,False,False,False,2026-01-20T20:04:36+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x3b5d93e768e79c0974ac0f7d210237988120cc80,5254.409,3195408.9056909955,1777,0.16,False,False,False,2026-01-27T08:11:29+00:00,Supreme Court rules in favor of Trump's tariffs?
 0xc4b2573a07e223bbb0adf86cf7f4e61dc1a1c5cd,7500.0,14798.252579000005,87,50.68,False,False,False,2026-02-17T09:01:09+00:00,Supreme Court rules in favor of Trump's tariffs?
 0xb51b3beffd13cde071ed799e70a7b0b598e8b4d9,2680.2223,10948.111572999995,41,24.48,False,False,False,2026-01-21T16:03:48+00:00,Supreme Court rules in favor of Trump's tariffs?
@@ -133,6 +133,6 @@ user_id,market_position,lifetime_portfolio,prior_bet_count,portfolio_concentrati
 0x2ce8505aa641791eb8460f6ac6bf5c0511e34527,4924.6482,5960554.328423994,2765,0.08,False,False,False,2026-02-11T06:55:29+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x14619de097b1fbe058d6d36282662c20958a30a1,5499.9,102801.61781699999,176,5.35,False,False,False,2026-02-08T14:27:21+00:00,Supreme Court rules in favor of Trump's tariffs?
 0x14619de097b1fbe058d6d36282662c20958a30a1,6083.59,36733.131019,117,16.56,False,False,False,2026-02-08T08:31:01+00:00,Supreme Court rules in favor of Trump's tariffs?
-0x01ed5c64d1d8905afd7917d75a5652665f5cca5f,23172.804,23172.804,0,100.0,True,True,True,2026-02-20T15:05:36+00:00,Supreme Court rules in favor of Trump's tariffs?
+0x01ed5c64d1d8905afd7917d75a5652665f5cca5f,23172.804,8242133.428276236,26426,0.28,False,False,False,2026-02-20T15:05:36+00:00,Supreme Court rules in favor of Trump's tariffs?
 0xe899b5ea69afb161da7a35597b6fe70398860899,41613.4593,3779914.625564252,3114,1.1,False,False,False,2026-02-13T16:26:07+00:00,Supreme Court rules in favor of Trump's tariffs?
 0xc25427ea224b8f9fa2df801233f944006ed33f73,34840.4348,2221464.1880250056,2089,1.57,False,False,False,2026-02-20T15:15:04+00:00,Supreme Court rules in favor of Trump's tariffs?

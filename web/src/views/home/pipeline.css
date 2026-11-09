@@ -1,0 +1,491 @@
+/* ── Pipeline panel (hero, right column) ───────────────────────────── */
+
+/* One hairline card: a label head, then four steps in a hairline grid
+   (rows from 900px, 2×2 below). The active step: ink text + a 2px accent
+   rule. Only its visual plays; the others hold the frame at --t0. */
+.pipe {
+  --loop: 3.6s;
+  --t0: -1.8s; /* mid-loop: every visual fully built */
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pipe-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+}
+
+.pipe-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 3px 3px; /* inside the card's 4px corner */
+  overflow: hidden;
+}
+
+.pipe-step {
+  position: relative;
+  min-width: 0;
+  display: flex;
+  background: var(--surface);
+}
+
+/* The active rule: transform only, so it never relayouts the row. */
+.pipe-step::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  background: var(--accent);
+  transform: scaleY(0);
+  transform-origin: 50% 0;
+  transition: transform 240ms var(--ease);
+  pointer-events: none;
+}
+
+.pipe-step[data-active]::before {
+  transform: none;
+}
+
+.pipe-btn {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 1fr auto;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 12px 12px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease);
+}
+
+.pipe-btn:hover {
+  background: var(--surface-2);
+}
+
+.pipe-btn:focus-visible {
+  outline-offset: -2px;
+  border-radius: 0;
+}
+
+/* Label, text, figure. The text row takes any slack, so in the 2×2 the
+   figure sits just above the visual and lines up across a row no matter
+   how many lines the text beside it runs to. */
+.pipe-copy {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pipe-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  transition: color var(--dur) var(--ease);
+}
+
+.pipe-text {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-2);
+  text-wrap: pretty;
+  transition: color var(--dur) var(--ease);
+}
+
+/* Value over unit in the 2×2 (a 178px cell cannot hold "263 flagged
+   accounts" on one line, and one wrapping cell would break the row);
+   value and unit on one baseline from 900px. */
+.pipe-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+.pipe-stat b {
+  font-size: var(--fs-stat);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease);
+}
+
+.pipe-step[data-active] :is(.pipe-label, .pipe-text, .pipe-stat b) {
+  color: var(--text);
+}
+
+/* The visual: an inset like the card previews (surface-2 inside one hairline). */
+.pipe-vis {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 1;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.pipe-vis svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Rows from 900px: copy on the left, the visual fixed on the right. */
+@media (min-width: 900px) {
+  .pipe-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pipe-btn {
+    grid-template-columns: minmax(0, 1fr) 168px;
+    grid-template-rows: auto;
+    align-items: center;
+    gap: 10px 20px;
+    padding: 12px 14px 12px 16px;
+  }
+  .pipe-text {
+    font-size: var(--fs-ui);
+  }
+  .pipe-stat {
+    flex-direction: row;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 2px 6px;
+  }
+  .pipe-vis {
+    width: 168px;
+  }
+}
+
+/* Wide screens: the visuals earn more room. */
+@media (min-width: 1200px) {
+  .pipe-head {
+    padding: 12px 16px;
+  }
+  .pipe-btn {
+    grid-template-columns: minmax(0, 1fr) 228px;
+    gap: 10px 24px;
+    padding: 14px 16px 14px 18px;
+  }
+  .pipe-vis {
+    width: 228px;
+  }
+}
+
+/* ── Visuals: every mark is a token; motion is transform/opacity (plus the
+   odds line's dash draw). Inactive steps pause at --t0; active ones restart
+   from 0 (the panel remounts the svg on each toggle). ──────────────────── */
+
+.pipe-step[data-active] .pipe-vis {
+  --t0: 0s;
+}
+
+.pipe-step:not([data-active]) .pipe-vis * {
+  animation-play-state: paused;
+}
+
+.pv-base {
+  stroke: var(--axis);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+/* 01 Fetch */
+.pv-flow {
+  fill: var(--c-crowd);
+  fill-opacity: 0.85;
+  animation: pv-flow 3.2s linear infinite both;
+  animation-delay: calc(var(--p) * -3.2s);
+}
+
+/* 02 Clean */
+.pv-bar {
+  fill: var(--c-crowd);
+  fill-opacity: 0.75;
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: pv-grow var(--loop) var(--ease) infinite both;
+  animation-delay: calc(var(--t0) + var(--i) * 55ms);
+}
+
+.pv-drop {
+  fill: var(--c-crowd);
+  animation: pv-drop var(--loop) var(--ease) infinite both;
+  animation-delay: calc(var(--t0) + var(--i) * 55ms);
+}
+
+/* 03 Identify */
+.pv-whale {
+  fill: var(--c-whale);
+  fill-opacity: 0.7;
+}
+
+.pv-flag {
+  fill: var(--c-critical);
+  opacity: 0;
+  animation: pv-flag var(--loop) linear infinite both;
+  animation-delay: calc(var(--t0) + var(--a));
+}
+
+.pv-pulse {
+  fill: none;
+  stroke: var(--c-critical);
+  stroke-width: 1;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pv-pulse var(--loop) var(--ease) infinite both;
+  animation-delay: calc(var(--t0) + var(--a));
+}
+
+.pv-scan {
+  stroke: var(--crosshair);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  animation: pv-scan var(--loop) linear infinite both;
+  animation-delay: var(--t0);
+}
+
+/* 04 Visualize */
+.pv-crowd {
+  fill: var(--c-crowd);
+  fill-opacity: 0.22;
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: pv-rise var(--loop) var(--ease) infinite both;
+  animation-delay: var(--t0);
+}
+
+.pv-event {
+  stroke: var(--c-event);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  opacity: 0.7;
+}
+
+.pv-odds {
+  fill: none;
+  stroke: var(--c-odds);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  stroke-dasharray: 1 1;
+  animation: pv-draw var(--loop) cubic-bezier(0.35, 0.15, 0.3, 1) infinite both;
+  animation-delay: var(--t0);
+}
+
+.pv-dot {
+  fill: var(--c-whale);
+  fill-opacity: 0.88;
+  stroke: var(--surface-2);
+  stroke-width: 0.6;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pv-pop var(--loop) var(--ease) infinite both;
+  animation-delay: calc(var(--t0) + 0.2s + var(--d) * 1.1s);
+}
+
+.pv-dot.is-hi {
+  fill: var(--c-highlight);
+  fill-opacity: 1;
+}
+
+@keyframes pv-flow {
+  0% {
+    transform: translateX(0);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(176px);
+    opacity: 0;
+  }
+}
+
+@keyframes pv-grow {
+  0% {
+    transform: scaleY(0.05);
+    opacity: 1;
+  }
+  30% {
+    transform: scaleY(1);
+  }
+  88% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleY(1);
+    opacity: 0;
+  }
+}
+
+@keyframes pv-drop {
+  0% {
+    transform: translateY(-20px);
+    opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  28% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+}
+
+@keyframes pv-scan {
+  0% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  70% {
+    transform: translateX(168px);
+    opacity: 1;
+  }
+  72% {
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(168px);
+    opacity: 0;
+  }
+}
+
+@keyframes pv-flag {
+  0% {
+    opacity: 0;
+  }
+  3% {
+    opacity: 1;
+  }
+  86% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes pv-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  22% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+@keyframes pv-draw {
+  0% {
+    stroke-dashoffset: 1;
+    opacity: 1;
+  }
+  36% {
+    stroke-dashoffset: 0;
+  }
+  88% {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+@keyframes pv-rise {
+  0% {
+    transform: scaleY(0.08);
+    opacity: 0;
+  }
+  30% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  88% {
+    opacity: 1;
+  }
+  100% {
+    transform: scaleY(1);
+    opacity: 0;
+  }
+}
+
+@keyframes pv-pop {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  10% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  88% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+/* Reduced motion: no loops at all (the panel also stops auto-advancing);
+   every visual holds its built frame, and the rule just moves. */
+@media (prefers-reduced-motion: reduce) {
+  .pipe-step[data-active] .pipe-vis {
+    --t0: -1.8s;
+  }
+  .pipe-vis * {
+    animation-play-state: paused !important;
+  }
+  .pipe-step::before,
+  .pipe-btn,
+  .pipe-label,
+  .pipe-text,
+  .pipe-stat b {
+    transition: none;
+  }
+}

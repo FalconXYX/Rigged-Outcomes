@@ -1,0 +1,196 @@
+/*
+ * Design tokens. Every color in the app comes from here so light/dark swap in
+ * one place. Series colors were run through the dataviz palette validator
+ * (all-pairs, light on #fcfcfb and dark on #16181d): they pass every gate;
+ * dark odds-red vs highlight-orange sits in the 6–8 CVD band, so those two are
+ * always paired with a second channel (line vs dot, direct name labels).
+ *
+ * Brand: ink + gradient borrowed from parthjain.ca. See DESIGN.md.
+ */
+:root {
+  color-scheme: light;
+
+  --font-sans: "Montserrat Variable", Montserrat, ui-sans-serif, system-ui,
+    -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* type scale (Montserrat; DESIGN.md §2 for weights and tracking) */
+  --fs-display: clamp(40px, 5.4vw, 60px);
+  --fs-h1: clamp(22px, 2.4vw, 28px);
+  --fs-h2: clamp(17px, 1.7vw, 20px);
+  --fs-h3: 15px;
+  --fs-lede: 15px;
+  --fs-body: 14px;
+  --fs-ui: 13px;
+  --fs-sm: 12px;
+  --fs-xs: 11px;
+  --fs-stat: clamp(18px, 1.6vw, 21px);
+
+  /* spacing (DESIGN.md §1): gaps 8–12, card padding 14–16, sections 32 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --header-h: 52px;
+
+  /* surfaces */
+  --page: #f4f4f7;
+  --surface: #ffffff;
+  --surface-2: #f7f7fa; /* insets, table head, row hover */
+  --surface-3: #eeeef3; /* control hover, meter track */
+  --raised: #ffffff; /* retired: the old active face; segmented now inverts to ink */
+  --border: #e4e3ea;
+  --border-strong: #d2d0da;
+
+  /* ink */
+  --text: #1c1418;
+  --text-2: #57505a;
+  --text-3: #6e6873; /* ≥4.5:1 on every light surface (4.67 on surface-3) */
+  --text-inverse: #ffffff;
+
+  /* chart chrome */
+  --grid: #ecebf0;
+  --axis: #d6d4dd;
+  --crosshair: #8a8390;
+
+  /* series (validated) */
+  --c-whale: #0d9488;
+  --c-crowd: #505da0;
+  --c-odds: #cf203e;
+  --c-highlight: #e8730c;
+  --c-new: #7c5cd6;
+  --c-normal: var(--c-whale);
+  --c-concentration: var(--c-highlight);
+  --c-critical: var(--c-odds);
+  --c-event: var(--text-2);
+
+  /* washes (area fills ~10%) */
+  --wash-crowd: color-mix(in oklab, var(--c-crowd) 11%, transparent);
+  --wash-odds: color-mix(in oklab, var(--c-odds) 9%, transparent);
+  --wash-whale: color-mix(in oklab, var(--c-whale) 10%, transparent);
+
+  /* ── Retired from chrome (DESIGN.md §3/§5) ──────────────────────────────
+     Defined so nothing breaks; no surface, border, band, text or hover may
+     use them. A hue appears in chrome only as a key mark. */
+  --tint-whale: color-mix(in oklab, var(--c-whale) 11%, var(--surface));
+  --tint-crowd: color-mix(in oklab, var(--c-crowd) 11%, var(--surface));
+  --tint-odds: color-mix(in oklab, var(--c-odds) 10%, var(--surface));
+  --tint-highlight: color-mix(in oklab, var(--c-highlight) 12%, var(--surface));
+  --tint-new: color-mix(in oklab, var(--c-new) 11%, var(--surface));
+  --tint-brand: color-mix(in oklab, var(--brand-b) 9%, var(--surface));
+  --edge-whale: color-mix(in oklab, var(--c-whale) 32%, var(--border));
+  --edge-crowd: color-mix(in oklab, var(--c-crowd) 32%, var(--border));
+  --edge-odds: color-mix(in oklab, var(--c-odds) 30%, var(--border));
+  --edge-highlight: color-mix(in oklab, var(--c-highlight) 34%, var(--border));
+  --edge-new: color-mix(in oklab, var(--c-new) 32%, var(--border));
+  --glow-brand: none;
+  --glow-brand-soft: none;
+
+  /* brand */
+  --brand-a: #cf203e;
+  --brand-b: #505da0;
+  --brand-gradient: linear-gradient(120deg, var(--brand-a), var(--brand-b));
+  --focus: #505da0;
+
+  /* the one state hue for chrome: active underline, switch on, scrubber,
+     selection/brush wash, spinner. Solid, never a gradient. */
+  --accent: var(--brand-b);
+  --accent-wash: color-mix(in oklab, var(--accent) 10%, transparent);
+
+  /* retired from chrome, kept for compatibility (see above) */
+  --edge-brand: color-mix(in oklab, var(--brand-b) 30%, var(--border));
+  --brand-tint: var(--surface);
+  --brand-tint-strong: var(--surface-2);
+  --brand-ring: var(--border-strong);
+  --brand-hairline: var(--border);
+  --on-brand: #ffffff;
+  --on-critical: #ffffff;
+  --key-mix-hi: 0%;
+  --key-mix-lo: 0%;
+  --key-mix-hover: 0%;
+  --key-mix-edge: 0%;
+  --key-mix-edge-hover: 0%;
+
+  /* shape (DESIGN.md §1): nothing rounder than 4px except the switch */
+  --radius-xs: 2px; /* tags, inputs, buttons, segmented, legend items */
+  --radius-sm: 3px; /* popovers, tooltips, the stale note */
+  --radius: 4px; /* cards */
+  --radius-lg: var(--radius); /* retired alias; replace on sight */
+
+  /* depth: hairlines, not shadows. Only floating chrome gets --shadow-pop. */
+  --shadow-1: none;
+  --shadow-2: none;
+  --shadow-pop: 0 4px 12px -2px rgb(28 20 24 / 0.12);
+  --shadow-tooltip: var(--shadow-pop);
+
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 200ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0e0f13;
+    --surface: #16181d;
+    --surface-2: #1c1f25;
+    --surface-3: #252930;
+    --raised: #30353e;
+    --border: #2a2e36;
+    --border-strong: #3a3f49;
+    --text: #f3f1f4;
+    --text-2: #b9b3bb;
+    --text-3: #948f98; /* ≥4.5:1 on every dark surface */
+    --text-inverse: #0e0f13;
+    --grid: #22252b;
+    --axis: #353a43;
+    --crosshair: #858089;
+    --c-whale: #1a9e90;
+    --c-crowd: #7b86de;
+    --c-odds: #ec4a64;
+    --c-highlight: #d07f0a;
+    --c-new: #8a78e6;
+    --brand-a: #ec4a64;
+    --brand-b: #7b86de;
+    --focus: #7b86de;
+    --on-brand: #0e0f13;
+    --on-critical: #0e0f13;
+    --shadow-pop: 0 4px 14px -2px rgb(0 0 0 / 0.55);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0e0f13;
+  --surface: #16181d;
+  --surface-2: #1c1f25;
+  --surface-3: #252930;
+  --raised: #30353e;
+  --border: #2a2e36;
+  --border-strong: #3a3f49;
+  --text: #f3f1f4;
+  --text-2: #b9b3bb;
+  --text-3: #948f98;
+  --text-inverse: #0e0f13;
+  --grid: #22252b;
+  --axis: #353a43;
+  --crosshair: #858089;
+  --c-whale: #1a9e90;
+  --c-crowd: #7b86de;
+  --c-odds: #ec4a64;
+  --c-highlight: #d07f0a;
+  --c-new: #8a78e6;
+  --brand-a: #ec4a64;
+  --brand-b: #7b86de;
+  --focus: #7b86de;
+  --on-brand: #0e0f13;
+  --on-critical: #0e0f13;
+  --shadow-pop: 0 4px 14px -2px rgb(0 0 0 / 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur: 0ms;
+  }
+}

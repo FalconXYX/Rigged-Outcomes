@@ -1,0 +1,78 @@
+# Build the static dashboard (web/) and publish it to GitHub Pages.
+#
+# One-time setup (see README → Web Dashboard), or the deploy job is rejected:
+#   1. Settings → Pages → Build and deployment → Source: "GitHub Actions"
+#      (it currently publishes the D3.js branch; switching replaces that site).
+#   2. Settings → Environments → github-pages → Deployment branches: add "main"
+#      (the environment only allows "D3.js" today).
+# The site is served at https://parthjain.ca/Rigged-Outcomes/ (Vite base "./" + hash
+# routing, so no path configuration is needed here).
+
+name: Deploy dashboard to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; let an in-progress production deploy finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # Turns data/*.csv into web/public/data/*.json (gitignored, so built here).
+      - name: Export dashboard data
+        run: python export.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Type-check and build
+        working-directory: web
+        run: npm run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

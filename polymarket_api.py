@@ -6,8 +6,8 @@ Polymarket retired the Data API v1 (`/activity?user=…`, HTTP 410 "Data API v1
 has been retired") and the Goldsky orderbook subgraph (429 "paused and
 deprecated") in November 2026. Everything that fetches from Polymarket now
 goes through this module: polymarket_trades.py (raw trades), scrape_insiders.py
-(prior history) and watch.py (open-market scans) import from here, and nothing
-here imports them, so there is no import cycle.
+(prior history) and the watchlist package (watchlist.net, watchlist.method)
+import from here, and nothing here imports them, so there is no import cycle.
 
 Endpoints and the fields observed on 2026-11-05 (full spec:
 https://data-api.polymarket.com/v2/openapi.json, saved alongside the parity

@@ -28,7 +28,7 @@ import "../components/shell.css";
 import "./home.css";
 import "./home/preview.css";
 
-/* ── Shared market helpers (also used by MarketPage and the wallet pages) ── */
+/* ── Shared market helpers (also used by MarketPage) ── */
 
 const SHORT_TITLES: Record<string, string> = {
   usiran: "US strikes Iran",
@@ -165,7 +165,7 @@ function MarketCard({
           {/* The Traders tab's whale set: Flagged accounts and Flagged capital are computed over it. */}
           <Figure label="Whales" value={fmtInt(m.traderWhales ?? m.whaleCount)} keyColor="var(--c-whale)" />
           <Figure label="Flagged accounts" value={fmtInt(m.flaggedAccounts)} keyColor="var(--c-critical)" />
-          {/* Same metric, label and key as the Watch page's "Flagged capital" (export: flaggedWhaleCapitalPct). */}
+          {/* Same metric, label and key as the Traders tab's "Flagged capital" (export: flaggedWhaleCapitalPct). */}
           <Figure label="Flagged capital" value={fmtPct(m.pctSuspicious)} keyColor="var(--c-critical)" />
         </dl>
         <div className="mc-foot">
@@ -189,31 +189,6 @@ const PREVIEW_KEY: LegendItem[] = [
   { key: "crowd", label: "Crowd volume", color: "var(--c-crowd)", shape: "rect" },
   { key: "event", label: "Event", color: "var(--c-event)", shape: "dash" },
 ];
-
-function MethodCard({ i, itemRef }: { i: number; itemRef: (el: HTMLLIElement | null) => void }) {
-  return (
-    <li ref={itemRef} className="mc-item" style={{ "--i": i } as CSSProperties}>
-      <aside className="card market-card method-card" aria-labelledby="method-title">
-        <h3 id="method-title" className="mc-title">
-          How an account gets flagged
-        </h3>
-        <ul className="method-list">
-          <li>
-            <b>Whales</b> are winning positions worth at least 0.1% of the market’s volume (clamped to $1K–$5K).
-          </li>
-          <li>
-            A whale is <b>flagged</b> if its wallet had 10 or fewer prior trades, or put 80%+ of its lifetime volume
-            here.
-          </li>
-          <li>
-            <b>Flagged capital</b> is the flagged accounts’ share of whale capital.
-          </li>
-        </ul>
-        <p className="method-caveat">Flags are statistical signals, not proof of wrongdoing.</p>
-      </aside>
-    </li>
-  );
-}
 
 function SkeletonCard({ i }: { i: number }) {
   return (
@@ -317,7 +292,6 @@ export function Home({ index }: { index: Async<MarketIndex> }) {
             {ordered
               ? ordered.map((m, i) => <MarketCard key={m.name} m={m} i={i} animate={intro} itemRef={register(m.name)} />)
               : Array.from({ length: 7 }, (_, i) => <SkeletonCard key={i} i={i} />)}
-            <MethodCard i={ordered ? ordered.length : 7} itemRef={register("__method")} />
           </ul>
         )}
       </section>

@@ -10,7 +10,7 @@ cleandata folds a SELL into the same wallet's complement BUY when there is
 one, so a SELL row left over is either the exit of a BUY that is already
 counted, or (shares minted, then sold) a bet on the OTHER outcome. Those rows
 were scored as winning whales until November 2026 (about a third of every
-market's whale set). watch.py counts BUY positions only, the same rule.
+market's whale set).
 
 Prior history comes from Data API v2 (/v2/activity?user=…&type=TRADE&end=<first
 trade>) through polymarket_api.fetch_user_history_up_to; the v1 endpoint this
@@ -46,8 +46,8 @@ NEAR_CERTAIN_ODDS = 0.99
 
 def near_certain(df):
     """Boolean mask: positions whose average price is >= NEAR_CERTAIN_ODDS
-    (resolution sweeps). Shared with watch.py (and meant for export.py) so
-    every whale count on the site leaves them out the same way."""
+    (resolution sweeps). Used by whale_selection (and meant for export.py)
+    so every whale count on the site leaves them out the same way."""
     if "avg_odds" not in df.columns:
         return pd.Series(False, index=df.index)
     return pd.to_numeric(df["avg_odds"], errors="coerce").fillna(0) >= NEAR_CERTAIN_ODDS
@@ -147,8 +147,8 @@ def analyze_whale(row):
 
 def select_market(markets, keyword=None, name=None):
     """The markets.json entry to score. name= is an exact match on the entry's
-    "name" (what request_job.py and watch.py use, so "fired" can never pick
-    "fired-2"); keyword= keeps the original first-substring match on name or
+    "name" (the --name option, so "fired" can never pick "fired-2");
+    keyword= keeps the original first-substring match on name or
     slug; neither picks the first entry."""
     if name is not None:
         matches = [m for m in markets if str(m.get("name", "")) == str(name)]
@@ -184,7 +184,7 @@ def main(keyword=None, name=None):
 def score_market(m, clean_csv, out_csv):
     """Score the whales of market entry `m` (a markets.json dict) from
     clean_csv into out_csv. Paths are explicit, so a caller working on
-    another checkout (request_job.py --root) never depends on the cwd.
+    another checkout never depends on the cwd.
     The file is written whole (temp file + rename), so an interrupted run
     never leaves a truncated _insiders.csv that looks finished."""
     if not os.path.exists(clean_csv):
@@ -246,8 +246,8 @@ def score_market(m, clean_csv, out_csv):
         out_df = pd.DataFrame(results)
         out_df["market_title"] = market_title
     else:
-        # A market with no winning position above the threshold (small
-        # markets promoted by watch.py): write the full header so export.py
+        # A market with no winning position above the threshold (a small
+        # market): write the full header so export.py
         # and the site treat it as "no whales" instead of crashing on a
         # file with a lone market_title column.
         print(f"  ! no whale met the ${threshold:,.0f} threshold on the {correct_outcome or 'winning'} side "

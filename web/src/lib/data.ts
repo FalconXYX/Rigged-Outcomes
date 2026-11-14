@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { MarketData, MarketIndex } from "../types";
+import type { ClosedData, MarketData, MarketIndex, OpenData } from "../types";
 
 // Relative to index.html, which works from any GitHub Pages sub-path.
 const BASE = import.meta.env.BASE_URL;
@@ -22,6 +22,16 @@ function getJSON<T>(path: string): Promise<T> {
 export const loadIndex = () => getJSON<MarketIndex>("data/index.json");
 export const loadMarket = (name: string) =>
   getJSON<MarketData>(`data/markets/${encodeURIComponent(name)}.json`);
+export const loadClosed = () => getJSON<ClosedData>("data/closed.json");
+/**
+ * The open list (data/open.json), or null while there is none: a missing file
+ * (or the dev server's HTML fallback for it) resolves to null, never rejects.
+ */
+export const loadOpen = (): Promise<OpenData | null> =>
+  getJSON<OpenData>("data/open.json").then(
+    (d) => (d && Array.isArray(d.days) ? d : null),
+    () => null,
+  );
 
 export type Async<T> =
   | { status: "loading"; data?: undefined; error?: undefined }

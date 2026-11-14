@@ -198,7 +198,7 @@
   }
 }
 
-/* ── Section nav (Markets / Watch / Scout / Wallets) ───────────────── */
+/* ── Section nav (Markets / Watchlist) ─────────────────────────────────── */
 
 .site-nav-pages {
   margin-left: 10px;
@@ -236,7 +236,7 @@
   }
 }
 
-/* Phones: the mark stands in for the wordmark so the four section links fit on one row. */
+/* Phones: the mark stands in for the wordmark so the section links fit on one row. */
 @media (max-width: 719px) {
   .site-nav-pages {
     margin-left: 2px;

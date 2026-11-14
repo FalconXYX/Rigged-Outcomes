@@ -213,11 +213,36 @@
   grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 6px 10px;
-  margin: 6px 0 0;
-  padding: 6px 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
+  margin: 2px 0 0;
+  padding: 4px 0;
+}
+
+/* quiet controls: no boxes at rest, a fill on hover; the speed in use is ink */
+.tl-transport .btn-ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.tl-transport .btn-ghost:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--surface-3);
+}
+
+.tl-transport .segmented {
+  border-color: transparent;
+  background: transparent;
+}
+
+.tl-transport .segmented button {
+  border-left: 0;
+  padding: 4px 7px;
+  color: var(--text-3);
+}
+
+.tl-transport .segmented button.on,
+.tl-transport .segmented button.on:hover {
+  background: var(--surface-3);
+  color: var(--text);
 }
 
 .tl-play {
@@ -418,7 +443,7 @@
 .tl-crowd-line {
   fill: none;
   stroke: var(--c-crowd);
-  stroke-width: 2.25px;
+  stroke-width: 1.75px;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -426,7 +451,7 @@
 .tl-odds {
   fill: none;
   stroke: var(--c-odds);
-  stroke-width: 2.5px;
+  stroke-width: 1.75px;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -708,7 +733,7 @@
 
 .tl-ov-bg {
   fill: var(--surface-2);
-  stroke: var(--border);
+  stroke: none;
 }
 
 /* a chart wash (data, not chrome): the series hue at a quarter strength */
@@ -751,7 +776,7 @@
 .tl-ov-window {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 1.5px;
+  stroke-width: 1px;
   pointer-events: none;
   transition: stroke-width 120ms ease;
 }
@@ -1038,4 +1063,123 @@
   .tl-group-whale .stat-strip {
     grid-template-columns: repeat(6, minmax(0, 1fr));
   }
+}
+
+/* ── Events editor (local dev server only) ─────────────────────────── */
+
+.tl-ev {
+  position: relative;
+}
+
+.tl-ev-toggle {
+  gap: 6px;
+}
+
+.tl-ev-toggle.on {
+  background: var(--surface-3);
+}
+
+.tl-ev-count {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.tl-ev-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: 10px;
+  width: min(380px, calc(100vw - 32px));
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+}
+
+.tl-ev-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tl-ev-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px;
+  font-size: var(--fs-ui);
+}
+
+.tl-ev-time,
+.tl-ev-from,
+.tl-ev-empty,
+.tl-ev-note {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.tl-ev-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tl-ev-remove,
+.tl-ev-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  cursor: pointer;
+}
+
+.tl-ev-remove:hover,
+.tl-ev-link:hover {
+  color: var(--text);
+}
+
+.tl-ev-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.tl-ev-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.tl-ev-form input {
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--fs-ui);
+  color: var(--text);
+  color-scheme: inherit;
+}
+
+.tl-ev-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tl-ev-error {
+  font-size: var(--fs-sm);
+  color: var(--c-critical);
 }

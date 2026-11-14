@@ -7,3 +7,10 @@ __pycache__/
 data/*.csv
 !data/*_clean.csv
 !data/*_insiders.csv
+
+# watchlist: sqlite store, caches, logs, demo JSON (all regenerable)
+data/watchlist/
+
+# macOS folder files and pytest's cache (tests/test_v2_parity.py also runs under pytest)
+.DS_Store
+.pytest_cache/

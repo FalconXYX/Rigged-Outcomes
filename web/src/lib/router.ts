@@ -4,6 +4,8 @@ import { useSyncExternalStore } from "react";
 //   #/                     home
 //   #/m/:name              market (timeline view)
 //   #/m/:name/:view        market, view = "timeline" | "traders"
+//   #/watchlist            open markets to watch, and closed ones that look
+//                          like someone knew (#/closed, its old name, redirects here)
 // Every route may carry a query string (`#/m/usiran?range=Leadup&pin=0x…`)
 // that views use for shareable state; see useQuery / setQuery.
 
@@ -13,6 +15,7 @@ export type Query = Record<string, string>;
 export type Route =
   | { page: "home"; query: Query }
   | { page: "market"; name: string; view: MarketView; query: Query }
+  | { page: "watchlist"; query: Query }
   | { page: "notfound"; path: string; query: Query };
 
 function currentPath() {
@@ -42,6 +45,7 @@ export function parseRoute(path: string): Route {
   const query = parseQuery(qIndex === -1 ? "" : path.slice(qIndex + 1));
   const parts = pathname.split("/").filter(Boolean).map(decodeSegment);
   if (parts.length === 0) return { page: "home", query };
+  if ((parts[0] === "watchlist" || parts[0] === "closed") && parts.length === 1) return { page: "watchlist", query };
   if (parts[0] === "m" && parts[1]) {
     const view = parts[2] ?? "timeline";
     if ((view === "timeline" || view === "traders") && parts.length <= 3) {
@@ -105,8 +109,21 @@ export function setQuery(patch: Record<string, string | null | undefined>, { pus
   }
 }
 
+/**
+ * Old links: the watchlist was `#/closed` before it was renamed. Swap the
+ * path in place (no new history entry), keeping its query string.
+ */
+export function redirectOldPaths() {
+  const h = window.location.hash;
+  const old = /^#\/?closed\/?(?=\?|$)/.exec(h);
+  if (!old) return;
+  window.history.replaceState(window.history.state, "", `#/watchlist${h.slice(old[0].length)}`);
+  window.dispatchEvent(new Event(ROUTE_EVENT));
+}
+
 export const href = {
   home: () => "#/",
+  watchlist: () => "#/watchlist",
   market: (name: string, view: MarketView = "timeline", query?: Query) =>
     `#/m/${encodeURIComponent(name)}${view === "timeline" ? "" : `/${view}`}${query ? buildQuery(query) : ""}`,
 };

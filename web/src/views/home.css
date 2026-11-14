@@ -228,14 +228,17 @@
   padding-top: 12px;
   border-top: 1px solid var(--border);
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(min-content, 1fr));
   gap: 10px 12px;
 }
 
-/* Four across wherever a column clears "Flagged accounts" (one-up cards ≥ 640, two-up ≥ 1280). */
+/* Four across from one-up cards ≥ 640 and two-up ≥ 1280. Columns share the
+   width evenly but never go narrower than their label, so where an even
+   share is a few pixels short (1280–1359, 640–660, 360) "Flagged accounts"
+   takes them from the shorter columns instead of being cut off. */
 @media (min-width: 640px) and (max-width: 919.98px), (min-width: 1280px) {
   .mc-figs {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(min-content, 1fr));
   }
 }
 
@@ -295,36 +298,6 @@
 .mc-act-alt:is(:hover, :focus-visible) {
   color: var(--text);
   text-decoration-line: underline;
-}
-
-/* ── Method card (fills the 8th slot): title, three bullets, caveat ── */
-
-.method-list {
-  margin: 0;
-  padding: 0 0 0 18px;
-  display: grid;
-  gap: 8px;
-  font-size: var(--fs-body);
-  line-height: 1.55;
-  color: var(--text-2);
-}
-
-.method-list li::marker {
-  color: var(--text-3);
-}
-
-.method-list b {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.method-caveat {
-  margin-top: auto;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  color: var(--text-3);
 }
 
 /* ── Skeleton ──────────────────────────────────────────────────────── */

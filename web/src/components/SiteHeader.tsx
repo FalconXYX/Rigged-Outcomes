@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { href } from "../lib/router";
+import { href, useRoute } from "../lib/router";
 import { resolveTheme, useTheme, type ThemePref } from "../lib/theme";
 import "./shell.css";
 
@@ -82,6 +82,7 @@ function ThemeToggle() {
 }
 
 export function SiteHeader() {
+  const page = useRoute().page;
   return (
     <header className="site-header">
       <div className="container site-header-inner">
@@ -89,6 +90,14 @@ export function SiteHeader() {
           <BrandMark />
           <span className="brand-name">Rigged Outcomes</span>
         </a>
+        <nav className="site-nav site-nav-pages" aria-label="Pages">
+          <a className="nav-link" href={href.home()} aria-current={page === "home" || page === "market" ? "page" : undefined}>
+            Markets
+          </a>
+          <a className="nav-link" href={href.watchlist()} aria-current={page === "watchlist" ? "page" : undefined}>
+            Watchlist
+          </a>
+        </nav>
         <nav className="site-nav" aria-label="Site">
           <a className="icon-btn" href={REPO_URL} target="_blank" rel="noopener noreferrer" aria-label="Source code on GitHub" title="Source code on GitHub">
             <GitHubIcon />

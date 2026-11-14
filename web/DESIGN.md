@@ -41,7 +41,7 @@ border-top: 1px solid var(--border)`, then an `.eyebrow` (optional) and the `.se
 | `--fs-stat` | clamp(18px, 1.6vw, 21px) | 600 · -0.02em · 1.1 · tabular | stat values |
 
 **Label style** (`.eyebrow`, `.label`, `.stat-label`, `.table th`, `.tag` default): 11px, 600, +0.06em, uppercase,
-`--text-3`. Eyebrows carry no bar (`.has-bar` and `.accent-bar` are no-ops). Numbers that align (table columns,
+`--text-3`. Eyebrows carry no bar. Numbers that align (table columns,
 stat values, ticks, tooltip rows, counts, replay clocks) are `.tabular` and right-aligned in tables; nothing below
 11px. Weights: 400 prose · 500 UI text and cells · 600 labels, active controls, card titles, stat values, `<b>` ·
 700 h1/h2/hero · never 800. Active nav/tab links keep their weight (ink color + underline only) so widths never
@@ -84,8 +84,8 @@ dark surfaces, hairlines one step lighter (`--border #2a2e36`); keys clear 3:1 o
 - **Tag** `.tag` (replaces every chip/pill): inline-flex, 2px, 1px `--border`, transparent, `padding: 2px 6px`, label
   style, `--text-2`, `<b>` ink 600, `svg` `--text-3`. `.tag.sentence` = 12px/500 sentence case, `padding: 2px 7px`
   (dates, "34,924 positions"). Key = a `.key-dot` inside. `a.tag`/`.tag.link` hover = ink border; `.tag.filled`
-  = `--surface-2` only when the tag sits on `--surface-2`. The Resolved tag is `.chip.chip-outcome` from `Home.tsx`,
-  which shell.css renders as dot + "Resolved: Yes" (teal Yes / red No) — leave it. `.chip`/`.chip.raised`/`.chip.tinted`
+  = `--surface-2` only when the tag sits on `--surface-2`. The Resolved tag is `ResolvedChip` from `Home.tsx`
+  (`.resolved` in shell.css): a key dot + "Resolved · Yes", the dot's colour set by `data-outcome` — leave it. `.chip`/`.chip.raised`/`.chip.tinted`
   are aliases of `.tag.sentence` for this round; rename to `.tag` on sight.
 - **Stat strip** `.stat-strip` (alias `.stat-grid`) of `<StatTile>` cells: one ruled row with 1px grid lines
   (`gap: 1px; background: var(--border); border: 1px solid var(--border)`), radius 0; cells `--surface`,

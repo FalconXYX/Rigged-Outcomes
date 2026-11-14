@@ -2,9 +2,9 @@
 
 Detects potential insider trading on Polymarket prediction markets by analyzing who traded profitably before major outcomes occurred.
 
-Every trade in a resolved market is fetched, aggregated and scored, then published on the static site at **https://parthjain.ca/Rigged-Outcomes/** (bet timeline with replay, flagged traders, a home page you can sort and filter).
+Every trade in a resolved market is fetched, aggregated and scored, then published on the static site at **https://parthjain.ca/Rigged-Outcomes/** (bet timeline with replay, flagged traders, a home page you can sort and filter). A Watchlist page adds two daily lists made from market text and the news, with no trade data: open markets worth watching, and recently closed markets someone may have known about early.
 
-**Contents:** [Quick start](#quick-start) · [What it does](#what-it-does) · [Data flow](#data-flow) · [markets.json](#marketsjson-structure) · [Key columns](#key-columns) · [Detection logic](#insider-detection-logic) · [Web dashboard](#web-dashboard) · [Export](#export-exportpy) · [Data sources](#a-note-on-data-sources) · [One-time production setup](#one-time-production-setup)
+**Contents:** [Quick start](#quick-start) · [What it does](#what-it-does) · [Data flow](#data-flow) · [markets.json](#marketsjson-structure) · [Key columns](#key-columns) · [Detection logic](#insider-detection-logic) · [Web dashboard](#web-dashboard) · [Export](#export-exportpy) · [Recently closed list](#recently-closed-list-watchlistupsetspy) · [Open now list](#open-now-list-watchlistopennowpy) · [Data sources](#a-note-on-data-sources) · [One-time production setup](#one-time-production-setup)
 
 ---
 
@@ -16,7 +16,7 @@ All scripts run from the repo root (paths are cwd-relative). Python 3.12, Node 2
 
 ```bash
 pip install -r requirements.txt     # requests, pandas, numpy — the pipeline and CI
-pip install plotly dash             # optional: only the two Dash visualizers need these
+pip install plotly dash dash-mantine-components   # optional: only the two Dash visualizers need these
 npm --prefix web install            # the site
 ```
 
@@ -47,6 +47,7 @@ Output CSVs go to the `data/` folder. Only `_clean.csv` and `_insiders.csv` are 
 
 ```bash
 python3 tests/test_offline.py        # pipeline unit tests, seconds
+for f in tests/test_watchlist_*.py; do python3 "$f" || break; done   # the watchlist modules, about a second each
 python3 tests/test_v2_parity.py      # network, 2-3 minutes: re-fetches two markets and compares them with the committed CSVs
 npm --prefix web run typecheck
 ```
@@ -168,6 +169,7 @@ The two Dash apps (`VisualizeBetTiming.py` and `VisualizeInsiders.py`) are also 
 | `#/` | Home: every market as a card with a preview |
 | `#/m/<name>` | Bet timeline with replay, zoom/brush, pinned wallet card |
 | `#/m/<name>/traders` | Flagged traders: constellation + treemap |
+| `#/watchlist` | Watchlist: Open now (open markets to watch) and Recently closed (closed markets someone may have known about early); a card's details open in a side sheet. The old `#/closed` redirects here |
 
 **Run locally:**
 
@@ -176,7 +178,7 @@ python3 export.py                 # data/*.csv → web/public/data/*.json (~1 s)
 cd web && npm install && npm run dev
 ```
 
-Re-run `python3 export.py` (or `npm run data` from `web/`) whenever the CSVs or `markets.json` change. `web/public/data/` is generated and gitignored; don't edit it by hand.
+Re-run `python3 export.py` (or `npm run data` from `web/`) whenever the CSVs or `markets.json` change. `web/public/data/` is generated and gitignored; don't edit it by hand. Its `closed.json` and `open.json` come from the two watchlist lists ([Recently closed](#recently-closed-list-watchlistupsetspy), [Open now](#open-now-list-watchlistopennowpy)), not from `export.py`.
 
 **Other scripts (in `web/`):**
 
@@ -184,7 +186,7 @@ Re-run `python3 export.py` (or `npm run data` from `web/`) whenever the CSVs or 
 - `npm run preview`: serve the production build locally.
 - `npm run typecheck`: type-check only.
 
-**How deploy works:** every push to `main` (or a manual run from the Actions tab) triggers `.github/workflows/deploy.yml`. The workflow runs `pip install -r requirements.txt` and `python export.py`, then `npm ci && npm run build` in `web/`, uploads `web/dist/` as a Pages artifact and deploys it with `actions/deploy-pages`. The build uses a relative base (`./`) and hash routes (`#/m/usiran/traders`), so it works under any sub-path and survives page refreshes on GitHub Pages without extra config. First-time setup is in [One-time production setup](#one-time-production-setup).
+**How deploy works:** every push to `main` (or a manual run from the Actions tab) triggers `.github/workflows/deploy.yml`. The workflow runs `pip install -r requirements.txt` and `python export.py`, then `npm ci && npm run build` in `web/`, uploads `web/dist/` as a Pages artifact and deploys it with `actions/deploy-pages`. It does not make the Watchlist's data: `closed.json` and `open.json` are made only by local runs of `watchlist.upsets` and `watchlist.opennow` and are gitignored, so a deployed build has neither (its Watchlist page shows a load error under Recently closed and "Coming soon" under Open now). The build uses a relative base (`./`) and hash routes (`#/m/usiran/traders`), so it works under any sub-path and survives page refreshes on GitHub Pages without extra config. First-time setup is in [One-time production setup](#one-time-production-setup).
 
 ### Home page
 
@@ -208,6 +210,50 @@ Markets appear in `markets.json` order. A **Sort & filter** button above the gri
 | `markets/<name>.json` | timeline + traders for one market |
 
 The whale set, threshold, winner mask and IQR filter are computed once per market (`prepare_market`) and shared by the timeline and the ranking fields. Timestamps keep the site's convention (epoch seconds of the US/Eastern wall clock read as UTC; the front end formats them with UTC APIs). The export finishes in about a second. The TypeScript contract lives in `web/src/types.ts`.
+
+---
+
+## Recently closed list (`watchlist/upsets.py`)
+
+The "Recently closed" section of the Watchlist page shows, for each UTC day, 3 to 5 markets that closed that day and are worth a person's look as possible insider cases: someone could have known the answer before the public and bet on it. It is a light first filter from what the market asked, how it resolved and the news. No price, trade or wallet is read. For each day:
+
+1. Every market that closed in it with at least $10,000 traded (from Gamma); one with no single winner is left out.
+2. Left out before any model call: games, prices and weather (`watchlist/filters.py`), and by the word rules both lists share (`kinds.closed_exclusion` in `watchlist/kinds.py`) elections and votes, embargoed releases (official statistics, central bank decisions, scheduled company results, share-offering prices), things counted or charted in public, mention markets and nature. A model label (`watchlist/ai.py`, `gemini-3.5-flash-lite` first) then takes out the games, prices, weather, elections and votes the words missed. A deadline question whose answer was that nothing happened is left out too, a date ladder counts once, and markets settled by the same news count once.
+3. The check (`watchlist/judge.py`): a model writes a news query per market, Google News gives the headlines from three weeks before the close to two days after, and `gemini-3-flash-preview` (`gemini-3.5-flash-lite` when it is busy) answers three questions: could a small group know first, was the outcome a surprise, and was it kept quiet until it came out. Its verdict (potential case, weak, not a case) is made to agree with those answers.
+4. The day's list: the potential and weak cases, up to 5, topped up to 3 with the closest of the rest when the day has that many. A market that was on an Open now card is checked and shown whatever its verdict, unless it is a game, a price, weather or an embargoed release.
+
+```bash
+python3 -m watchlist.upsets                          # today so far (UTC), merged into web/public/data/closed.json
+python3 -m watchlist.upsets --days 3                 # the last 3 UTC days, today included
+python3 -m watchlist.upsets --since 2026-10-30       # every UTC day from this one to today
+python3 -m watchlist.upsets --out PATH --keep-days 14   # another output file; days kept in it (default 14)
+python3 tests/test_watchlist_upsets.py               # offline tests (the check: tests/test_watchlist_judge.py)
+```
+
+There is no dry run: every run asks Gamma, Gemini and Google News. AI labels and checks are cached in `data/watchlist/watchlist.db`, so a re-run only asks about markets it has not checked. The file is written after every day, so a stalled run keeps the days it finished. The key is read from `GEMINI_API_KEY` or from the `.env` file next to the repository.
+
+---
+
+## Open now list (`watchlist/opennow.py`)
+
+The "Open now" list (a trial) shows 3 to 5 markets that are still open, where a few people will know the answer before the public and this week's news shows them taking a step toward it. One run walks Polymarket's open events with at least $10,000 traded, searches Google News for each story and writes `web/public/data/open.json`. No price, odds, volume, trade or wallet reaches the model or chooses a card: volume and the 99¢ check (made once, when an event first enters the pool) only decide what is in the pool. The rules and their reasons are in the module's docstring and in `watchlist/kinds.py`.
+
+**The step reading proposes the steps; a person approves each card's step.** A market is listed when this week's news shows the few people who decide taking a concrete step toward the answer. The free Gemma model `gemma-4-31b-it` (same key, its own allowance, never a paid model) reads each shortlisted story once per request: the question, the event that would settle it, who decides by name, the start of the rules, and up to 8 of its step-word headlines from the last 7 days, numbered. For every number it says who acts, what happened, and one category ("step", or another event, another thing with the same name, already out, a denial, not the deciders, a rumour with no inside source). The code keeps a step only for a number it was given, once, whose "who acts" words are in that headline; a reading that marked a step is asked again with the headlines numbered in reverse, and only a headline both readings mark is proposed to a person (approved, it counts as the card's step). A headline's verdict is stored the first time it is read, so nothing flips overnight. A denial both readings name is shown as "the other side". `gemini-3.5-flash-lite` still names new stories and checks whether an answer is already out (twice, every copy checked word for word); `gemini-3-flash-preview` is never used, so its small allowance stays with the closed list.
+
+Why a person still approves: the first reading (flash-lite copying step headlines) failed its bars on 2026-11-13 (its two readings agreed on step or no step for 86% of 155 stories, bar 90%; about 3 in 10 copied steps were real, bar 8 in 10). The Gemma reading was then scored on a frozen yardstick of 63 of that day's stories and 397 hand-graded headline pairs: its two readings agreed on step or no step for all 63 stories, 83% of the headlines either reading marked were real steps (95% of those both marked, the rule the list uses), and it found 12 of the 13 stories with a real step. But the prompt was chosen on that yardstick. An independent check on 2026-11-14 graded every headline both readings marked that no gold label covers (from the day's live run, and from a second pass over the headlines the 8-headline cap had left out): on stories outside the yardstick, 23 of 37 were real steps (62%); over all of them, 52 of 68 (76%). That is under the 8-in-10 bar, so, as the proposal says when the bar is not met, the readings' steps wait in the `--review` queue and a card shows once a person approves its step (`STEPS_BY = "person"` at the top of `watchlist/opennow.py`; a dated card needs no step and shows on its own). `--review` lists the stories the list would take, each with the steps both readings marked first; `--approve` makes a headline count, and `--reject` takes a headline (or a dated card) off for good. The approvals made on 2026-11-13 still count. `STEPS_BY = "model"` lets the readings' steps show without approval, once a fresh test on another day (a person's blind grade of 30 marked steps, as the proposal asks) passes.
+
+```bash
+python3 -m watchlist.opennow                        # today's list: stored in data/watchlist/watchlist.db, written to web/public/data/open.json
+python3 -m watchlist.opennow --review               # the steps waiting for a person, numbered (both readings' first)
+python3 -m watchlist.opennow --approve 1 3.2        # item 1's first headline and item 3's second count as steps; rebuilds the reviewed list
+python3 -m watchlist.opennow --reject 2 4.1         # never shown (2: every headline offered for item 2, or its dated card); rebuilds
+python3 -m watchlist.opennow --dry-run --report data/watchlist/r.json   # walk the pool and search the news, ask the model nothing; nothing goes in the database or open.json (the searches are cached)
+python3 -m watchlist.opennow --dry-run --skip-news  # the pool walk alone (about 15 seconds)
+python3 -m watchlist.opennow --consistency DIR      # the consistency test of the step reading: both readings of the shortlist, the agreement report and a blind grading sheet in DIR
+python3 tests/test_watchlist_opennow.py             # offline tests
+```
+
+`--approve` and `--reject` rebuild the list that `--review` showed (the latest stored day), as it was made: at that day's own run time, from its searches (up to 30 hours older than the run) and its stored readings. The rebuild never asks the step model, so it takes seconds; a card that moves up to fill a freed place may cost one flash-lite request for its "already out" check. A day the model was down for stays "not updated today". A daily run takes about 15 minutes of Google News at about one search a second (about 1,400 searches, since stories whose outcomes can each happen, such as "Who will Trump pardon?", became one story per outcome), then the step reading: one Gemma request per shortlisted story (about 145 on a heavy day such as 2026-11-13), three at a time, 20 to 90 seconds each because the model is often busy (its 503s come back at once and are retried), so one to two hours; then the second reading of the stories with a step (10 to 25 requests). The rerun of 2026-11-13 read 144 stories and 25 again in 124 minutes: 169 answers from 525 HTTP requests (356 were busy retries), plus 3 flash-lite requests. Later runs read only headlines no reading has had before it: a reading is given up to 8 of a story's step-word headlines, and the others it picked from count as seen too, so a second run on the same news asks nothing and lists the same cards. It also makes a handful of flash-lite requests for the "already out" check, and naming a new story for its sentences costs one flash-lite request per 40 stories, once. `--workers N` sets how many step readings run at once. The key is read from `GEMINI_API_KEY` or from the `.env` file next to the repository. When a model is busy or down (three step readings in a row fail, every one fails for any reason, the key is refused, or an "already out" request fails every try), the day keeps yesterday's cards that are still live, adds none, and says "not updated today"; one story whose step reading fails while others are answered is only left for the next run. Run it at about 04:00 UTC, once a day. A second run on the same day replaces that day's list only when it finishes: one made while a model is down leaves the list already made that day as it was.
 
 ---
 

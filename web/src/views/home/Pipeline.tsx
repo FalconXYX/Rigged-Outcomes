@@ -26,7 +26,7 @@ type StepKey = "fetch" | "clean" | "identify" | "visualize";
 const STEPS: { key: StepKey; verb: string; text: string }[] = [
   { key: "fetch", verb: "Fetch", text: "Every trade in a market, from Polymarket’s Data API." },
   { key: "clean", verb: "Clean", text: "Trades become one position per wallet and outcome." },
-  { key: "identify", verb: "Identify", text: "Flag traders who concentrated bets in the final hours." },
+  { key: "identify", verb: "Identify", text: "Flag whales with 10 or fewer prior trades, or 80%+ of their volume here." },
   { key: "visualize", verb: "Visualize", text: "Interactive timelines and trader maps per market." },
 ];
 

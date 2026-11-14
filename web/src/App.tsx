@@ -1,5 +1,5 @@
 import { Component, Suspense, lazy, useEffect, useLayoutEffect, useRef, useState, type ComponentType, type ErrorInfo, type ReactNode } from "react";
-import { href, useRoute } from "./lib/router";
+import { href, redirectOldPaths, useRoute } from "./lib/router";
 import { loadIndex, useAsync } from "./lib/data";
 import { SiteHeader } from "./components/SiteHeader";
 import { SiteFooter } from "./components/SiteFooter";
@@ -39,10 +39,13 @@ function routeChunk<P extends object>(load: () => Promise<ComponentType<P>>) {
 
 const market = routeChunk(() => import("./views/MarketPage").then((m) => m.MarketPage));
 const { Route: MarketPage } = market;
+const watchlist = routeChunk(() => import("./views/WatchlistPage").then((m) => m.WatchlistPage));
+const { Route: WatchlistPage } = watchlist;
 
 function preloadRoutes() {
   const run = () => {
     market.preload().catch(() => {});
+    watchlist.preload().catch(() => {});
   };
   if (typeof window.requestIdleCallback === "function") {
     const id = window.requestIdleCallback(run, { timeout: 4000 });
@@ -129,10 +132,16 @@ export default function App() {
         : index.status === "ready"
           ? `Market not found · ${SITE}`
           : SITE;
+    else if (page === "watchlist") document.title = `Watchlist · ${SITE}`;
     else document.title = `Page not found · ${SITE}`;
   }, [page, marketTitle, index.status]);
 
   useEffect(preloadRoutes, []);
+  useEffect(() => {
+    redirectOldPaths();
+    window.addEventListener("hashchange", redirectOldPaths);
+    return () => window.removeEventListener("hashchange", redirectOldPaths);
+  }, []);
   useEffect(reloadOnStaleChunk, []);
 
   // Scroll to top when the page or market changes (not when switching views
@@ -218,6 +227,8 @@ export default function App() {
                 <Home index={index} />
               ) : route.page === "market" ? (
                 <MarketPage name={route.name} view={route.view} index={index} />
+              ) : route.page === "watchlist" ? (
+                <WatchlistPage />
               ) : (
                 <NotFound />
               )}

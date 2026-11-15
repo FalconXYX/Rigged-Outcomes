@@ -18,8 +18,8 @@ invocation_logs = false
 [[d1_databases]]
 binding = "DB"
 database_name = "rigged-outcomes"
-# replace with the id `wrangler d1 create` prints (docs/DEPLOY.md)
-database_id = "00000000-0000-0000-0000-000000000000"
+# the id `wrangler d1 create` printed
+database_id = "fefb90bc-c205-4628-b9b3-bd164ef93fba"
 migrations_dir = "migrations"
 
 # Production values. Secrets (wrangler secret put): TURNSTILE_SECRET, OWNER_TOKEN, JOB_TOKEN, VISITOR_SALT,

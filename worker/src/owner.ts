@@ -1,14 +1,13 @@
-// The owner's endpoints, behind OWNER_TOKEN, for the private review page (#/review): one overview, the
-// open list's decisions, the "Add to main page" requests, deleting markers, the pause switch, and
-// "Apply decisions now" (a GitHub workflow dispatch, when a token for it is set). All work while paused.
+// The owner's endpoints, behind OWNER_TOKEN, for the private review page (#/review): one overview (which
+// also lists the markets sent to the main page and the site's watchlist), the open list's decisions,
+// deleting markers, the pause switch, and "Apply decisions now" (a GitHub workflow dispatch, when a token for
+// it is set). All work while paused.
 
 import {
   BODY,
-  CONDITION_ID,
   type Ctx,
   DAY,
   DAY_TEXT,
-  PAGE_NAME,
   counter,
   fail,
   json,
@@ -49,15 +48,13 @@ export async function overview({ env }: Ctx): Promise<Response> {
     env.DB.prepare(
       "SELECT * FROM open_decisions WHERE decision != 'withdrawn' AND (applied_at IS NULL OR applied_at >= ?) ORDER BY decided_at DESC",
     ).bind(at - 14 * DAY),
-    env.DB.prepare(
-      `SELECT * FROM requests WHERE status IN ('requested', 'approved', 'failed') OR decided_at >= ?1 OR done_at >= ?1
-       ORDER BY requested_at DESC LIMIT 200`,
-    ).bind(at - 30 * DAY),
+    env.DB.prepare("SELECT * FROM requests WHERE status != 'added' OR done_at >= ? ORDER BY requested_at DESC LIMIT 200").bind(
+      at - 30 * DAY,
+    ),
     env.DB.prepare(`SELECT ${MARKER_COLUMNS} FROM markers ORDER BY created_at DESC LIMIT 50`),
     env.DB.prepare(
-      `SELECT w.story, count(*) AS count, min(w.created_at) AS since, c.data FROM watches w
-       LEFT JOIN catalog c ON c.kind = 'open' AND c.id = w.story
-       GROUP BY w.story ORDER BY count DESC, since LIMIT 200`,
+      `SELECT w.story, w.created_at AS since, c.data FROM watches w
+       LEFT JOIN catalog c ON c.kind = 'open' AND c.id = w.story ORDER BY w.created_at DESC LIMIT 200`,
     ),
     env.DB.prepare("SELECT * FROM job_runs ORDER BY id DESC LIMIT 10"),
   ]);
@@ -70,9 +67,9 @@ export async function overview({ env }: Ctx): Promise<Response> {
     decisions: decisions.results.map(decision),
     requests: requests.results,
     markers: markers.results,
-    watched: (watched.results as { story: string; count: number; since: number; data: string | null }[]).map((w) => {
+    watched: (watched.results as { story: string; since: number; data: string | null }[]).map((w) => {
       const c = w.data ? (JSON.parse(w.data) as { question?: string; url?: string }) : {};
-      return { story: w.story, count: w.count, since: w.since, question: c.question ?? null, url: c.url ?? null };
+      return { story: w.story, since: w.since, question: c.question ?? null, url: c.url ?? null };
     }),
     runs: runs.results,
   });
@@ -154,56 +151,6 @@ export async function deleteDecision({ env, url }: Ctx): Promise<Response> {
   fail(404, "not_found", "No such decision.");
 }
 
-const TRANSITIONS = {
-  approve: { from: ["requested", "declined"], to: "approved" },
-  decline: { from: ["requested", "approved", "failed"], to: "declined" },
-  retry: { from: ["failed"], to: "approved" },
-} as const;
-
-/** Approve (with the markets.json name to add it under), decline, or retry a failed add. */
-export async function decideRequest({ req, env, params }: Ctx): Promise<Response> {
-  const cid = params[0].toLowerCase();
-  if (!CONDITION_ID.test(cid)) fail(400, "bad_request", "The path must end in a condition id.");
-  const body = await readBody(req, BODY.owner);
-  const action = oneOf(body.action, "action", ["approve", "decline", "retry"] as const);
-  const row = await env.DB.prepare("SELECT status, name FROM requests WHERE condition_id = ?").bind(cid).first<{
-    status: string;
-    name: string | null;
-  }>();
-  if (!row) fail(404, "not_found", "No request for that market.");
-  const move = TRANSITIONS[action];
-  if (!(move.from as readonly string[]).includes(row.status)) {
-    fail(409, "bad_transition", `A request that is ${row.status} can't be given "${action}".`);
-  }
-
-  let name = row.name;
-  if (action === "approve" || (action === "retry" && body.name !== undefined && body.name !== null)) {
-    if (typeof body.name !== "string" || !PAGE_NAME.test(body.name)) {
-      fail(400, "bad_name", "A page name is 2 to 32 lower-case letters, digits and dashes, starting with a letter or digit.");
-    }
-    name = body.name;
-    const taken = await env.DB.batch([
-      env.DB.prepare("SELECT 1 FROM catalog WHERE kind = 'market' AND id = ?").bind(name),
-      env.DB.prepare("SELECT 1 FROM requests WHERE name = ? AND condition_id != ? AND status IN ('approved', 'added', 'failed')").bind(
-        name,
-        cid,
-      ),
-    ]);
-    if (taken.some((r) => r.results.length)) fail(409, "name_taken", `The page name "${name}" is already used.`);
-  }
-  if (move.to === "approved" && !name) fail(400, "bad_name", "Approving needs a page name.");
-
-  const updated = await env.DB.prepare(
-    `UPDATE requests SET status = ?1, name = ?2, decided_at = ?3, note = CASE WHEN ?1 = 'approved' THEN NULL ELSE note END,
-       done_at = CASE WHEN ?1 = 'approved' THEN NULL ELSE done_at END
-     WHERE condition_id = ?4 AND status = ?5 RETURNING *`,
-  )
-    .bind(move.to, name, now(), cid, row.status)
-    .first();
-  if (!updated) fail(409, "bad_transition", "The request changed meanwhile; reload and try again.");
-  return json({ request: updated });
-}
-
 /** Delete any marker (kept 30 days as deleted, then removed for good). */
 export async function deleteMarker({ env, params }: Ctx): Promise<Response> {
   const id = params[0];
@@ -218,7 +165,7 @@ export async function deleteMarker({ env, params }: Ctx): Promise<Response> {
   fail(404, "not_found", "No such marker.");
 }
 
-/** The pause switch: writes "off" stops visitors' adds, watches and requests (undo and unwatch still work). */
+/** The pause switch: writes "off" stops visitors' markers, watches and adds to the main page (undo and unwatch still work). */
 export async function putSettings({ req, env }: Ctx): Promise<Response> {
   const body = await readBody(req, BODY.owner);
   const writes = oneOf(body.writes, "writes", ["on", "off"] as const);
@@ -239,7 +186,7 @@ const DISPATCHES_A_DAY = 30;
  * token for this repository with Actions: read and write). At most one every 2 minutes and 30 a day.
  */
 export async function apply({ req, env }: Ctx): Promise<Response> {
-  if (!env.GITHUB_DISPATCH_TOKEN) fail(501, "no_dispatch", "No GITHUB_DISPATCH_TOKEN is set, so the next daily run applies decisions.");
+  if (!env.GITHUB_DISPATCH_TOKEN) fail(501, "no_dispatch", "No GITHUB_DISPATCH_TOKEN is set, so the next hourly run applies decisions.");
   const at = now();
   const prev = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'last_dispatch'").first<string>("value")) ?? "0";
   const claimed = await env.DB.prepare(

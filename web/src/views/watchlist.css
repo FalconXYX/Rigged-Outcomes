@@ -4,8 +4,9 @@
    an indigo rule; a still placeholder while there is none. Below, "Recently
    closed": one day's 3-5 closed markets, each card under a rule in its
    verdict's colour. Each is a row of cards (one column on a phone). A card's
-   "Details" opens a side sheet over the page (watchlist/Sheet.tsx); one is
-   open at a time. */
+   foot holds "Details" and its action ("Watch this market", "+ Add to main
+   page"). "Details" opens a panel of its own under the card's row (under the
+   card on a phone; watchlist/shared.tsx); one is open at a time. */
 
 .wl-page {
   display: grid;
@@ -90,25 +91,6 @@
   background: linear-gradient(90deg, var(--brand-a), var(--brand-b) 32%, transparent 78%);
 }
 
-/* "● Open now  TRIAL" */
-.wl-open-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 14px;
-}
-
-/* "Trial" ("Coming soon" while there is no list), in the gradient */
-.wl-pill {
-  padding: 3px 7px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  background: var(--brand-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
 /* the section's mark: a still dot in the gradient */
 .wl-dot {
   flex: none;
@@ -118,7 +100,7 @@
   background: var(--brand-gradient);
 }
 
-/* the one sentence under the header: what the list is, and is not */
+/* the one sentence under the header: what the list is */
 .op-lede {
   max-width: 80ch;
   font-size: var(--fs-ui);
@@ -288,10 +270,14 @@
    stretches across the page. Each card spans its rows of this grid and
    shares them (subgrid), so each part lines up across the row whatever its
    length: a closed card's 6 (verdict, title, outcome, what happened, checks,
-   "Details"), an open card's 4 (title, quote, who knows first, "Details"). */
+   "Details"), an open card's 4 (title, quote, who knows first, "Details").
+   An open card's panel comes right after it in the markup and spans the
+   whole row; `dense` lets the cards after it fill the row first, so the
+   panel lands under the row (under the card on a phone). */
 .cl-cards {
   display: grid;
   grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr));
+  grid-auto-flow: row dense;
   gap: 12px;
 }
 
@@ -300,18 +286,17 @@
    open cards' indigo). --vc is the rule and the marks; --vc-ink the same hue
    as text (the amber a step darker in light, lighter in dark, so its label
    reads). An open card has none: it takes the indigo accent. */
-.wl-page,
-.wl-sheet {
+.wl-page {
   --slate: #64748b;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) :is(.wl-page, .wl-sheet) {
+  :root:where(:not([data-theme="light"])) .wl-page {
     --slate: #8d9bb0;
   }
 }
 
-:root[data-theme="dark"] :is(.wl-page, .wl-sheet) {
+:root[data-theme="dark"] .wl-page {
   --slate: #8d9bb0;
 }
 
@@ -355,6 +340,14 @@
   border-top-color: var(--vc, var(--accent));
 }
 
+/* the open card: only its hairline a step darker (its panel is a box of its
+   own under the row, named in words, nothing joining the two) */
+.cl-card[data-open] {
+  border-color: var(--border-strong);
+  border-top-color: var(--vc, var(--accent));
+  cursor: default;
+}
+
 /* "POTENTIAL CASE", in the verdict's colour */
 .cl-verdict {
   color: var(--vc-ink);
@@ -394,7 +387,7 @@
   color: var(--text);
 }
 
-/* what happened: two lines at most (the sheet has it whole) */
+/* what happened: two lines at most (the panel has it whole) */
 .cl-what {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -466,7 +459,7 @@
   }
 }
 
-/* the mark: in the card's (or sheet's) verdict colour when filled, ink in the key */
+/* the mark: in the card's (or panel's) verdict colour when filled */
 .cl-glyph {
   flex: none;
   display: inline-block;
@@ -491,12 +484,24 @@
   border-style: dashed;
 }
 
-/* "Details ›": opens the card's sheet */
+/* the card's foot: "Details ⌄" (or "Close ⌃") on the left, the card's
+   action on the right ("+ Add to main page", "Watch this market"); on top
+   of its row, so each card's "Details" lines up across the row when one
+   foot wraps */
+.cl-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  align-self: start;
+  gap: 4px 16px;
+  min-width: 0;
+}
+
+/* "Details ⌄": opens the card's panel; "Close ⌃" while it is open */
 .cl-card-more {
   display: inline-flex;
   align-items: center;
-  align-self: end;
-  justify-self: start;
   gap: 5px;
   padding: 2px 0;
   border: 0;
@@ -508,13 +513,14 @@
   transition: color var(--dur) var(--ease);
 }
 
-.cl-card:hover .cl-card-more,
-.cl-card-more:hover {
+.cl-card:not([data-open]):hover .cl-card-more,
+.cl-card-more:hover,
+.cl-card-more[aria-expanded="true"] {
   color: var(--text);
 }
 
-.cl-card-more .cl-chev {
-  transform: rotate(-90deg);
+.cl-chev[data-up] {
+  transform: rotate(180deg);
 }
 
 /* ── Open now: the cards ───────────────────────────────────────────── */
@@ -665,51 +671,38 @@ a.op-quote:hover .op-quote-text {
   display: none;
 }
 
-/* ── Details: the side sheet ───────────────────────────────────────── */
+/* ── Details: a panel of its own under the card's row ──────────────── */
 
-/* It slides in from the right over the page, full height under the site
-   header, 560px wide (the whole screen on a phone), over a light dim. One
-   hairline on its open edge; no shadow. */
-.wl-sheet-dim {
-  position: fixed;
-  inset: calc(var(--header-h) + 1px) 0 0;
-  z-index: 45;
-  background: rgb(14 15 19 / 0.2);
+/* It spans the cards' row (see .cl-cards) as a box of its own: its own
+   border and corners, 16px of page above it, nothing joining it to the card
+   (its first line names the market instead). The story on the left; the
+   news on the right (the headlines, folded to 3); the actions under the
+   story; one hairline, above the actions. Its
+   text starts where the cards' does. It fades in (no slide, so the scroll
+   that brings it into view measures it where it lands). */
+.wl-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 4fr);
+  grid-template-rows: auto auto 1fr;
+  grid-template-areas:
+    "top top"
+    "main side"
+    "foot side";
+  align-items: start;
+  gap: 16px 56px;
+  min-width: 0;
+  margin-block: 4px;
+  padding: 16px 18px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
   animation: wl-fade var(--dur) var(--ease) both;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) .wl-sheet-dim {
-    background: rgb(0 0 0 / 0.45);
-  }
-}
-
-:root[data-theme="dark"] .wl-sheet-dim {
-  background: rgb(0 0 0 / 0.45);
-}
-
-.wl-sheet {
-  position: fixed;
-  top: calc(var(--header-h) + 1px);
-  right: 0;
-  bottom: 0;
-  z-index: 46;
-  display: flex;
-  flex-direction: column;
-  width: min(560px, 100%);
-  border-left: 1px solid var(--border);
-  background: var(--surface);
-  animation: wl-sheet-in 260ms var(--ease) both;
-}
-
-.wl-sheet:focus {
-  outline: none;
-}
-
-@keyframes wl-sheet-in {
-  from {
-    transform: translateX(100%);
-  }
+/* 4-5 cards: the cards' narrower padding */
+.cl-cards[data-many] .wl-panel {
+  padding-inline: 14px;
 }
 
 @keyframes wl-fade {
@@ -719,62 +712,97 @@ a.op-quote:hover .op-quote-text {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .wl-sheet,
-  .wl-sheet-dim {
+  .wl-panel {
     animation: none;
   }
 }
 
-/* × : alone in the top-right corner, staying put while the sheet scrolls */
-.wl-sheet-x {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  z-index: 1;
+/* "DETAILS  Will Howard Lutnick leave office …?" and × */
+.wl-panel-top {
+  grid-area: top;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.wl-panel-name {
+  min-width: 0;
+  padding-top: 5px;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-2);
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+/* only where focus lands when it opens, not a control: no ring (the next Tab reaches ×, which has one) */
+.wl-panel-name:focus {
+  outline: none;
+}
+
+/* "DETAILS", in the card's colour (a closed card's verdict, an open card's indigo) */
+.wl-panel-k {
+  margin-right: 10px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vc-ink, var(--accent));
+}
+
+/* × : close the panel, alone at the end of its first line */
+.wl-panel-x {
+  flex: none;
   display: inline-grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
+  margin: 0 -10px 0 0;
   padding: 0;
   border: 0;
   border-radius: var(--radius-xs);
-  background: var(--surface);
+  background: none;
   color: var(--text-3);
   cursor: pointer;
   transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
 }
 
-.wl-sheet-x:hover {
+.wl-panel-x:hover {
   background: var(--surface-2);
   color: var(--text);
 }
 
-.wl-sheet-body {
-  flex: 1;
+.wl-panel-main,
+.wl-panel-side {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
-  gap: 26px;
-  min-height: 0;
-  padding: 26px 28px 32px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  gap: 22px;
+  min-width: 0;
 }
 
-.wl-sheet-sec {
+.wl-panel-main {
+  grid-area: main;
+}
+
+.wl-panel-side {
+  grid-area: side;
+}
+
+.wl-panel-sec {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: 8px;
   min-width: 0;
 }
 
-/* the sheet's first line clears × */
-.wl-sheet-first {
-  padding-right: 36px;
-}
-
-/* the sheet's lead: what happened, or Polymarket's own question */
-.wl-sheet-lead {
-  font-size: 20px;
+/* the panel's lead: what happened, or Polymarket's own question */
+.wl-panel-lead {
+  max-width: 36em;
+  font-size: 18px;
   font-weight: 600;
   letter-spacing: -0.015em;
   line-height: 1.35;
@@ -796,7 +824,8 @@ a.op-quote:hover .op-quote-text {
 }
 
 /* why, its opening words in ink naming the verdict; why this kind is watched */
-.wl-sheet-text {
+.wl-panel-text {
+  max-width: 72ch;
   margin-top: 4px;
   font-size: var(--fs-ui);
   line-height: 1.6;
@@ -804,16 +833,19 @@ a.op-quote:hover .op-quote-text {
   text-wrap: pretty;
 }
 
-.wl-sheet-sec > .cl-h + .wl-sheet-text {
+.wl-panel-sec > .cl-h + .wl-panel-text {
   margin-top: 0;
 }
 
-.wl-sheet-text b {
+.wl-panel-text b {
   font-weight: 600;
   color: var(--text);
 }
 
-/* a heading in the sheet: sentence case, no tracking, in ink */
+/* a heading in the panel: sentence case, no tracking, in ink (the controls
+   are the grey ones, with a chevron or an arrow); an open card's in its
+   indigo, as the card's "Known first by:" (a closed card's colour is in its
+   marks) */
 .cl-h {
   font-size: var(--fs-sm);
   font-weight: 600;
@@ -821,17 +853,22 @@ a.op-quote:hover .op-quote-text {
   color: var(--text);
 }
 
+.wl-panel:not([data-verdict]) .cl-h {
+  color: var(--accent);
+}
+
 .cl-h-aside {
   font-weight: 500;
   color: var(--text-3);
 }
 
-/* the checks: mark | check | answer, what the news said under them */
+/* the checks, a line each: mark | check | answer | what the news said, in
+   columns (on a phone what the news said goes under them) */
 .cl-ledger {
   display: grid;
-  grid-template-columns: 10px max-content minmax(0, 1fr);
+  grid-template-columns: 10px max-content max-content minmax(0, 1fr);
   column-gap: 10px;
-  row-gap: 10px;
+  row-gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -851,18 +888,17 @@ a.op-quote:hover .op-quote-text {
 }
 
 .cl-ledger b {
-  padding-right: 8px;
   font-weight: 600;
   color: var(--text);
 }
 
 .cl-ledger-ans {
+  padding-right: 8px;
   font-weight: 500;
   color: var(--text-3);
 }
 
 .cl-ledger-why {
-  grid-column: 2 / -1;
   min-width: 0;
   color: var(--text-2);
   overflow-wrap: anywhere;
@@ -885,7 +921,8 @@ a.op-quote:hover .op-quote-text {
   color: var(--text-3);
 }
 
-/* the markets counted under this one (the same news settled them) */
+/* the markets counted under this one (the same news settled them); a long
+   list starts folded */
 .wl-plain {
   display: grid;
   gap: 4px;
@@ -896,16 +933,23 @@ a.op-quote:hover .op-quote-text {
   color: var(--text-2);
 }
 
-/* headlines: "Headline — Source · Nov 11", newest last */
+/* headlines, newest last: the headline, "Source · Nov 11" under it */
 .wl-news {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   margin: 0;
   padding: 0;
   list-style: none;
   font-size: var(--fs-ui);
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.wl-news li {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  min-width: 0;
 }
 
 .wl-news a {
@@ -927,7 +971,13 @@ a.op-quote:hover .op-quote-text {
 .wl-news-src {
   font-size: var(--fs-sm);
   font-weight: 500;
+  line-height: 1.4;
   color: var(--text-3);
+}
+
+/* "Show all 12 headlines ⌄" / "Show fewer ⌃" */
+.wl-news-all {
+  margin-top: 2px;
 }
 
 /* "Reuters · Nov 12" never splits across lines */
@@ -955,8 +1005,9 @@ a.op-quote:hover .op-quote-text {
   color: var(--text-3);
 }
 
-/* the actions, on one line at the bottom */
-.wl-sheet-foot {
+/* the actions, under the story */
+.wl-panel-foot {
+  grid-area: foot;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -969,7 +1020,7 @@ a.op-quote:hover .op-quote-text {
 
 /* "+ Add to main page · The site's owner reviews each request", "Watch this
    market · …": a quiet text button, then what happens next, no box around
-   it; greyed out while it can't be used ("· Not available yet"). A longer
+   it. A longer
    note wraps beside its button. */
 .cl-add {
   display: inline-flex;
@@ -1001,7 +1052,7 @@ a.op-quote:hover .op-quote-text {
   white-space: normal;
 }
 
-/* the open sheet's "Watch this market": a line of its own under the others */
+/* the open card's "Watch this market": a line of its own under the others */
 .op-watch {
   flex-basis: 100%;
 }
@@ -1052,6 +1103,68 @@ a.op-quote:hover .op-quote-text {
   text-underline-offset: 3px;
 }
 
+/* ── the actions: on the card's face and in its panel ──────────────── */
+
+/* On the card, beside "Details": "+ Add to main page", "Watch this
+   market", a text button in the card's colour (a closed card's verdict, an
+   open card's indigo); once used, the result in its place ("Requested · waiting for
+   review", "Watching · 3 visitors · Stop watching"). */
+.wl-act {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.wl-act-btn,
+.wl-act-stop {
+  padding-block: 2px;
+}
+
+/* the panel's buttons take the same colour */
+.wl-act-btn,
+.cl-add-btn,
+.wl-act-state,
+.cl-add-state {
+  color: var(--vc-ink, var(--accent));
+}
+
+.wl-act-state,
+.cl-add-state {
+  font-weight: 600;
+}
+
+.wl-act-btn:not([aria-disabled]):hover,
+.cl-add-btn:not([aria-disabled]):hover {
+  color: var(--vc-ink, var(--accent));
+  text-decoration-color: currentColor;
+}
+
+.wl-act-btn[aria-disabled="true"],
+.wl-act-btn[aria-disabled="true"]:hover {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+/* "Stop watching": a plain grey control, on the card and in the panel */
+.cl-link.wl-act-stop {
+  color: var(--text-2);
+}
+
+.cl-link.wl-act-stop:not([aria-disabled]):hover {
+  color: var(--text);
+  text-decoration-color: var(--text-3);
+}
+
+/* "Couldn't send: …" under the foot */
+.wl-act-error {
+  flex-basis: 100%;
+  white-space: normal;
+}
+
 /* ── how these were picked ─────────────────────────────────────────── */
 
 .cl-more > summary {
@@ -1086,31 +1199,14 @@ a.op-quote:hover .op-quote-text {
   border-top: 1px solid var(--border);
 }
 
+/* one paragraph, the container's full width */
 .cl-dayinfo p {
-  max-width: 80ch;
   margin-top: 6px;
   font-size: var(--fs-sm);
   line-height: 1.5;
   color: var(--text-3);
 }
 
-.cl-dayinfo ul {
-  max-width: 80ch;
-}
-
-.cl-glyph-key {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 14px;
-}
-
-.cl-glyph-key > span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-2);
-}
 
 /* ── narrower screens ──────────────────────────────────────────────── */
 
@@ -1143,6 +1239,22 @@ a.op-quote:hover .op-quote-text {
   .wl-ghost[data-pos="prev"] {
     display: none;
   }
+
+  /* the panel in one column: story, headlines, actions */
+  .wl-panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-template-areas:
+      "top"
+      "main"
+      "side"
+      "foot";
+    row-gap: 22px;
+  }
+
+  .wl-panel-top {
+    margin-bottom: -6px;
+  }
 }
 
 @media (max-width: 599px) {
@@ -1155,23 +1267,24 @@ a.op-quote:hover .op-quote-text {
     display: none;
   }
 
-  .cl-card-title,
-  .wl-sheet-lead {
+  .cl-card-title {
     font-size: 19px;
   }
 
-  /* the sheet takes the whole screen under the header */
-  .wl-sheet {
-    border-left: 0;
+  .wl-panel-lead {
+    font-size: 17px;
   }
 
-  .wl-sheet-body {
-    padding: 20px 16px 28px;
+  .cl-ledger {
+    grid-template-columns: 10px max-content minmax(0, 1fr);
   }
 
-  .wl-sheet-x {
-    top: 10px;
-    right: 8px;
+  .cl-ledger-why {
+    grid-column: 2 / -1;
+  }
+
+  .wl-panel {
+    padding: 12px 16px 18px;
   }
 
   .cl-daypick {
@@ -1185,4 +1298,66 @@ a.op-quote:hover .op-quote-text {
   .cl-daypick .select select {
     width: 100%;
   }
+}
+
+/* ── the action buttons: real buttons, on the card and in the panel ── */
+
+/* "+ Add to main page", "Watch this market", "On the main page →": an
+   outlined button in the card's colour that fills on hover; "Stop watching"
+   is the plain outlined one. */
+.wl-act,
+.cl-add {
+  align-items: center;
+}
+
+.cl-link.wl-act-btn,
+.cl-link.cl-add-btn,
+.cl-link.wl-act-stop {
+  padding: 5px 11px;
+  border: 1px solid var(--vc-ink, var(--accent));
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  color: var(--vc-ink, var(--accent));
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.3;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.cl-link.wl-act-btn:not([aria-disabled]):hover,
+.cl-link.cl-add-btn:not([aria-disabled]):hover {
+  background: var(--vc-ink, var(--accent));
+  color: var(--text-inverse);
+  text-decoration: none;
+}
+
+.cl-link.wl-act-stop {
+  border-color: var(--border-strong);
+  color: var(--text-2);
+}
+
+.cl-link.wl-act-stop:not([aria-disabled]):hover {
+  background: var(--surface-2);
+  border-color: var(--text-3);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.cl-link.wl-act-btn[aria-disabled="true"],
+.cl-link.wl-act-btn[aria-disabled="true"]:hover,
+.cl-link.cl-add-btn[aria-disabled="true"],
+.cl-link.cl-add-btn[aria-disabled="true"]:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+
+.cl-link.wl-act-btn:focus-visible,
+.cl-link.cl-add-btn:focus-visible,
+.cl-link.wl-act-stop:focus-visible {
+  outline: 2px solid var(--vc-ink, var(--accent));
+  outline-offset: 2px;
 }

@@ -1,51 +1,98 @@
-# The daily Watchlist lists and the site owner's decisions (docs/DEPLOY.md). One modest run a day that
-# builds and publishes this site's own data; "apply" runs only when the owner asks for it from the review
-# page (or from the Actions tab).
+# The daily Watchlist lists, the site owner's decisions and the markets visitors add to the main page
+# (docs/DEPLOY.md). One full run a day that builds and publishes this site's own data, and a light "apply" run
+# every hour (and when the owner asks for one from the review page, or from the Actions tab).
 #
-#   full   the owner's decisions, the Recently closed list (the last 2 UTC days), the Open now list,
-#          approved "Add to main page" markets, then the site's deploy
-#   apply  only the owner's decisions (the reviewed day rebuilt) and approved markets, then the deploy
+#   full   the owner's decisions, the Recently closed list (the last 2 UTC days), the Open now list, the
+#          markets sent with "Add to main page", then the site's deploy
+#   apply  only the owner's decisions (the reviewed day rebuilt) and the markets to add, then the deploy. It
+#          first asks the API whether anything waits (the `check` job, one curl call): with nothing, the run
+#          ends there in seconds and deploys nothing. It also stands aside while another run of this
+#          workflow is going or waiting (the next hourly run picks the work up), so it never takes the place
+#          of a daily run waiting for the `watchlist` concurrency group
 #
 # The job's memory lives on the `watchlist-data` branch (watchlist/state.py): it is pulled first and pushed
 # after the lists, so a fresh runner starts from yesterday. The news searches cache rides in the Actions
 # cache (it only saves a same-day rebuild its searches). The only commit this job makes to `main` is an
-# approved market (markets.json and its two CSVs).
+# added market (markets.json and its two CSVs).
 #
 # One-time setup (docs/DEPLOY.md): the `watchlist-data` branch seeded from the Mac
 # (`python3 -m watchlist.state push --seed --by mac`), the secrets GEMINI_API_KEY and WATCHLIST_JOB_TOKEN,
-# and the variable API_URL (the Worker's address; the job runs without it, but decisions, requests and watch
-# counts then wait). GitHub turns schedules off after 60 days without activity in the repository; the
-# review page warns when no run has reported for 30 hours.
+# and the variable API_URL (the Worker's address; the job runs without it, but decisions, markets to add and
+# the watchlist then wait). GitHub turns schedules off after 60 days without activity in the repository; the
+# review page warns when no daily run has reported for 30 hours.
 
 name: Watchlist
 
 on:
   schedule:
-    - cron: "17 4 * * *"            # about 04:17 UTC; off the hour (GitHub delays on-the-hour schedules)
+    - cron: "17 4 * * *"            # full: about 04:17 UTC; off the hour (GitHub delays on-the-hour schedules)
+    - cron: "47 * * * *"            # apply: every hour at about :47 (MODE and the check job test this exact string)
   workflow_dispatch:
     inputs:
       mode:
-        description: "full = the daily lists; apply = only the owner's decisions and approved markets"
+        description: "full = the daily lists; apply = only the owner's decisions and the markets to add"
         type: choice
         options: [full, apply]
         default: full
 
 permissions:
-  contents: write                   # the watchlist-data branch, and main for an approved market
+  contents: write                   # the watchlist-data branch, and main for an added market
 
-concurrency:
-  group: watchlist                  # never two writers of the state branch
-  cancel-in-progress: false
-
-# The API's address and the job's token are given only to the three steps that call the API (fetching the work,
-# saving the state with the API's backup, the report), never to the installs or the list steps.
+# The API's address and the job's token are given only to the steps that call the API (the check, fetching the
+# work, saving the state with the API's backup, the report), never to the installs or the list steps.
 env:
   PYTHONUNBUFFERED: "1"
-  MODE: ${{ inputs.mode || 'full' }}
+  MODE: ${{ inputs.mode || github.event.schedule == '47 * * * *' && 'apply' || 'full' }}
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
 jobs:
+  check:
+    if: inputs.mode == 'apply' || github.event.schedule == '47 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read                   # gh run list
+    outputs:
+      work: ${{ steps.work.outputs.work }}
+    steps:
+      - name: Ask the API whether anything waits
+        id: work
+        env:
+          API_URL: ${{ vars.API_URL }}
+          WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "work=false" >> "$GITHUB_OUTPUT"
+          busy=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow watchlist.yml --limit 20 --json databaseId,status \
+            --jq "[.[] | select(.status != \"completed\" and .databaseId != $GITHUB_RUN_ID)] | length") || busy=0
+          if [ "${busy:-0}" != 0 ]; then
+            echo "Another Watchlist run is going or waiting; the next hourly run takes up what waits."
+            exit 0
+          fi
+          if [ -z "$API_URL" ] || [ -z "$WATCHLIST_JOB_TOKEN" ]; then
+            echo "No API configured: nothing to apply."
+            exit 0
+          fi
+          # the token goes to curl on stdin, never on its command line
+          if ! work=$(printf 'Authorization: Bearer %s\n' "$WATCHLIST_JOB_TOKEN" |
+                      curl -fsS --max-time 30 --retry 3 -H @- -H "Accept: application/json" \
+                        -A rigged-outcomes-job "${API_URL%/}/api/job/work"); then
+            echo "::warning::The API did not answer; the next run tries again."
+            exit 0
+          fi
+          if ! n=$(jq '(.decisions // [] | length) + ([.requests // [] | .[] | select(.status == "approved")] | length)' <<<"$work"); then
+            echo "::warning::The API's answer was not the work it lists; the next run tries again."
+            exit 0
+          fi
+          echo "Waiting: $n decision(s) and market(s) to add."
+          if [ "${n:-0}" -gt 0 ]; then echo "work=true" >> "$GITHUB_OUTPUT"; fi
+
   lists:
+    needs: check
+    if: ${{ !cancelled() && (needs.check.result == 'skipped' || needs.check.outputs.work == 'true') }}
+    concurrency:
+      group: watchlist                # never two writers of the state branch
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 355                # the step limits add up to 330; GitHub's own limit is 360
     outputs:
@@ -88,7 +135,7 @@ jobs:
           key: wl-news-${{ github.run_id }}
           restore-keys: wl-news-
 
-      - name: Fetch the owner's decisions, approved requests and watch counts
+      - name: Fetch the owner's decisions, the markets to add and the watchlist
         id: work
         if: steps.pull.outcome == 'success'
         env:
@@ -140,7 +187,7 @@ jobs:
           WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
         run: python3 -m watchlist.state push --by github --run-url "$RUN_URL"
 
-      - name: Add approved markets
+      - name: Add the markets sent to the main page
         id: add
         if: steps.pull.outcome == 'success' && steps.work.outputs.requests == 'true'
         continue-on-error: true
@@ -153,7 +200,7 @@ jobs:
         continue-on-error: true
         run: |
           git add markets.json data/*_clean.csv data/*_insiders.csv
-          git commit -m "Add approved market(s) to the main page"
+          git commit -m "Add market(s) to the main page"
           git push origin HEAD:main || { git pull --rebase origin main && git push origin HEAD:main; }
           touch data/watchlist/markets_pushed.ok
 

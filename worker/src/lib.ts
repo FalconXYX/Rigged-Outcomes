@@ -1,7 +1,7 @@
 // What every endpoint shares: responses and errors, bodies, the visitor hash, token checks, the daily
 // limits, the bot check (Cloudflare Turnstile) and the label and slug rules. The shapes, codes and limits
-// are the contract in docs/DEPLOY.md, which the site (web/src/lib/api.ts) and the job (watchlist/sync.py)
-// share with this Worker.
+// are the contract the site (web/src/lib/api.ts) and the job (watchlist/sync.py, whose docstring lists the
+// shapes) share with this Worker.
 
 export interface Env {
   DB: D1Database;
@@ -227,7 +227,7 @@ export function addressKey(ip: string): string {
 /**
  * Who is asking, without keeping who they are: the first 32 hex characters of
  * HMAC-SHA256(VISITOR_SALT, addressKey(CF-Connecting-IP)). Visitors on one address (or one IPv6 /64) share
- * a hash, and so their watch state and daily limits; that is accepted. With DEV=on, an X-Test-Visitor header
+ * a hash, and so their daily limits; that is accepted. With DEV=on, an X-Test-Visitor header
  * stands in for the hash, and an X-Test-IP header for CF-Connecting-IP.
  */
 export async function visitorOf(req: Request, env: Env): Promise<string> {

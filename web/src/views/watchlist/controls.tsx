@@ -1,17 +1,27 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore, type RefObject } from "react";
 import type { ClosedPick, OpenCard } from "../../types";
 import { href } from "../../lib/router";
-import { WORDS, apiConfigured, apiGet, apiSend, setWatchedHere, watchedHere, type PublicRequest, type RequestStatus } from "../../lib/api";
-import { plural } from "./shared";
+import {
+  OFFLINE,
+  apiConfigured,
+  apiGet,
+  apiSend,
+  requestedHere,
+  setRequestedHere,
+  setWatchedHere,
+  watchedHere,
+  type PublicRequest,
+} from "../../lib/api";
 
-// The two controls in the Watchlist sheets' footers, each a quiet text button
-// that says what it does and what happens next: "Add to main page" (closed
-// sheet: the site's owner reviews each request) and "Watch this market" (open
-// sheet: when it closes, Recently closed says how many watched it). Each asks the
-// API for its state when the sheet opens. With no API in the build, the API
-// down, or the market not one it lists, both read "Not available yet"; while
-// the owner has paused visitors' changes, "Not available right now". Nothing
-// is added to the cards.
+// The Watchlist's two actions: "Add to main page" (closed card: the next run
+// of the job adds it) and "Watch this market" (open card: the site has one
+// watchlist, the same for everyone). Each shows in two places: on the card's
+// face, beside "Details" (CardAdd, CardWatch), and in the card's details panel
+// (AddToMain, WatchControl). Both places share one state per market, so they
+// always agree. A market's state is asked of the API once when its card shows
+// (again after a minute). With no API in the build, or the API not answering,
+// the controls work the same and keep what this browser did; only a refusal a
+// visitor should read (a daily limit, a failed bot check) is shown.
 
 export const Plus = () => (
   <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
@@ -22,32 +32,6 @@ export const Plus = () => (
 /** Where the bot check shows if Cloudflare wants a click: a footer row of its own, empty (and hidden) otherwise. */
 const TsSlot = ({ slot }: { slot: RefObject<HTMLSpanElement | null> }) => <span className="ts-slot" ref={slot} />;
 
-/** A control that can't be used: its button greyed out, and why beside it (the note is its description). */
-function Unavailable({ id, children, note, row }: { id: string; children: ReactNode; note?: string; row?: boolean }) {
-  return (
-    <span className={row ? "cl-add op-watch" : "cl-add"}>
-      {/* aria-disabled, not disabled: it stays reachable so its note is read out */}
-      <button
-        type="button"
-        className="cl-link cl-add-btn"
-        aria-disabled="true"
-        aria-describedby={note ? id : undefined}
-        onClick={(e) => e.preventDefault()}
-      >
-        {children}
-      </button>
-      {note && (
-        <>
-          <span aria-hidden="true">·</span>
-          <span className="cl-note" id={id}>
-            {note}
-          </span>
-        </>
-      )}
-    </span>
-  );
-}
-
 /** Moves focus to `ref` once `when` turns true, if the control's button had it (the button is gone). */
 function useFocusAfter(ref: RefObject<HTMLElement | null>, when: boolean, had: RefObject<boolean>) {
   useEffect(() => {
@@ -57,225 +41,297 @@ function useFocusAfter(ref: RefObject<HTMLElement | null>, when: boolean, had: R
   }, [when, ref, had]);
 }
 
-/* ── Add to main page (closed sheet) ─────────────────────────────────── */
+/* ── One state per market, shared by the card and its panel ──────────── */
 
-type RequestState = { listed: boolean; writes: boolean; request: PublicRequest | null };
-
-/** A request's state in words: what it is, then what happens next. */
-const STATUS: Record<RequestStatus, [state: string, next: string]> = {
-  requested: ["Requested", "waiting for the owner's review"],
-  approved: ["Approved", "it joins the main page at the next site update"],
-  added: ["Added", "it appears on the main page after the site updates"],
-  declined: ["Not added", "the owner decided against it"],
-  failed: ["Approved, but adding it failed", "the owner will look into it"],
-};
+type Where = "card" | "panel";
 
 /**
- * "+ Add to main page": a visitor asks for a closed market to get its own
- * page; the owner approves it on the review page and the next site update
- * adds it. Once the market is on the main page, the link to it.
+ * A market's control state: what the API said (undefined while asking),
+ * a write on its way, and the last write's error with the place it was sent
+ * from (only that place shows it).
+ */
+type Shared<S> = { got: S | undefined; busy: boolean; error: string | null; by: Where | null; at: number };
+
+/** a state asked for less than this long ago is not asked for again */
+const FRESH_MS = 60_000;
+
+/** `local(k)`: the state kept in this browser, used when the API can't answer for `k`. */
+function makeStore<S>(local: (k: string) => S) {
+  const all = new Map<string, Shared<S>>();
+  const subs = new Map<string, Set<() => void>>();
+  const asking = new Set<string>();
+  const get = (k: string) => {
+    let s = all.get(k);
+    if (!s) {
+      s = { got: apiConfigured ? undefined : local(k), busy: false, error: null, by: null, at: 0 };
+      all.set(k, s);
+    }
+    return s;
+  };
+  const set = (k: string, patch: Partial<Shared<S>>) => {
+    all.set(k, { ...get(k), ...patch });
+    subs.get(k)?.forEach((f) => f());
+  };
+  const subscribe = (k: string, f: () => void) => {
+    const s = subs.get(k) ?? new Set();
+    subs.set(k, s);
+    s.add(f);
+    return () => {
+      s.delete(f);
+    };
+  };
+  /** Ask the API for `k`'s state, unless it is being asked or was answered within FRESH_MS. */
+  const ask = (k: string, path: string, accept: (r: unknown) => S | null) => {
+    const s = get(k);
+    if (!apiConfigured || asking.has(k) || (s.got !== undefined && Date.now() - s.at < FRESH_MS)) return;
+    asking.add(k);
+    apiGet<unknown>(path).then((r) => {
+      asking.delete(k);
+      // a write on its way has the newer answer
+      if (!get(k).busy) set(k, { got: accept(r) ?? local(k), at: Date.now() });
+    });
+  };
+  return { get, set, subscribe, ask };
+}
+
+type Store<S> = ReturnType<typeof makeStore<S>>;
+
+function useShared<S>(store: Store<S>, k: string): Shared<S> {
+  const subscribe = useCallback((f: () => void) => store.subscribe(k, f), [store, k]);
+  return useSyncExternalStore(subscribe, () => store.get(k));
+}
+
+/** A click on the card's action never opens the card's details. */
+const stay = (e: { stopPropagation(): void }) => e.stopPropagation();
+
+/* ── Add to main page (closed card) ─────────────────────────────────── */
+
+/** `local`: kept in this browser (no API, or the API couldn't answer). */
+type RequestState = { request: PublicRequest | null; local?: boolean };
+
+const ADDED_HERE: PublicRequest = { status: "approved", name: null, decided_at: null, done_at: null };
+
+const requests = makeStore<RequestState>((k) => ({ request: requestedHere(k) ? ADDED_HERE : null, local: true }));
+
+/** What a market sent to the main page reads until it is there (then "On the main page →"), whatever its state. */
+const ADDING = "Adding to the main page";
+
+/** Asks the API whether a closed market was sent to the main page while its card or panel shows (not once it is there). */
+function useRequest(p: ClosedPick, onMain: string | null): Shared<RequestState> {
+  const k = p.condition_id;
+  const s = useShared(requests, k);
+  useEffect(() => {
+    if (onMain) return;
+    requests.ask(k, `/api/request?cid=${encodeURIComponent(k)}`, (r) => {
+      const v = r as { listed?: boolean; request?: PublicRequest | null } | null;
+      return v && v.listed === true ? { request: v.request ?? null } : null;
+    });
+  }, [k, onMain]);
+  return s;
+}
+
+/** Add it to the main page (a bot check first, shown in `slot` if Cloudflare asks for a click, else in a corner box). */
+async function sendRequest(p: ClosedPick, by: Where, slot: HTMLElement | null) {
+  const k = p.condition_id;
+  const got = requests.get(k).got;
+  if (!got || requests.get(k).busy) return;
+  const keepHere = () => {
+    setRequestedHere(k);
+    requests.set(k, { busy: false, error: null, got: { request: ADDED_HERE, local: true } });
+  };
+  if (got.local) return keepHere();
+  requests.set(k, { busy: true, error: null, by });
+  const r = await apiSend<{ request: PublicRequest }>(
+    "POST",
+    "/api/request",
+    { condition_id: p.condition_id },
+    { bot: "request", slot },
+  );
+  if (r.ok && r.data?.request) requests.set(k, { busy: false, got: { request: r.data.request } });
+  else if (r.ok || OFFLINE.has(r.code)) keepHere();
+  else requests.set(k, { busy: false, error: r.words });
+}
+
+const addLabel = (
+  <>
+    <Plus /> Add to main page
+  </>
+);
+
+/**
+ * "+ Add to main page" in the details panel: the closed market gets its own
+ * page, which the next run of the job adds; "Adding to the main page" until
+ * then, and once it is there the link to it.
  */
 export function AddToMain({ p, onMain }: { p: ClosedPick; onMain: string | null }) {
   const id = `cl-note-${p.condition_id.slice(0, 12)}`;
-  // undefined while asking; null when it can't be used (no API, down, the market not listed)
-  const [got, setGot] = useState<RequestState | null | undefined>(apiConfigured ? undefined : null);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { got, busy, error, by } = useRequest(p, onMain);
   const slot = useRef<HTMLSpanElement>(null);
   const status = useRef<HTMLSpanElement>(null);
   const hadFocus = useRef(false);
   useFocusAfter(status, !!got?.request, hadFocus);
 
-  useEffect(() => {
-    if (onMain || !apiConfigured) return;
-    let live = true;
-    apiGet<RequestState>(`/api/request?cid=${encodeURIComponent(p.condition_id)}`).then(
-      (r) => live && setGot(r && r.listed === true ? r : null),
-    );
-    return () => {
-      live = false;
-    };
-  }, [p.condition_id, onMain]);
-
   if (onMain)
     return (
-      <a className="btn btn-solid btn-sm" href={href.market(onMain)}>
+      <a className="cl-link cl-add-btn" href={href.market(onMain)}>
         On the main page →
       </a>
     );
 
-  const label = (
-    <>
-      <Plus /> Add to main page
-    </>
-  );
-  if (got === null)
-    return (
-      <Unavailable id={id} note="Not available yet">
-        {label}
-      </Unavailable>
-    );
-  if (got === undefined) return <Unavailable id={id}>{label}</Unavailable>;
-  if (got.request) {
-    const [state, next] = STATUS[got.request.status];
+  if (got?.request)
     return (
       <span className="cl-add" ref={status} tabIndex={-1}>
-        <span>{state}</span>
-        <span aria-hidden="true">·</span>
-        <span className="cl-note cl-note-wrap">{next}</span>
+        <span className="cl-add-state">{ADDING}</span>
       </span>
     );
-  }
-  if (!got.writes)
-    return (
-      <Unavailable id={id} note="Not available right now">
-        {label}
-      </Unavailable>
-    );
+
+  const failed = error && by === "panel" ? error : null;
   // the bot-check slot stays mounted while sending: Cloudflare may ask for its click there
-  if (sending)
-    return (
-      <>
-        <span className="cl-add">
-          <button type="button" className="cl-link cl-add-btn" aria-disabled="true" onClick={(e) => e.preventDefault()}>
-            {label}
-          </button>
-          <span aria-hidden="true">·</span>
-          <span className="cl-note" role="status">
-            Sending…
-          </span>
-        </span>
-        <TsSlot slot={slot} />
-      </>
-    );
-
-  const send = async () => {
-    hadFocus.current = document.activeElement instanceof HTMLButtonElement;
-    setSending(true);
-    setError(null);
-    const r = await apiSend<{ request: PublicRequest }>(
-      "POST",
-      "/api/request",
-      { condition_id: p.condition_id },
-      { bot: "request", slot: slot.current },
-    );
-    setSending(false);
-    if (r.ok && r.data?.request) setGot({ ...got, request: r.data.request });
-    else if (r.ok) setError(WORDS.other);
-    else if (r.code === "paused") setGot({ ...got, writes: false });
-    else setError(r.words);
-  };
-
   return (
     <>
       <span className="cl-add">
-        <button type="button" className="cl-link cl-add-btn" aria-describedby={id} onClick={send}>
-          {label}
+        <button
+          type="button"
+          className="cl-link cl-add-btn"
+          aria-describedby={failed ? id : undefined}
+          aria-busy={busy || undefined}
+          onClick={() => {
+            if (busy) return;
+            hadFocus.current = document.activeElement instanceof HTMLButtonElement;
+            sendRequest(p, "panel", slot.current);
+          }}
+        >
+          {addLabel}
         </button>
-        <span aria-hidden="true">·</span>
-        <span className="cl-note cl-note-wrap" id={id} role={error ? "alert" : undefined}>
-          {error ? `Couldn't send: ${error}` : "The site's owner reviews each request"}
-        </span>
+        {failed && (
+          <span className="cl-note cl-note-wrap" id={id} role="alert">
+            {failed}
+          </span>
+        )}
       </span>
       <TsSlot slot={slot} />
     </>
   );
 }
 
-/* ── Watch this market (open sheet) ──────────────────────────────────── */
+/** "+ Add to main page" on a closed card's face; "Adding to the main page" once clicked; "On the main page →" once there. */
+export function CardAdd({ p, onMain }: { p: ClosedPick; onMain: string | null }) {
+  const id = `cl-act-${p.condition_id.slice(0, 12)}`;
+  const { got, busy, error, by } = useRequest(p, onMain);
+  const status = useRef<HTMLSpanElement>(null);
+  const hadFocus = useRef(false);
+  useFocusAfter(status, !!got?.request, hadFocus);
 
-type WatchState = { listed: boolean; writes: boolean; count: number; watching: boolean };
+  if (onMain)
+    return (
+      <span className="wl-act" onClick={stay}>
+        <a className="cl-link wl-act-btn" href={href.market(onMain)}>
+          On the main page →
+        </a>
+      </span>
+    );
+  if (got?.request)
+    return (
+      <span className="wl-act" ref={status} tabIndex={-1} onClick={stay}>
+        <span className="wl-act-state">{ADDING}</span>
+      </span>
+    );
+  const failed = error && by === "card" ? error : null;
+  return (
+    <span className="wl-act" onClick={stay}>
+      <button
+        type="button"
+        className="cl-link wl-act-btn"
+        aria-describedby={failed ? id : undefined}
+        aria-busy={busy || undefined}
+        onClick={() => {
+          if (busy) return;
+          hadFocus.current = document.activeElement instanceof HTMLButtonElement;
+          sendRequest(p, "card", null);
+        }}
+      >
+        {addLabel}
+      </button>
+      {failed && (
+        <span className="cl-note wl-act-error" id={id} role="alert">
+          {failed}
+        </span>
+      )}
+    </span>
+  );
+}
 
-/**
- * "Watch this market": counts the visitors watching an open market. A
- * market from an open card is always checked by the closed list when it
- * closes; a watched one is marked there with how many watched it.
- */
+/* ── Watch this market (open card) ──────────────────────────────────── */
+
+/** `watching`: on the site's watchlist, for everyone. `local`: kept in this browser (no API, or the API couldn't answer). */
+type WatchState = { watching: boolean; local?: boolean };
+
+const watches = makeStore<WatchState>((k) => ({ watching: watchedHere(k), local: true }));
+
+const watchPath = (card: OpenCard) => `/api/watch?story=${encodeURIComponent(card.id)}`;
+
+/** Asks the API whether an open market is on the site's watchlist while its card or panel shows. */
+function useWatch(card: OpenCard): Shared<WatchState> {
+  const s = useShared(watches, card.id);
+  useEffect(() => {
+    watches.ask(card.id, watchPath(card), (r) => {
+      const w = r as { listed?: boolean; watching?: boolean } | null;
+      return w && w.listed === true && typeof w.watching === "boolean" ? { watching: w.watching } : null;
+    });
+  }, [card]);
+  return s;
+}
+
+/** Put it on the site's watchlist (a bot check first) or take it off, for everyone. */
+async function saveWatch(card: OpenCard, on: boolean, by: Where, slot: HTMLElement | null) {
+  const k = card.id;
+  const got = watches.get(k).got;
+  if (!got || watches.get(k).busy) return;
+  const keepHere = () => {
+    setWatchedHere(k, on);
+    watches.set(k, { busy: false, error: null, got: { watching: on, local: true } });
+  };
+  if (got.local) return keepHere();
+  watches.set(k, { busy: true, error: null, by });
+  const r = on
+    ? await apiSend<{ watching: boolean }>("POST", "/api/watch", { story: card.id }, { bot: "watch", slot })
+    : await apiSend<{ watching: boolean }>("DELETE", watchPath(card));
+  if (r.ok && typeof r.data?.watching === "boolean") {
+    setWatchedHere(k, r.data.watching);
+    watches.set(k, { busy: false, got: { watching: r.data.watching } });
+  } else if (r.ok || OFFLINE.has(r.code)) keepHere();
+  else watches.set(k, { busy: false, error: r.words });
+}
+
+const WATCH = "Watch this market";
+
+/** "Watch this market" in the details panel; "Watching" and "Stop watching" once watched. */
 export function WatchControl({ card }: { card: OpenCard }) {
-  const id = `op-note-${card.id.length}-${card.id.slice(0, 24).replace(/[^a-z0-9]+/gi, "-")}`;
-  const [got, setGot] = useState<WatchState | null | undefined>(apiConfigured ? undefined : null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { got, busy: saving, error: err, by } = useWatch(card);
+  const error = by === "panel" ? err : null;
   const slot = useRef<HTMLSpanElement>(null);
   const focusTo = useRef<HTMLButtonElement>(null);
   const hadFocus = useRef(false);
-  useFocusAfter(focusTo, !saving && got != null, hadFocus);
+  useFocusAfter(focusTo, !saving && got !== undefined, hadFocus);
 
-  const path = `/api/watch?story=${encodeURIComponent(card.id)}`;
-  useEffect(() => {
-    if (!apiConfigured) return;
-    let live = true;
-    apiGet<WatchState>(path).then((r) => {
-      if (!live) return;
-      const ok = r && r.listed === true && typeof r.count === "number";
-      setGot(ok ? { ...r, watching: r.watching ?? watchedHere(card.id) } : null);
-    });
-    return () => {
-      live = false;
-    };
-  }, [path, card.id]);
-
-  const label = "Watch this market";
-  if (got === null)
-    return (
-      <Unavailable id={id} note="Not available yet" row>
-        {label}
-      </Unavailable>
-    );
-  if (got === undefined)
-    return (
-      <Unavailable id={id} row>
-        {label}
-      </Unavailable>
-    );
-  // stopping works while visitors' changes are paused; starting doesn't
-  if (!got.writes && !got.watching)
-    return (
-      <Unavailable id={id} note="Not available right now" row>
-        {label}
-      </Unavailable>
-    );
-
-  const save = async (on: boolean) => {
+  const save = (on: boolean) => {
+    if (saving) return;
     hadFocus.current = document.activeElement instanceof HTMLButtonElement;
-    setSaving(true);
-    setError(null);
-    const r = on
-      ? await apiSend<{ count: number; watching: boolean }>("POST", "/api/watch", { story: card.id }, { bot: "watch", slot: slot.current })
-      : await apiSend<{ count: number; watching: boolean }>("DELETE", path);
-    setSaving(false);
-    if (r.ok && typeof r.data?.count === "number") {
-      setWatchedHere(card.id, r.data.watching);
-      setGot({ ...got, count: r.data.count, watching: r.data.watching });
-    } else if (!r.ok && r.code === "paused") setGot({ ...got, writes: false });
-    else setError(r.ok ? WORDS.other : r.words);
+    saveWatch(card, on, "panel", slot.current);
   };
-
   const failed = error && (
-    <>
-      <span aria-hidden="true">·</span>
-      <span className="cl-note cl-note-wrap" role="alert">
-        Couldn't save: {error}
-      </span>
-    </>
+    <span className="cl-note cl-note-wrap" role="alert">
+      {error}
+    </span>
   );
 
-  if (got.watching)
+  if (got?.watching)
     return (
       <>
         <span className="cl-add op-watch">
-          <span>Watching</span>
-          <span aria-hidden="true">·</span>
-          <span>watched by {plural(got.count, "visitor")}</span>
-          <span aria-hidden="true">·</span>
-          <button
-            type="button"
-            ref={focusTo}
-            className="cl-link cl-add-btn"
-            aria-disabled={saving || undefined}
-            onClick={() => !saving && save(false)}
-          >
-            {saving ? "Saving…" : "Stop watching"}
+          <span className="cl-add-state">Watching</span>
+          <button type="button" ref={focusTo} className="cl-link cl-add-btn wl-act-stop" aria-busy={saving || undefined} onClick={() => save(false)}>
+            Stop watching
           </button>
           {failed}
         </span>
@@ -286,28 +342,52 @@ export function WatchControl({ card }: { card: OpenCard }) {
   return (
     <>
       <span className="cl-add op-watch">
-        <button
-          type="button"
-          ref={focusTo}
-          className="cl-link cl-add-btn"
-          aria-describedby={id}
-          aria-disabled={saving || undefined}
-          onClick={() => !saving && save(true)}
-        >
-          {saving ? "Saving…" : label}
+        <button type="button" ref={focusTo} className="cl-link cl-add-btn" aria-busy={saving || undefined} onClick={() => save(true)}>
+          {WATCH}
         </button>
-        <span aria-hidden="true">·</span>
-        {error ? (
-          <span className="cl-note cl-note-wrap" id={id} role="alert">
-            Couldn't save: {error}
-          </span>
-        ) : (
-          <span className="cl-note cl-note-wrap" id={id}>
-            {got.count > 0 && <>Watched by {plural(got.count, "visitor")} · </>}when it closes, Recently closed says how many watched it
-          </span>
-        )}
+        {failed}
       </span>
       <TsSlot slot={slot} />
     </>
+  );
+}
+
+/** "Watch this market" on an open card's face; "Watching" and "Stop watching" once watched. */
+export function CardWatch({ card }: { card: OpenCard }) {
+  const { got, busy: saving, error: err, by } = useWatch(card);
+  const error = by === "card" ? err : null;
+  const focusTo = useRef<HTMLButtonElement>(null);
+  const hadFocus = useRef(false);
+  useFocusAfter(focusTo, !saving && got !== undefined, hadFocus);
+
+  const save = (on: boolean) => {
+    if (saving) return;
+    hadFocus.current = document.activeElement instanceof HTMLButtonElement;
+    saveWatch(card, on, "card", null);
+  };
+  const failed = error && (
+    <span className="cl-note wl-act-error" role="alert">
+      {error}
+    </span>
+  );
+
+  if (got?.watching)
+    return (
+      <span className="wl-act" onClick={stay}>
+        <span className="wl-act-state">Watching</span>
+        <button type="button" ref={focusTo} className="cl-link wl-act-stop" aria-busy={saving || undefined} onClick={() => save(false)}>
+          Stop watching
+        </button>
+        {failed}
+      </span>
+    );
+
+  return (
+    <span className="wl-act" onClick={stay}>
+      <button type="button" ref={focusTo} className="cl-link wl-act-btn" aria-busy={saving || undefined} onClick={() => save(true)}>
+        {WATCH}
+      </button>
+      {failed}
+    </span>
   );
 }

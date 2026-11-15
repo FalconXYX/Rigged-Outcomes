@@ -1,7 +1,8 @@
 // What any visitor can do, with no sign-in: read and add timeline markers (and undo their own for 24
-// hours), watch an open market, and ask for a closed one to join the main page. Every write carries a
-// Turnstile token, checked before a daily limit is spent, and may only touch what the job listed in the
-// catalog; the browser never supplies a request's text.
+// hours), put an open market on the site's one watchlist or take it off, and add a closed one to the main
+// page. Every write carries a Turnstile token (taking a market off the watchlist needs none), checked before a
+// daily limit is spent, and may only touch what the job listed in the catalog; the browser never supplies a
+// market's text.
 
 import {
   BODY,
@@ -155,28 +156,22 @@ export async function undoMarker({ req, env, params }: Ctx): Promise<Response> {
   return noContent();
 }
 
-// ---------- watch ----------
+// ---------- watch: one watchlist for the whole site ----------
 
-async function watchState(env: Ctx["env"], s: string, visitor: string) {
-  const r = await env.DB.prepare(
-    "SELECT count(*) AS n, coalesce(max(visitor = ?2), 0) AS mine FROM watches WHERE story = ?1",
-  )
-    .bind(s, visitor)
-    .first<{ n: number; mine: number }>();
-  return { count: r?.n ?? 0, watching: !!r?.mine };
-}
+const onWatchlist = (env: Ctx["env"], s: string) => env.DB.prepare("SELECT 1 FROM watches WHERE story = ?").bind(s);
 
-export async function getWatch({ req, env, url }: Ctx): Promise<Response> {
+/** Whether an open card's market is on the site's watchlist (the same answer for every visitor). */
+export async function getWatch({ env, url }: Ctx): Promise<Response> {
   const s = story(url.searchParams.get("story") ?? "");
-  const visitor = await visitorOf(req, env);
-  const [listed, settings] = await env.DB.batch([
+  const [listed, settings, on] = await env.DB.batch([
     env.DB.prepare("SELECT 1 FROM catalog WHERE kind = 'open' AND id = ?").bind(s),
     env.DB.prepare("SELECT value FROM settings WHERE key = 'writes'"),
+    onWatchlist(env, s),
   ]);
-  return json({ listed: listed.results.length > 0, writes: writesFrom(settings), ...(await watchState(env, s, visitor)) });
+  return json({ listed: listed.results.length > 0, writes: writesFrom(settings), watching: on.results.length > 0 });
 }
 
-/** Watch an open card's market. Watching twice changes nothing and spends no limit. */
+/** Put an open card's market on the site's watchlist, for everyone. Already on it: nothing changes and no limit is spent. */
 export async function watch({ req, env }: Ctx): Promise<Response> {
   const body = await readBody(req, BODY.visitor);
   await requireWrites(env);
@@ -185,29 +180,26 @@ export async function watch({ req, env }: Ctx): Promise<Response> {
   const visitor = await visitorOf(req, env);
   const listed = await env.DB.prepare("SELECT 1 FROM catalog WHERE kind = 'open' AND id = ?").bind(s).first();
   if (!listed) fail(404, "unknown_story", "That market has left the open list.");
-  const state = await watchState(env, s, visitor);
-  if (state.watching) return json(state);
+  if (await onWatchlist(env, s).first()) return json({ watching: true });
   await quota(req, env, "watch", visitor);
-  await env.DB.prepare("INSERT OR IGNORE INTO watches (story, visitor, created_at) VALUES (?, ?, ?)").bind(s, visitor, now()).run();
-  return json(await watchState(env, s, visitor));
+  await env.DB.prepare("INSERT OR IGNORE INTO watches (story, created_at) VALUES (?, ?)").bind(s, now()).run();
+  return json({ watching: true });
 }
 
-/** Stop watching (no bot check). Spends a watch change only when there was a watch to remove. Works while paused. */
+/** Take a market off the site's watchlist, for everyone (no bot check). Spends a watch change only when it was on. Works while paused. */
 export async function unwatch({ req, env, url }: Ctx): Promise<Response> {
   const s = story(url.searchParams.get("story") ?? "");
-  const visitor = await visitorOf(req, env);
-  const state = await watchState(env, s, visitor);
-  if (!state.watching) return json(state);
-  await quota(req, env, "watch", visitor);
-  await env.DB.prepare("DELETE FROM watches WHERE story = ? AND visitor = ?").bind(s, visitor).run();
-  return json(await watchState(env, s, visitor));
+  if (!(await onWatchlist(env, s).first())) return json({ watching: false });
+  await quota(req, env, "watch", await visitorOf(req, env));
+  await env.DB.prepare("DELETE FROM watches WHERE story = ?").bind(s).run();
+  return json({ watching: false });
 }
 
 // ---------- "Add to main page" ----------
 
 type RequestRow = { status: string; name: string | null; decided_at: number | null; done_at: number | null };
 
-/** What any visitor may see of a request: its state and when it changed. */
+/** What any visitor may see of a market sent to the main page: its state and when it changed. */
 const publicRequest = (r: RequestRow) => ({ status: r.status, name: r.name, decided_at: r.decided_at, done_at: r.done_at });
 
 const REQUEST_ROW = "SELECT status, name, decided_at, done_at FROM requests WHERE condition_id = ?";
@@ -224,8 +216,9 @@ export async function getRequest({ env, url }: Ctx): Promise<Response> {
 }
 
 /**
- * Ask for a closed pick to join the main page: one request per market (an existing one comes back as it
- * is, 200, spending nothing). The question, links and dates are copied from the catalog's pick.
+ * Add a closed pick to the main page: it is recorded as approved at once, the status the job adds on its next
+ * run (the page name comes from the slug there, add_market.page_name). One row per market: an existing one
+ * comes back as it is (200, spending nothing). The question, links and dates are copied from the catalog's pick.
  */
 export async function addRequest({ req, env }: Ctx): Promise<Response> {
   const body = await readBody(req, BODY.visitor);
@@ -247,11 +240,12 @@ export async function addRequest({ req, env }: Ctx): Promise<Response> {
   await quota(req, env, "request", visitor);
 
   const d = JSON.parse(p.data) as Record<string, string>;
+  const at = now();
   await env.DB.prepare(
-    `INSERT INTO requests (condition_id, slug, question, url, winner, closed, day, requested_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (condition_id) DO NOTHING`,
+    `INSERT INTO requests (condition_id, slug, question, url, winner, closed, day, status, requested_at, decided_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'approved', ?8, ?8) ON CONFLICT (condition_id) DO NOTHING`,
   )
-    .bind(cid, d.slug, d.question, d.url, d.winner, d.closed, d.day, now())
+    .bind(cid, d.slug, d.question, d.url, d.winner, d.closed, d.day, at)
     .run();
   const row = await env.DB.prepare(REQUEST_ROW).bind(cid).first<RequestRow>();
   return json({ request: publicRequest(row!) }, 201);

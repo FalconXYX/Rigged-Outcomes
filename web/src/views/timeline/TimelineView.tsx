@@ -68,12 +68,8 @@ export function TimelineView({ market }: { market: MarketData }) {
   );
 }
 
-/**
- * The Events control: with the API, once it has answered for this market;
- * without one, only on the local dev server (markers kept in memory). Hidden
- * while the API is down or doesn't list the market.
- */
-const showEditor = (a: AddedEvents) => a.status === "ready" || (a.status === "off" && import.meta.env.DEV);
+/** The Events control: always, once the API has answered (or at once with no API: markers kept in this browser). */
+const showEditor = (a: AddedEvents) => a.status !== "loading";
 
 function TimelineInner({
   market,

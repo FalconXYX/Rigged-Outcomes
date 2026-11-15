@@ -37,12 +37,15 @@ const QUEUE_DAYS = 7;
 /** One queue item is one row, well under D1's 100 KB statement cap even escaped inside json_each's text (a real item is about 3 KB). */
 const ITEM_BYTES = 60_000;
 
-/** What the job applies: pending decisions (a "withdrawn" one included: the job removes it from its store), approved requests, watch counts. */
+/**
+ * What the job applies: pending decisions (a "withdrawn" one included: the job removes it from its store), the
+ * markets to add to the main page (status approved), and the stories on the site's watchlist.
+ */
 export async function work({ env }: Ctx): Promise<Response> {
   const [decisions, requests, watched] = await env.DB.batch([
     env.DB.prepare("SELECT * FROM open_decisions WHERE applied_at IS NULL ORDER BY decided_at"),
     env.DB.prepare("SELECT * FROM requests WHERE status = 'approved' ORDER BY decided_at"),
-    env.DB.prepare("SELECT story, count(*) AS count FROM watches GROUP BY story ORDER BY story"),
+    env.DB.prepare("SELECT story FROM watches ORDER BY story"),
   ]);
   return json({ now: now(), decisions: decisions.results.map(decision), requests: requests.results, watched: watched.results });
 }
@@ -144,9 +147,10 @@ const CATALOG_KINDS = {
 
 /**
  * What visitors may write to, as the job lists it: main-page markets (markers, and "already on the main page"),
- * closed picks (requests) and open cards (watches). Each section sent replaces its kind in one transaction; a
- * section left out is kept. A repeated id keeps its last entry. An entry that doesn't fit (a markets.json name
- * with capitals, a pick with no link) is left out and named in `skipped`, so one odd entry can't stop the rest.
+ * closed picks (Add to main page) and open cards (the watchlist). Each section sent replaces its kind in one
+ * transaction; a section left out is kept. A repeated id keeps its last entry. An entry that doesn't fit (a
+ * markets.json name with capitals, a pick with no link) is left out and named in `skipped`, so one odd entry
+ * can't stop the rest.
  */
 export async function putCatalog({ req, env }: Ctx): Promise<Response> {
   const body = await readBody(req, BODY.job);
@@ -185,10 +189,10 @@ export async function putCatalog({ req, env }: Ctx): Promise<Response> {
 /**
  * The run's report. `applied`: decisions the job saved and pushed, marked applied only while their decided_at is
  * unchanged (one decided again meanwhile stays pending); a withdrawn one the job has removed from its store goes.
- * `requests`: what adding approved markets did, recorded only while a request is still approved. `run`: one
- * job_runs row. Then the old rows go: limits after 3 days, runs beyond 200, deleted markers after 30 days, visitor
- * hashes on markers after 30 days, watches over 30 days old on a story no longer listed, withdrawals no run
- * reported within 30 days, queue days beyond 7.
+ * `requests`: what adding the markets did (the page name the job gave one is kept), recorded only while it is
+ * still approved. `run`: one job_runs row. Then the old rows go: limits after 3 days, runs beyond 200, deleted
+ * markers after 30 days, visitor hashes on markers after 30 days, watchlist stories over 30 days old that are no
+ * longer listed, withdrawals no run reported within 30 days, queue days beyond 7.
  */
 export async function done({ req, env }: Ctx): Promise<Response> {
   // Only what identifies a row is strict here; a long note or summary is cut and a link that isn't https:// is
@@ -290,7 +294,7 @@ export async function exportAll({ env }: Ctx): Promise<Response> {
     env.DB.prepare(`SELECT ${MARKER_COLUMNS} FROM markers WHERE deleted_at IS NULL AND created_at < ? ORDER BY created_at, id`).bind(
       now() - BACKUP_MARKER_AGE,
     ),
-    env.DB.prepare("SELECT story, count(*) AS count, min(created_at) AS since FROM watches GROUP BY story ORDER BY story"),
+    env.DB.prepare("SELECT story, created_at FROM watches ORDER BY story"),
     env.DB.prepare("SELECT * FROM requests ORDER BY requested_at, condition_id"),
     env.DB.prepare("SELECT * FROM open_decisions ORDER BY story, headline_key"),
     env.DB.prepare("SELECT * FROM job_runs ORDER BY id"),
@@ -299,7 +303,7 @@ export async function exportAll({ env }: Ctx): Promise<Response> {
     exported_at: now(),
     settings: Object.fromEntries((settings.results as { key: string; value: string }[]).map((r) => [r.key, r.value])),
     markers: markers.results,
-    watch_counts: watches.results,
+    watches: watches.results,
     requests: requests.results,
     decisions: decisions.results.map(decision),
     runs: runs.results,

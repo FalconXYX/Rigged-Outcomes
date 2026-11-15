@@ -1,6 +1,6 @@
 // npm test: the smoke test on a throwaway local state, start to finish. It applies the migrations to a fresh
-// --persist-to directory, starts `wrangler dev` on 127.0.0.1:8788 (refusing if anything already listens
-// there) and runs test/smoke.mjs; then it restarts the Worker three times: with Turnstile's always-failing test
+// --persist-to directory, starts `wrangler dev` on 127.0.0.1:8788 (WRANGLER_TEST_PORT picks another, e.g. while
+// `npm run dev` holds 8788; it refuses if anything already listens there) and runs test/smoke.mjs; then it restarts the Worker three times: with Turnstile's always-failing test
 // secret, with production settings (DEV off, strict Turnstile), and with a dispatch token aimed at a stand-in
 // for GitHub on a local port; and it stops every process it started. Local only: nothing here talks to a
 // Cloudflare or GitHub account. WRANGLER_TEST_DIR picks where the throwaway state and logs go (default: the
@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const PORT = 8788;
+const PORT = Number(process.env.WRANGLER_TEST_PORT || 8788);
 const BASE = `http://127.0.0.1:${PORT}`;
 const WRANGLER = join(ROOT, "node_modules", "wrangler", "bin", "wrangler.js");
 const FAILING_SECRET = "2x0000000000000000000000000000000AA";
@@ -108,7 +108,9 @@ let code = 1;
 let worker;
 let github;
 try {
-  if (await listening()) throw new Error(`something already listens on port ${PORT}; stop it first (this test never stops what it didn't start)`);
+  if (await listening()) {
+    throw new Error(`something already listens on port ${PORT}; stop it first, or pick another with WRANGLER_TEST_PORT (this test never stops what it didn't start)`);
+  }
   if (!existsSync(join(ROOT, ".dev.vars"))) copyFileSync(join(ROOT, ".dev.vars.example"), join(ROOT, ".dev.vars"));
   if ((await exec(process.execPath, [WRANGLER, "d1", "migrations", "apply", "rigged-outcomes", "--local", "--persist-to", state])) !== 0) {
     throw new Error(`the migrations didn't apply (log: ${logPath})`);

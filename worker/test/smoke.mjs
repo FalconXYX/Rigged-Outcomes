@@ -310,31 +310,34 @@ async function suite() {
     const list = await call("GET", `/api/markers?market=${mFull}`);
     check("markers: the list holds 60, ordered by t", list.body?.markers?.length === 60 && list.body.markers.every((m, i, a) => i === 0 || a[i - 1].t <= m.t));
   }
-  // ---------- watch ----------
+  // ---------- watch: one watchlist for the whole site ----------
   {
     const s = encodeURIComponent(stories.a);
     const g = await call("GET", `/api/watch?story=${s}`);
-    check("watch: starts at 0", g.body?.listed === true && g.body?.writes === true && g.body?.count === 0 && g.body?.watching === false, g.body);
+    check("watch: starts off the watchlist, with no count", g.body?.listed === true && g.body?.writes === true && g.body?.watching === false && !("count" in (g.body ?? {})), g.body);
     check("watch: GET is no-store", g.headers.get("cache-control") === "no-store");
     const w = await call("POST", "/api/watch", { body: { story: stories.a, token: TOKEN } });
-    check("watch: watching", w.status === 200 && w.body?.count === 1 && w.body?.watching === true, w);
+    check("watch: on the watchlist", w.status === 200 && Object.keys(w.body ?? {}).join() === "watching" && w.body.watching === true, w);
     const w2 = await call("POST", "/api/watch", { body: { story: stories.a, token: TOKEN } });
-    check("watch: watching twice changes nothing", w2.body?.count === 1 && w2.body?.watching === true, w2.body);
+    check("watch: watching twice changes nothing", w2.body?.watching === true, w2.body);
+    const seen = await call("GET", `/api/watch?story=${s}`, { visitor: "b" });
+    check("watch: every visitor sees it on the watchlist", seen.body?.watching === true && !("count" in (seen.body ?? {})), seen.body);
     const other = await call("POST", "/api/watch", { visitor: "b", body: { story: stories.a, token: TOKEN } });
-    check("watch: a second visitor counts", other.body?.count === 2, other.body);
-    const mine = await call("GET", `/api/watch?story=${s}`);
-    check("watch: GET sees count and own watch", mine.body?.count === 2 && mine.body?.watching === true, mine.body);
-    const un = await call("DELETE", `/api/watch?story=${s}`);
-    check("watch: stop watching", un.status === 200 && un.body?.count === 1 && un.body?.watching === false, un);
+    check("watch: another visitor's watch changes nothing", other.status === 200 && other.body?.watching === true, other);
+    const un = await call("DELETE", `/api/watch?story=${s}`, { visitor: "b" });
+    check("watch: anyone takes it off, for everyone", un.status === 200 && Object.keys(un.body ?? {}).join() === "watching" && un.body.watching === false, un);
+    check("watch: ...so the first visitor sees it off too", (await call("GET", `/api/watch?story=${s}`)).body?.watching === false);
     const un2 = await call("DELETE", `/api/watch?story=${s}`);
-    check("watch: stopping twice changes nothing", un2.body?.count === 1 && un2.body?.watching === false, un2.body);
+    check("watch: stopping twice changes nothing", un2.status === 200 && un2.body?.watching === false, un2.body);
+    const back = await call("POST", "/api/watch", { body: { story: stories.a, token: TOKEN } });
+    check("watch: back on (job/work, the export and the overview read it below)", back.body?.watching === true, back.body);
     expect("watch: unknown_story", await call("POST", "/api/watch", { body: { story: `gone ${RUN}`, token: TOKEN } }), 404, "unknown_story");
     expect("watch: an empty token is 403 bot_check", await call("POST", "/api/watch", { body: { story: stories.b, token: "" } }), 403, "bot_check");
     expect("watch: a 201-character story is 400", await call("GET", `/api/watch?story=${"s".repeat(201)}`), 400, "bad_request");
     const unlisted = await call("GET", `/api/watch?story=${encodeURIComponent(`gone ${RUN}`)}`);
-    check("watch: an unlisted story", unlisted.body?.listed === false && unlisted.body?.count === 0, unlisted.body);
+    check("watch: an unlisted story", unlisted.body?.listed === false && unlisted.body?.watching === false, unlisted.body);
 
-    // 30 watch changes a day; repeated watches and unwatches in between spend nothing
+    // 30 watch changes a day per visitor; repeated watches and unwatches in between spend nothing
     const L = encodeURIComponent(stories.limit);
     let changes = 0;
     for (let i = 0; i < 15; i++) {
@@ -349,64 +352,47 @@ async function suite() {
     expect("watch: the 31st change is 429 limit", await call("POST", "/api/watch", { visitor: "wl", body: { story: stories.limit, token: TOKEN } }), 429, "limit");
   }
 
-  // ---------- "Add to main page" ----------
+  // ---------- "Add to main page": added at once, no review ----------
   const c1 = CLOSED[0].condition_id;
   {
     const g = await call("GET", `/api/request?cid=${c1}`);
-    check("request: none yet", g.body?.listed === true && g.body?.writes === true && g.body?.request === null, g.body);
+    check("add: none yet", g.body?.listed === true && g.body?.writes === true && g.body?.request === null, g.body);
     const r = await call("POST", "/api/request", { body: { condition_id: c1.toUpperCase().replace("0X", "0x"), token: TOKEN, question: "Forged?" } });
-    check("request: created (201, requested)", r.status === 201 && r.body?.request?.status === "requested", r);
-    check("request: the public shape only", Object.keys(r.body?.request ?? {}).sort().join() === "decided_at,done_at,name,status", r.body);
+    check("add: recorded at once as approved, the status the job adds (201)", r.status === 201 && r.body?.request?.status === "approved" && r.body.request.decided_at > 0 && r.body.request.name === null, r);
+    check("add: the public shape only", Object.keys(r.body?.request ?? {}).sort().join() === "decided_at,done_at,name,status", r.body);
     const again = await call("POST", "/api/request", { visitor: "b", body: { condition_id: c1, token: TOKEN } });
-    check("request: asking again is 200 with the same request", again.status === 200 && again.body?.request?.status === "requested", again);
-    expect("request: not_listed", await call("POST", "/api/request", { body: { condition_id: cid(0xdead), token: TOKEN } }), 404, "not_listed");
-    expect("request: on_main (slugs compared normalised)", await call("POST", "/api/request", { body: { condition_id: CLOSED[1].condition_id, token: TOKEN } }), 409, "on_main");
-    expect("request: a bad condition id is 400", await call("POST", "/api/request", { body: { condition_id: "0x12", token: TOKEN } }), 400, "bad_request");
-    expect("request: a bad cid on GET is 400", await call("GET", "/api/request?cid=nope"), 400, "bad_request");
-    expect("request: an empty token is 403 bot_check", await call("POST", "/api/request", { body: { condition_id: CLOSED[2].condition_id, token: "" } }), 403, "bot_check");
+    check("add: adding again is 200 with the same row", again.status === 200 && again.body?.request?.status === "approved", again);
+    expect("add: not_listed", await call("POST", "/api/request", { body: { condition_id: cid(0xdead), token: TOKEN } }), 404, "not_listed");
+    expect("add: on_main (slugs compared normalised)", await call("POST", "/api/request", { body: { condition_id: CLOSED[1].condition_id, token: TOKEN } }), 409, "on_main");
+    expect("add: a bad condition id is 400", await call("POST", "/api/request", { body: { condition_id: "0x12", token: TOKEN } }), 400, "bad_request");
+    expect("add: a bad cid on GET is 400", await call("GET", "/api/request?cid=nope"), 400, "bad_request");
+    expect("add: an empty token is 403 bot_check", await call("POST", "/api/request", { body: { condition_id: CLOSED[2].condition_id, token: "" } }), 403, "bot_check");
 
     const ov = await call("GET", "/api/admin/overview", { auth: OWNER });
     const row = ov.body?.requests?.find((x) => x.condition_id === c1);
-    check("request: copied from the catalog, never the browser", row?.question === CLOSED[0].question && row?.slug === CLOSED[0].slug && row?.winner === "Yes" && row?.day === "2026-11-12", row);
-
-    const p = (action, name, c = c1) => call("POST", `/api/admin/requests/${c}`, { auth: OWNER, body: name === undefined ? { action } : { action, name } });
-    expect("request: approve with no name is 400 bad_name", await p("approve"), 400, "bad_name");
-    expect("request: approve with a bad name is 400 bad_name", await p("approve", "Bad Name!"), 400, "bad_name");
-    expect("request: a one-character name is 400 bad_name", await p("approve", "x"), 400, "bad_name");
-    expect("request: a catalog market's name is 409 name_taken", await p("approve", mA), 409, "name_taken");
-    const name = `page-${RUN}`;
-    const ap = await p("approve", name);
-    check("request: approved", ap.status === 200 && ap.body?.request?.status === "approved" && ap.body.request.name === name && ap.body.request.decided_at > 0, ap);
-    expect("request: retry from approved is 409 bad_transition", await p("retry"), 409, "bad_transition");
+    check("add: copied from the catalog, never the browser", row?.question === CLOSED[0].question && row?.slug === CLOSED[0].slug && row?.winner === "Yes" && row?.day === "2026-11-12" && row?.status === "approved", row);
     const work = await call("GET", "/api/job/work", { auth: JOB });
-    check("request: job/work lists the approved request", work.body?.requests?.some((x) => x.condition_id === c1 && x.name === name), work.body?.requests);
+    check("add: job/work lists it at once, with no page name (the job makes one from the slug)", work.body?.requests?.some((x) => x.condition_id === c1 && x.status === "approved" && x.name === null), work.body?.requests);
+    expect("add: there is no approve or decline step", await call("POST", `/api/admin/requests/${c1}`, { auth: OWNER, body: { action: "approve", name: "page-name" } }), 404, "not_found");
 
-    // another request can't take the same name
+    const fail = await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c1, status: "failed", name: null, note: "too many trades to add automatically" }] } });
+    expect("add: the job reports a failure (204)", fail, 204);
+    const pub = await call("GET", `/api/request?cid=${c1}`);
+    check("add: failed is recorded", pub.body?.request?.status === "failed" && pub.body.request.done_at > 0, pub.body);
+    check("add: ...with its reason for the review page", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.requests?.find((x) => x.condition_id === c1)?.note === "too many trades to add automatically");
+    check("add: a failed one is not handed to the job again", !(await call("GET", "/api/job/work", { auth: JOB })).body?.requests?.some((x) => x.condition_id === c1));
+
     const c3 = CLOSED[3].condition_id;
-    await call("POST", "/api/request", { visitor: "c", body: { condition_id: c3, token: TOKEN } });
-    expect("request: another approved request's name is 409 name_taken", await p("approve", name, c3), 409, "name_taken");
-
-    const de = await p("decline");
-    check("request: approved -> declined", de.body?.request?.status === "declined", de.body);
-    expect("request: retry from declined is 409 bad_transition", await p("retry"), 409, "bad_transition");
-    check("request: declined -> approved", (await p("approve", name)).body?.request?.status === "approved");
-
-    const fail = await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c1, status: "failed", name, note: "too many trades to add automatically" }] } });
-    expect("request: job reports failed (204)", fail, 204);
-    let pub = await call("GET", `/api/request?cid=${c1}`);
-    check("request: failed is visible", pub.body?.request?.status === "failed" && pub.body.request.done_at > 0, pub.body);
-    const re = await p("retry");
-    check("request: failed -> approved (retry)", re.body?.request?.status === "approved" && re.body.request.note === null, re.body);
-    await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c1, status: "added", name, note: null }] } });
-    pub = await call("GET", `/api/request?cid=${c1}`);
-    check("request: added", pub.body?.request?.status === "added", pub.body);
-    expect("request: decline after added is 409 bad_transition", await p("decline"), 409, "bad_transition");
-    await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c1, status: "failed", name, note: "late" }] } });
-    pub = await call("GET", `/api/request?cid=${c1}`);
-    check("request: the job can't change a request that is no longer approved", pub.body?.request?.status === "added", pub.body);
-    const visitorAgain = await call("POST", "/api/request", { visitor: "d", body: { condition_id: c1, token: TOKEN } });
-    check("request: asking again never changes a decided status", visitorAgain.status === 200 && visitorAgain.body?.request?.status === "added", visitorAgain.body);
-    expect("request: deciding an unknown request is 404", await p("approve", "fresh-name", cid(0xbeef)), 404, "not_found");
+    const name = `page-${RUN}`;
+    check("add: another market", (await call("POST", "/api/request", { visitor: "c", body: { condition_id: c3, token: TOKEN } })).status === 201);
+    await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c3, status: "added", name, note: null }] } });
+    let added = await call("GET", `/api/request?cid=${c3}`);
+    check("add: added, under the page name the job gave it", added.body?.request?.status === "added" && added.body.request.name === name, added.body);
+    await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c3, status: "failed", name: "other-name", note: "late" }] } });
+    added = await call("GET", `/api/request?cid=${c3}`);
+    check("add: the job can't change one that is no longer approved", added.body?.request?.status === "added" && added.body.request.name === name, added.body);
+    const visitorAgain = await call("POST", "/api/request", { visitor: "d", body: { condition_id: c3, token: TOKEN } });
+    check("add: adding again never changes it", visitorAgain.status === 200 && visitorAgain.body?.request?.status === "added", visitorAgain.body);
   }
   {
     // the visitor limit (5 a day), then the site's (50 a day): picks 10.. are fresh
@@ -414,20 +400,20 @@ async function suite() {
     let next = 10;
     for (let i = 0; i < 5; i++) {
       const r = await call("POST", "/api/request", { visitor: "rq", body: { condition_id: CLOSED[next++].condition_id, token: TOKEN } });
-      check(`request: within the visitor's limit (${i + 1} of 5)`, r.status === 201, r);
+      check(`add: within the visitor's limit (${i + 1} of 5)`, r.status === 201, r);
       used++;
     }
-    expect("request: the 6th today is 429 limit", await call("POST", "/api/request", { visitor: "rq", body: { condition_id: CLOSED[next].condition_id, token: TOKEN } }), 429, "limit");
+    expect("add: the 6th today is 429 limit", await call("POST", "/api/request", { visitor: "rq", body: { condition_id: CLOSED[next].condition_id, token: TOKEN } }), 429, "limit");
     let v = 0;
     while (used < 50) {
       const r = await call("POST", "/api/request", { visitor: `rs${Math.floor(v++ / 5)}`, body: { condition_id: CLOSED[next++].condition_id, token: TOKEN } });
       if (r.status !== 201) {
-        check(`request: fill ${used}`, false, r);
+        check(`add: fill ${used}`, false, r);
         break;
       }
       used++;
     }
-    expect("request: the site's 51st today is 429 busy", await call("POST", "/api/request", { visitor: "fresh", body: { condition_id: CLOSED[next].condition_id, token: TOKEN } }), 429, "busy");
+    expect("add: the site's 51st today is 429 busy", await call("POST", "/api/request", { visitor: "fresh", body: { condition_id: CLOSED[next].condition_id, token: TOKEN } }), 429, "busy");
   }
 
   // ---------- pause ----------
@@ -438,7 +424,7 @@ async function suite() {
     check("pause: switched off", off.body?.settings?.writes === "off", off.body);
     expect("pause: adding a marker is 503 paused", await call("POST", "/api/markers", { visitor: "p", body: { market: mA, t: t0 + 78_000, label: "During", token: TOKEN } }), 503, "paused");
     expect("pause: watching is 503 paused", await call("POST", "/api/watch", { visitor: "p", body: { story: stories.a, token: TOKEN } }), 503, "paused");
-    expect("pause: requesting is 503 paused", await call("POST", "/api/request", { visitor: "p", body: { condition_id: CLOSED[5].condition_id, token: TOKEN } }), 503, "paused");
+    expect("pause: adding to the main page is 503 paused", await call("POST", "/api/request", { visitor: "p", body: { condition_id: CLOSED[5].condition_id, token: TOKEN } }), 503, "paused");
     const m = await call("GET", `/api/markers?market=${mA}`);
     check("pause: marker list reads writes:false", m.body?.writes === false && m.body?.markers?.length > 0, m.body?.writes);
     check("pause: watch reads writes:false", (await call("GET", `/api/watch?story=${encodeURIComponent(stories.a)}`)).body?.writes === false);
@@ -519,7 +505,7 @@ async function suite() {
     const work = await call("GET", "/api/job/work", { auth: JOB });
     const pending = (work.body?.decisions ?? []).filter((x) => x.story === qStory);
     check("job/work: pending decisions", pending.length === 2 && pending.every((x) => x.applied_at === null && x.day === day), pending);
-    check("job/work: watched counts", work.body?.watched?.some((w) => w.story === stories.a && w.count === 1), work.body?.watched);
+    check("job/work: the watchlist's stories, no counts", work.body?.watched?.some((w) => w.story === stories.a) && work.body.watched.every((w) => Object.keys(w).join() === "story"), work.body?.watched);
     check("job/work: shape", typeof work.body?.now === "number" && Array.isArray(work.body?.requests));
 
     const done = await call("POST", "/api/job/done", {
@@ -567,19 +553,19 @@ async function suite() {
   {
     const ex = await call("GET", "/api/job/export", { auth: JOB });
     const keys = Object.keys(ex.body ?? {}).sort().join();
-    check("export: shape", keys === "decisions,exported_at,markers,requests,runs,settings,watch_counts", keys);
+    check("export: shape", keys === "decisions,exported_at,markers,requests,runs,settings,watches", keys);
     const keysIn = (v) => (v && typeof v === "object" ? Object.entries(v).flatMap(([k, x]) => [k, ...keysIn(x)]) : []);
     const found = new Set(keysIn(ex.body));
     check("export: no visitor or undo hashes", !found.has("visitor") && !found.has("undo_sha") && !JSON.stringify(ex.body).includes(`v-${RUN}`), [...found]);
     const ids = new Set((ex.body?.markers ?? []).map((m) => m.id));
     check("export: no deleted marker, and none under 2 days old (all of this run's)", first?.marker?.id && !ids.has(first.marker.id) && !(ex.body?.markers ?? []).some((m) => m.deleted_at !== null || m.created_at > now() - 2 * 86_400), ex.body?.markers?.slice(0, 3));
     check("export: settings as an object", ex.body?.settings?.writes === "on");
-    check("export: watch counts", ex.body?.watch_counts?.some((w) => w.story === stories.a && w.count === 1 && w.since > 0));
+    check("export: the watchlist", ex.body?.watches?.some((w) => w.story === stories.a && w.created_at > 0 && Object.keys(w).sort().join() === "created_at,story"), ex.body?.watches);
 
     expect("apply: no dispatch token is 501", await call("POST", "/api/admin/apply", { auth: OWNER }), 501, "no_dispatch");
     const ov = await call("GET", "/api/admin/overview", { auth: OWNER });
     check("overview: dispatch is false", ov.body?.dispatch === false);
-    check("overview: watched rows", ov.body?.watched?.some((w) => w.story === stories.a && w.count === 1 && w.question === "Will A happen?"), ov.body?.watched);
+    check("overview: the watchlist's rows", ov.body?.watched?.some((w) => w.story === stories.a && w.since > 0 && w.question === "Will A happen?" && !("count" in w)), ov.body?.watched);
     const ovKeys = Object.keys(ov.body ?? {}).sort().join();
     check("overview: shape", ovKeys === "decisions,dispatch,markers,now,queue,requests,runs,settings,watched", ovKeys);
 

@@ -5,7 +5,7 @@
 
 import { type Ctx, type Env, HttpError, authorize, json, log, writesOn } from "./lib";
 import { done, exportAll, putCatalog, putQueue, work } from "./job";
-import { apply, decideRequest, deleteDecision, deleteMarker, overview, putDecision, putSettings } from "./owner";
+import { apply, deleteDecision, deleteMarker, overview, putDecision, putSettings } from "./owner";
 import { addMarker, addRequest, getMarkers, getRequest, getWatch, undoMarker, unwatch, watch } from "./public";
 
 type Handler = (ctx: Ctx) => Promise<Response>;
@@ -26,7 +26,6 @@ const ROUTES: [string, RegExp, "visitor" | "owner" | "job", Handler][] = [
   ["GET", /^\/api\/admin\/overview$/, "owner", overview],
   ["PUT", /^\/api\/admin\/decisions$/, "owner", putDecision],
   ["DELETE", /^\/api\/admin\/decisions$/, "owner", deleteDecision],
-  ["POST", /^\/api\/admin\/requests\/([^/]+)$/, "owner", decideRequest],
   ["DELETE", /^\/api\/admin\/markers\/([^/]+)$/, "owner", deleteMarker],
   ["PUT", /^\/api\/admin\/settings$/, "owner", putSettings],
   ["POST", /^\/api\/admin\/apply$/, "owner", apply],

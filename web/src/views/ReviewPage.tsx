@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import {
   WORDS,
   apiConfigured,
@@ -24,11 +24,11 @@ import "./review.css";
 // The owner's review page (#/review, linked from nowhere). Unlocked with the
 // owner token (kept in this page's memory only, so a reload asks again), it
 // shows how the daily run went and the pause switch for visitors' changes,
-// then what waits for a decision: the open list's step headlines, requests to
-// add a closed market to the main page, the markers visitors added and the
-// markets they watch. A decision is applied by the next run: the daily one
-// (about 04:17 UTC), or at once with "Apply decisions now" when the Worker
-// holds a GitHub token. Plain on purpose, in the site's type and tokens.
+// then the open list's step headlines that wait for a decision, the closed
+// markets sent to the main page (a read-only list), the markers visitors
+// added and the site's watchlist. A decision is applied by the next run: the
+// hourly one, or at once with "Apply decisions now" when the Worker holds a
+// GitHub token. Plain on purpose, in the site's type and tokens.
 
 /** a daily run older than this has missed one (they run once a day) */
 const LATE_HOURS = 30;
@@ -174,8 +174,8 @@ function Signed({ data, reload, onForget }: { data: Overview; reload: () => void
 /* ── Status: the last run, the pause switch, "Apply decisions now" ───── */
 
 const APPLY_NOTE =
-  "Starts the update job (about 10–20 minutes): it applies your decisions and adds approved markets; the site updates " +
-  "when it finishes. Otherwise the next daily run (starts about 04:17 UTC) does it.";
+  "Starts the update job (about 10–20 minutes): it applies your decisions and adds the markets sent to the main page; " +
+  "the site updates when it finishes. Otherwise the next hourly run does it.";
 
 const RUN_NAME: Record<JobRun["mode"], string> = { full: "Last daily run", apply: "Last apply run", local: "Last run from the Mac" };
 
@@ -253,7 +253,7 @@ function Status({ data, onForget }: { data: Overview; onForget: () => void }) {
           <p className="rv-muted">{applied ?? APPLY_NOTE}</p>
         </div>
       ) : (
-        <p className="rv-muted">Decisions are applied by the next daily run (starts about 04:17 UTC).</p>
+        <p className="rv-muted">Decisions are applied by the next hourly run.</p>
       )}
       <p className="rv-line">
         <button type="button" className="cl-link" onClick={onForget}>
@@ -604,149 +604,55 @@ function CardRow({
   );
 }
 
-/* ── Requests to add a closed market to the main page ─────────────────── */
+/* ── Closed markets sent to the main page ─────────────────────────────── */
 
-const NAME_RULE = /^[a-z0-9][a-z0-9-]{1,31}$/;
-const STOP = new Set(
-  (
-    "a an the of in on at by to for and or be is are was were will would before after with from as its it this that than " +
-    "over under into out up down more end any who what which how does do did has have new next first last"
-  ).split(" "),
-);
-
-/**
- * A page name from the question: its first 3 telling words, lower case
- * ("Will Gemini 3 ship by May?" → "gemini-ship-may"), "-2" on a clash.
- */
-function suggestName(question: string, taken: Set<string>): string {
-  const words = question
-    .toLowerCase()
-    .replace(/[^a-z\s]+/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !STOP.has(w));
-  let base = words.slice(0, 3).join("-").slice(0, 28).replace(/-+$/, "") || "market";
-  if (base.length < 2) base = `${base}-market`;
-  if (!taken.has(base)) return base;
-  for (let i = 2; ; i++) if (!taken.has(`${base}-${i}`)) return `${base}-${i}`;
-}
-
-/** A request's state in words: the state, then what follows ("Approved as gemini-hydrogen · added at the next run"). */
+/** A market's state in words: "Adding to the main page", "Added as gemini-hydrogen on Nov 14", or why the job couldn't add it. */
 function requestWords(r: AddRequest): [head: string, tail: string] {
-  const as = r.name ? ` as ${r.name}` : "";
   switch (r.status) {
-    case "requested":
-      return ["Requested", ""];
     case "approved":
-      return [`Approved${as}`, " · added at the next run"];
+      return ["Adding to the main page", ""];
     case "added":
-      return [`Added${as}`, r.done_at ? ` on ${dayOf(r.done_at)}` : ""];
-    case "declined":
-      return ["Declined", ""];
+      return [`Added${r.name ? ` as ${r.name}` : ""}`, r.done_at ? ` on ${dayOf(r.done_at)}` : ""];
     case "failed":
       return ["Couldn't add it", r.note ? `: ${r.note}` : ""];
   }
 }
 
 function RequestsSection({ data }: { data: Overview }) {
-  const index = useAsync(loadIndex, "index");
-  const [reqs, setReqs] = useState(data.requests);
-  const taken = useMemo(() => {
-    const s = new Set((index.data?.markets ?? []).map((m) => m.name));
-    for (const r of reqs) if (r.name && (r.status === "approved" || r.status === "added")) s.add(r.name);
-    return s;
-  }, [index.data, reqs]);
-  const update = (r: AddRequest) => setReqs((list) => list.map((x) => (x.condition_id === r.condition_id ? r : x)));
-  const order = [...reqs].sort((a, b) => b.requested_at - a.requested_at);
+  const order = [...data.requests].sort((a, b) => b.requested_at - a.requested_at);
   return (
     <section className="rv-sec" aria-labelledby="rv-requests">
       <h2 className="rv-h" id="rv-requests">
-        Requests to add to the main page
+        Add to main page
       </h2>
       {order.length === 0 ? (
-        <p className="rv-muted">No requests.</p>
+        <p className="rv-muted">None yet.</p>
       ) : (
         <ol className="rv-list">
-          {order.map((r) => (
-            <RequestRow key={r.condition_id} r={r} taken={taken} onChange={update} />
-          ))}
+          {order.map((r) => {
+            const [head, tail] = requestWords(r);
+            return (
+              <li key={r.condition_id} className="rv-item">
+                <h3 className="rv-q">{r.question}</h3>
+                <ul className="meta-line rv-sub">
+                  <li>closed {day(r.closed)}</li>
+                  <li>resolved {r.winner}</li>
+                  <li>
+                    <a href={r.url} target="_blank" rel="noopener noreferrer">
+                      Polymarket ↗
+                    </a>
+                  </li>
+                </ul>
+                <p className="rv-decided">
+                  <b>{head}</b>
+                  {tail}
+                </p>
+              </li>
+            );
+          })}
         </ol>
       )}
     </section>
-  );
-}
-
-function RequestRow({ r, taken, onChange }: { r: AddRequest; taken: Set<string>; onChange: (r: AddRequest) => void }) {
-  const [name, setName] = useState(() => r.name ?? suggestName(r.question, taken));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // the button pressed may be gone after it worked: focus goes to the line that says what happened
-  const said_ = useRef<HTMLParagraphElement>(null);
-  const act = async (action: "approve" | "decline" | "retry") => {
-    if (action === "approve" && !NAME_RULE.test(name)) {
-      setError("A page name is 2 to 32 lower-case letters, digits or dashes, starting with a letter or digit.");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    const r2 = await ownerSend<{ request: AddRequest }>(
-      "POST",
-      `/api/admin/requests/${encodeURIComponent(r.condition_id)}`,
-      action === "approve" ? { action, name } : { action },
-    );
-    setBusy(false);
-    if (r2.ok && r2.data?.request) {
-      onChange(r2.data.request);
-      window.setTimeout(() => said_.current?.focus({ preventScroll: true }));
-    } else setError(r2.ok ? WORDS.other : said(r2));
-  };
-  const canName = r.status === "requested" || r.status === "declined";
-  const [head, tail] = requestWords(r);
-  return (
-    <li className="rv-item">
-      <h3 className="rv-q">{r.question}</h3>
-      <ul className="meta-line rv-sub">
-        <li>closed {day(r.closed)}</li>
-        <li>resolved {r.winner}</li>
-        <li>asked {dayOf(r.requested_at)}</li>
-        <li>
-          <a href={r.url} target="_blank" rel="noopener noreferrer">
-            Polymarket ↗
-          </a>
-        </li>
-      </ul>
-      <p className="rv-decided" ref={said_} tabIndex={-1}>
-        <b>{head}</b>
-        {tail}
-      </p>
-      {canName && (
-        <label className="rv-field rv-name">
-          <span className="label">Page name</span>
-          <input value={name} maxLength={32} spellCheck={false} onChange={(e) => setName(e.target.value.toLowerCase())} />
-        </label>
-      )}
-      <div className="rv-actions">
-        {canName && (
-          <button type="button" className="btn btn-solid btn-sm" disabled={busy} onClick={() => act("approve")}>
-            Approve and add
-          </button>
-        )}
-        {r.status === "failed" && (
-          <button type="button" className="btn btn-solid btn-sm" disabled={busy} onClick={() => act("retry")}>
-            Try again
-          </button>
-        )}
-        {(r.status === "requested" || r.status === "approved" || r.status === "failed") && (
-          <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => act("decline")}>
-            Decline
-          </button>
-        )}
-      </div>
-      {error && (
-        <p className="rv-error" role="alert">
-          {error}
-        </p>
-      )}
-    </li>
   );
 }
 
@@ -821,7 +727,6 @@ function WatchedSection({ data }: { data: Overview }) {
                   (w.question ?? w.story)
                 )}
               </span>
-              <span className="tabular">{fmtInt(w.count)} watching</span>
               <span className="rv-muted">since {dayOf(w.since)}</span>
             </li>
           ))}

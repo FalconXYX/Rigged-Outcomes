@@ -42,11 +42,11 @@ For each UTC day, every market that closed that day:
    weather and the embargo still leave it out, so the open list's readers
    find its verdict here. Every pick carries the shared vocabulary's kind
    and group (watchlist.kinds.file_event) and, when it was on an open card,
-   that card's "who would know first" sentence. A market visitors watch is
-   one on an open card (the site lets them watch only those), so it is
-   always checked and shown too; with --watched, its pick carries how many
-   watch that card ("watchers", left out at 0), as counted when the day
-   was last recomputed.
+   that card's "who would know first" sentence. A market on the site's
+   watchlist is one on an open card (only those can be watched), so it is
+   always checked and shown too; with --watched, its pick is marked
+   ("watched": true, left out otherwise), as the watchlist stood when the
+   day was last recomputed.
 
 Writes web/public/data/closed.json (the Watchlist page's Recently closed
 section), keeping the
@@ -268,12 +268,12 @@ def vocabulary(market, conn=None, folded=()):
     return out
 
 
-def pick(market, label, folded, check, open_since=None, words=None, watchers=0):
+def pick(market, label, folded, check, open_since=None, words=None, watched=False):
     """One shown market as closed.json has it. folded: the markets counted
     under it (later dates, same news), listed by question. open_since: the
     first day its market was on an "Open now" card, or None (the key is
     then left out). words: vocabulary() (kind, group, who_knows).
-    watchers: how many visitors watch its open card (left out at 0)."""
+    watched: its open card is on the site's watchlist (left out when not)."""
     ev = filters.event_of(market)
     out = {
         "condition_id": market["conditionId"],
@@ -299,35 +299,36 @@ def pick(market, label, folded, check, open_since=None, words=None, watchers=0):
     for k, v in (words or {}).items():
         if v is not None:
             out[k] = v
-    if watchers and int(watchers) > 0:
-        out["watchers"] = int(watchers)
+    if watched:
+        out["watched"] = True
     return out
 
 
-def watcher_count(conn, idents, watched):
-    """How many visitors watch the "Open now" card these markets were last
-    on (watched: {card id: count}, from the job's work.json), or 0."""
+def on_watchlist(conn, idents, watched):
+    """Whether the "Open now" card these markets were last on is on the
+    site's watchlist (watched: the card ids on it, from the job's
+    work.json)."""
     if not watched or conn is None:
-        return 0
+        return False
     card = store.open_listed_card(conn, idents)
-    return max(0, int(watched.get(card["id"]) or 0)) if card else 0
+    return bool(card) and card["id"] in watched
 
 
 def load_watched(path):
-    """{open card id: watchers} from the job's work.json ({"watched": [{"story", "count"}]}); {} when the
-    file is missing or unreadable (the API was not configured or did not answer)."""
+    """The open card ids on the site's watchlist, from the job's work.json ({"watched": [{"story"}]}); an
+    empty set when the file is missing or unreadable (the API was not configured or did not answer)."""
     try:
         with open(path) as f:
             rows = json.load(f).get("watched") or []
     except (OSError, ValueError, AttributeError) as e:
-        log(f"  ! no watch counts ({path}: {type(e).__name__}); picks carry none")
-        return {}
-    return {str(r["story"]): int(r.get("count") or 0) for r in rows if isinstance(r, dict) and r.get("story")}
+        log(f"  ! no watchlist ({path}: {type(e).__name__}); no pick is marked watched")
+        return set()
+    return {str(r["story"]) for r in rows if isinstance(r, dict) and r.get("story")}
 
 
 def run_day(day_ts, markets, conn, client=None, watched=None):
     """The closed list of one UTC day from the markets that closed in it.
-    watched: {open card id: watchers} (load_watched)."""
+    watched: the open card ids on the site's watchlist (load_watched)."""
     cands, dropped = candidates(markets, conn)
     checks = judge.check_markets([m for m, _, _ in cands], conn, client) if cands else {}
     picks = []
@@ -339,7 +340,7 @@ def run_day(day_ts, markets, conn, client=None, watched=None):
         # on an open card if this market or one counted under it was (same event, same news)
         idents = open_idents([m] + folded)
         picks.append(pick(m, lab, folded, c, store.open_listed_since(conn, idents), vocabulary(m, conn, folded),
-                          watcher_count(conn, idents, watched)))
+                          on_watchlist(conn, idents, watched)))
     shown = choose(picks)
     verdicts = Counter(p["verdict"] for p in picks)
     day = datetime.fromtimestamp(day_ts, timezone.utc).strftime("%Y-%m-%d")
@@ -368,8 +369,8 @@ def unfinished_since(old, generated_at, today, keep_days):
 def build(days=1, now=None, conn=None, out_path=OUT_PATH, keep_days=KEEP_DAYS, client=None, watched=None):
     """Recompute the last `days` UTC days (today so far included), and any
     older kept day still counted only in part, and merge them into
-    out_path, keeping the last keep_days days. watched: {open card id:
-    watchers} for the recomputed days' picks."""
+    out_path, keeping the last keep_days days. watched: the open card ids
+    on the site's watchlist, for the recomputed days' picks."""
     now = now or now_epoch()
     conn = conn or store.default_conn()
     net.install()
@@ -437,7 +438,7 @@ def main(argv=None):
     ap.add_argument("--out", default=OUT_PATH)
     ap.add_argument("--keep-days", type=int, default=KEEP_DAYS, help=f"days kept in the file (default {KEEP_DAYS})")
     ap.add_argument("--watched", metavar="PATH", default=None,
-                    help="the daily job's work.json: picks whose open card visitors watch carry the count")
+                    help="the daily job's work.json: picks whose open card is on the site's watchlist are marked")
     args = ap.parse_args(argv)
     now, days, keep_days = now_epoch(), args.days, args.keep_days
     if args.since:

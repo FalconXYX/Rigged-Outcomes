@@ -1,6 +1,6 @@
 # Build the static dashboard (web/) and publish it to GitHub Pages.
 #
-# One-time setup (see docs/DEPLOY.md, or README → One-time production setup), or the deploy job is rejected:
+# One-time setup (see docs/DEPLOY.md), or the deploy job is rejected:
 #   1. Settings → Pages → Build and deployment → Source: "GitHub Actions"
 #      (it currently publishes the D3.js branch; switching replaces that site), and "Enforce HTTPS"
 #      (the API answers https://parthjain.ca only).

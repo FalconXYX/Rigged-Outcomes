@@ -191,8 +191,8 @@ export interface ClosedPick {
   group?: 1 | 2 | 3;
   /** the "who would know first" sentence of the open card the market was on, when it was on one */
   who_knows?: string;
-  /** how many visitors watched its open card (as of the run that last checked the day); absent at 0 */
-  watchers?: number;
+  /** true when its open card is on the site's watchlist (as of the run that last checked the day); absent otherwise */
+  watched?: true;
 }
 
 export interface ClosedDay {

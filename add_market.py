@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-Add one closed market to the main page: the daily job's step for an "Add to
-main page" request the site's owner approved on the review page
-(watchlist.sync add, docs/DEPLOY.md), and a command a person can run too.
+Add one closed market to the main page: the job's step for a market a
+visitor sent there with "Add to main page" (watchlist.sync add,
+docs/DEPLOY.md), and a command a person can run too.
 
-    python3 add_market.py --condition-id 0x... --slug SLUG --name NAME --outcome Yes [--dry-run]
+    python3 add_market.py --condition-id 0x... --slug SLUG [--name NAME] --outcome Yes [--dry-run]
 
 1. Polymarket. Gamma's market for the slug must have this condition id, be
    closed, and have resolved to --outcome (watchlist.filters.winning_outcome).
 2. Already there. When the slug is in markets.json and both its CSVs exist,
    there is nothing to do: it reports "added", so a run after a failed
    report is harmless. A name another slug uses fails.
-3. The entry. Its output is the name in PascalCase ("gemini-carbon" ->
-   "GeminiCarbon"), which no entry may use already; markets.json gains
+3. The entry. With no --name, the page name comes from the slug
+   (page_name: "will-gemini-carbon-ship" -> "will-gemini-carbon-ship", cut
+   to 32 characters at a word's end, "-2" when it is taken). Its output is the name in
+   PascalCase ("gemini-carbon" -> "GeminiCarbon"), which no entry may use
+   already; markets.json gains
    {"name", "slug", "output", "correct_outcome"}, written the way the file
    is (json, indent 2, a final newline).
 4. run.py's two steps for it: every fill (polymarket_trades; over MAX_FILLS
@@ -29,6 +32,7 @@ the two CSVs (the raw data/<Output>.csv is gitignored) to main.
 """
 import argparse
 import contextlib
+import itertools
 import json
 import os
 import re
@@ -37,7 +41,8 @@ import sys
 ROOT = os.path.dirname(os.path.abspath(__file__))
 MAX_FILLS = 1_000_000
 MAX_CLEAN_BYTES = 45_000_000
-NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")         # the review page's rule for a new page name
+NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,31}$")         # a page name (the site's API checks the same)
+SUFFIXES = ("", "_clean", "_insiders")                  # the data files of an output name
 
 
 class AddError(Exception):
@@ -52,6 +57,33 @@ def pascal(name):
 def bare_slug(slug):
     """The market part of a slug (markets.json may hold "event/market#id"), as polymarket_api reads it."""
     return str(slug or "").split("#", 1)[0].split("?", 1)[0].rstrip("/").split("/")[-1].strip()
+
+
+def _cut(name, n):
+    """`name` cut to n characters, at the last dash when the cut would split a word (unless that leaves under 2)."""
+    if len(name) <= n:
+        return name
+    head = name[:n]
+    if name[n] != "-" and len(head.rsplit("-", 1)[0]) >= 2:
+        head = head.rsplit("-", 1)[0]
+    return head.strip("-")
+
+
+def page_name(slug, markets, root=ROOT):
+    """A free page name for a slug: its market part in lower case, each run of other characters one dash, cut to
+    32 characters at a word's end ("market-x" when that leaves one character); "-2", "-3"... when another entry
+    has the name or its output name, or data files of that output name are there."""
+    base = _cut(re.sub(r"[^a-z0-9]+", "-", bare_slug(slug).lower()).strip("-"), 32)
+    if len(base) < 2:
+        base = f"market-{base}".strip("-")
+    names = {m.get("name") for m in markets}
+    outputs = {str(m.get("output") or "").lower() for m in markets}
+    for i in itertools.count(1):
+        name = base if i == 1 else f"{_cut(base, 31 - len(str(i)))}-{i}"
+        out = pascal(name)
+        if name not in names and out.lower() not in outputs and \
+                not any(os.path.exists(os.path.join(root, "data", f"{out}{s}.csv")) for s in SUFFIXES):
+            return name
 
 
 def render(markets, original=None):
@@ -119,8 +151,8 @@ def _steps():
 
 def add(condition_id, slug, name, outcome, dry_run=False, root=ROOT, steps=None, max_fills=MAX_FILLS,
         max_clean_bytes=MAX_CLEAN_BYTES):
-    """Add the market (the module docstring). Returns {"status": "added" | "failed", "name", "note",
-    "changed"}: changed is False when it was there already (or in a dry run)."""
+    """Add the market (the module docstring); name None: page_name. Returns {"status": "added" | "failed",
+    "name", "note", "changed"}: changed is False when it was there already (or in a dry run)."""
     steps = steps or {}
     gamma = steps.get("gamma")
     if gamma is None:
@@ -141,23 +173,25 @@ def add(condition_id, slug, name, outcome, dry_run=False, root=ROOT, steps=None,
         return {"status": "failed", "name": name, "note": why, "changed": False}
 
     try:
-        if not NAME.match(str(name or "")):
+        if name is not None and not NAME.match(str(name)):
             raise AddError("the page name must be 2 to 32 lower-case letters, digits or dashes")
         markets = json.loads(original.decode("utf-8"))
         winner = check_gamma(gamma(bare_slug(slug)), condition_id, outcome)
         mine = bare_slug(slug)
         same = next((m for m in markets if bare_slug(m.get("slug")) == mine), None)
         if same is not None:
-            files = [os.path.join(root, "data", f"{same['output']}{s}.csv") for s in ("_clean", "_insiders")]
+            files = [os.path.join(root, "data", f"{same['output']}{s}.csv") for s in SUFFIXES[1:]]
             if all(os.path.exists(p) for p in files):
                 return {"status": "added", "name": same["name"], "note": "already on the main page", "changed": False}
             raise AddError(f"it is in markets.json as {same['name']!r} without its data files; run run.py for it")
+        if name is None:
+            name = page_name(mine, markets, root)
         if any(m.get("name") == name for m in markets):
             raise AddError(f"the page name {name!r} is taken by another market")
         out = pascal(name)
         if any(str(m.get("output") or "").lower() == out.lower() for m in markets):
             raise AddError(f"the output name {out!r} is taken by another market")
-        raw, clean, insiders = (os.path.join(root, "data", f"{out}{s}.csv") for s in ("", "_clean", "_insiders"))
+        raw, clean, insiders = (os.path.join(root, "data", f"{out}{s}.csv") for s in SUFFIXES)
         if any(os.path.exists(p) for p in (raw, clean, insiders)):
             raise AddError(f"data files named {out} are there already; nothing was overwritten")
         if dry_run:
@@ -192,7 +226,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Add one closed market to the main page (markets.json and its data).")
     ap.add_argument("--condition-id", required=True)
     ap.add_argument("--slug", required=True)
-    ap.add_argument("--name", required=True, help="the page name: lower-case letters, digits and dashes")
+    ap.add_argument("--name", default=None, help="the page name: lower-case letters, digits and dashes (default: "
+                                                 "made from the slug)")
     ap.add_argument("--outcome", required=True, help="the outcome it resolved to, as Polymarket names it")
     ap.add_argument("--dry-run", action="store_true", help="check it on Polymarket and the name only")
     args = ap.parse_args(argv)
@@ -200,7 +235,7 @@ def main(argv=None):
     if got["status"] == "added":
         print(f"added {got['name']}" + (f" ({got['note']})" if got.get("note") else ""))
         return 0
-    print(f"could not add {args.name}: {got['note']}", file=sys.stderr)
+    print(f"could not add {got.get('name') or args.slug}: {got['note']}", file=sys.stderr)
     return 2
 
 

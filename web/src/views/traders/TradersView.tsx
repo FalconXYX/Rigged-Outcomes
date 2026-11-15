@@ -151,8 +151,7 @@ function TradersBody({ title, data }: { title: string; data: TradersData }) {
               <strong className="tabular">{fmtPct(summary.pctSuspicious)}</strong> of it (
               <strong className="tabular">{fmtUSD(summary.suspiciousVolume)}</strong>) is held by accounts that had made{" "}
               <span className="tabular">{firstX}</span> or fewer trades before their first bet here, or that put{" "}
-              <span className="tabular">{pctVol}%</span> or more of their money into this market. That pattern fits someone
-              who knew the outcome early, but it is not proof of it.
+              <span className="tabular">{pctVol}%</span> or more of their money into this market.
             </p>
           </>
         )}

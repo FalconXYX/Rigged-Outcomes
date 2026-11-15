@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Offline tests for add_market.py (an approved "Add to main page" request):
+Offline tests for add_market.py (a market sent with "Add to main page"):
 fake Polymarket and pipeline steps in a temporary copy of the repo's
 markets.json. No network.
 
     python3 tests/test_add_market.py
 
-Covers the page name and its PascalCase output, Polymarket's market having
+Covers the page name (given, or made from the slug when the job has none)
+and its PascalCase output, Polymarket's market having
 to match (condition id, closed, winner), a slug already on the main page
 reported as added with no work, a name or output already taken, the size
 caps (markets.json put back byte for byte, the new CSVs removed), a dry run
@@ -85,6 +86,25 @@ def test_names():
     assert A.bare_slug("event/market-1#123") == "market-1" and A.bare_slug("m?x=1") == "m"
 
 
+def test_page_name_from_the_slug():
+    markets = json.loads(read(os.path.join(ROOT, "markets.json")))
+    assert A.page_name("event/Gemini_Carbon-Ship#9", markets) == "gemini-carbon-ship"
+    cut = A.page_name("will-tit-me-pregunt-be-played-first-at-the-super-bowl", markets)
+    assert cut == "will-tit-me-pregunt-be-played" and A.NAME.match(cut)         # cut at a word's end
+    assert A.page_name("will-iran-target-oman-by-november-30-2026", markets) == "will-iran-target-oman-by"
+    assert A.page_name("usiran", markets) == "usiran-2"                          # another entry has the name
+    assert A.page_name("x", markets) == "market-x" and A.page_name("--", markets) == "market"
+    assert A.page_name("gemini-carbon", markets + [{"name": "o", "output": "GeminiCarbon"}]) == "gemini-carbon-2"
+    long = A.page_name("a" * 40, markets + [{"name": "a" * 32, "output": "A"}])
+    assert long == "a" * 30 + "-2" and A.NAME.match(long)
+    tmp = repo()
+    try:
+        open(os.path.join(tmp, "data", "GeminiCarbon_clean.csv"), "w").close()     # files of that output name
+        assert A.page_name("gemini-carbon", markets, root=tmp) == "gemini-carbon-2"
+    finally:
+        shutil.rmtree(tmp)
+
+
 def test_markets_json_is_written_the_way_it_is():
     raw = read(os.path.join(ROOT, "markets.json")).decode("utf-8")
     assert A.render(json.loads(raw)) == raw                   # re-dumping today's file gives it byte for byte
@@ -119,6 +139,20 @@ def test_adds_a_market():
         got = A.add(CID, "gemini-carbon-ship", "other-name", "Yes", root=tmp, steps=f2.steps())
         assert got["status"] == "added" and got["name"] == "gemini-carbon" and not got["changed"]
         assert [r[0] for r in f2.ran] == ["gamma"]
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_adds_a_market_named_from_its_slug():
+    tmp = repo()
+    try:
+        got = A.add(CID, "event/gemini-carbon-ship#9", None, "Yes", root=tmp, steps=Fake().steps())
+        assert got == {"status": "added", "name": "gemini-carbon-ship", "note": None, "changed": True}, got
+        entry = json.loads(read(os.path.join(tmp, "markets.json")))[-1]
+        assert entry["name"] == "gemini-carbon-ship" and entry["output"] == "GeminiCarbonShip"
+        # a failure before the name is made reports none
+        got = A.add(CID, "other-slug", None, "Yes", root=tmp, steps=Fake(market=dict(MARKET, closed=False)).steps())
+        assert got["status"] == "failed" and got["name"] is None and "not closed" in got["note"]
     finally:
         shutil.rmtree(tmp)
 

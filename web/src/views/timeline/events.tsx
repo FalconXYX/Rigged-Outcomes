@@ -9,7 +9,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { AddedEvent, MarketData, MarketEvent } from "../../types";
 import { fmtT } from "../../lib/format";
-import { WORDS, apiConfigured, apiGet, apiSend, dropUndo, saveUndo, undoOf, type Marker } from "../../lib/api";
+import { OFFLINE, WORDS, apiConfigured, apiGet, apiSend, dropUndo, localMarkers, saveUndo, setLocalMarkers, undoOf, type Marker } from "../../lib/api";
 
 const MAX_LABEL = 40;
 
@@ -28,10 +28,10 @@ export function withAddedEvents(market: MarketData, added: AddedEvent[], bounds:
 }
 
 /**
- * "off": no API in the build (the dev server's in-memory editor); "loading";
- * "ready": the API's markers; "down": the API failed or doesn't list the market (no editor).
+ * "off": the markers are kept in this browser (no API in the build, or the
+ * API doesn't answer for this market); "loading"; "ready": the API's markers.
  */
-export type MarkerStatus = "off" | "loading" | "ready" | "down";
+export type MarkerStatus = "off" | "loading" | "ready";
 
 type MarkersReply = { listed: boolean; writes: boolean; markers: Marker[] };
 type Kept = { events: AddedEvent[]; writes: boolean };
@@ -45,7 +45,7 @@ const fromMarker = (m: Marker): AddedEvent => ({ id: m.id, t: m.t, label: m.labe
 export type AddedEvents = {
   events: AddedEvent[];
   status: MarkerStatus;
-  /** false while the owner has paused visitors' changes */
+  /** false while the owner has paused visitors' changes (adds are then kept in this browser) */
   writes: boolean;
   /** add a marker; an error in words, or null once it is added */
   add: (t: number, label: string, slot?: HTMLElement | null) => Promise<string | null>;
@@ -58,7 +58,7 @@ export type AddedEvents = {
 export function useAddedEvents(name: string): AddedEvents {
   const [state, setState] = useState<{ name: string; status: MarkerStatus } & Kept>(() => {
     const kept = session.get(name);
-    if (!apiConfigured) return { name, status: "off", events: kept?.events ?? [], writes: true };
+    if (!apiConfigured) return { name, status: "off", events: kept?.events ?? localMarkers<AddedEvent>(name), writes: true };
     return kept ? { name, status: "ready", ...kept } : { name, status: "loading", events: [], writes: true };
   });
   // a new market's first render, before the effect below has caught up
@@ -68,7 +68,7 @@ export function useAddedEvents(name: string): AddedEvents {
   useEffect(() => {
     const kept = session.get(name);
     if (!apiConfigured) {
-      setState({ name, status: "off", events: kept?.events ?? [], writes: true });
+      setState({ name, status: "off", events: kept?.events ?? localMarkers<AddedEvent>(name), writes: true });
       return;
     }
     if (kept) {
@@ -79,7 +79,7 @@ export function useAddedEvents(name: string): AddedEvents {
     apiGet<MarkersReply>(`/api/markers?market=${encodeURIComponent(name)}`).then((r) => {
       if (!live) return;
       if (!r || r.listed !== true || !Array.isArray(r.markers)) {
-        setState({ name, status: "down", events: [], writes: false });
+        setState({ name, status: "off", events: localMarkers<AddedEvent>(name), writes: true });
         return;
       }
       const next: Kept = { events: r.markers.map(fromMarker).sort(byTime), writes: r.writes !== false };
@@ -91,25 +91,24 @@ export function useAddedEvents(name: string): AddedEvents {
     };
   }, [name]);
 
-  const keep = (update: (k: Kept) => Kept) =>
+  const keep = (update: (k: Kept) => Kept, here = false) =>
     setState((s) => {
       if (s.name !== name) return s;
       const next = update({ events: s.events, writes: s.writes });
       session.set(name, next);
-      return { ...s, ...next };
+      if (here || s.status === "off") setLocalMarkers(name, next.events.filter((e) => e.id.startsWith("ev_")));
+      return { ...s, ...next, status: here ? "off" : s.status };
     });
 
   const add = async (t: number, label: string, slot?: HTMLElement | null): Promise<string | null> => {
-    if (current.status === "off") {
+    const here = () => {
       const e: AddedEvent = { id: `ev_${Date.now().toString(36)}`, t, label, source: "manual" };
-      keep((k) => ({ ...k, events: [...k.events, e].sort(byTime) }));
+      keep((k) => ({ ...k, events: [...k.events, e].sort(byTime) }), true);
       return null;
-    }
+    };
+    if (current.status === "off") return here();
     const r = await apiSend<{ marker: Marker; undo: string }>("POST", "/api/markers", { market: name, t, label }, { bot: "marker", slot });
-    if (!r.ok) {
-      if (r.code === "paused") keep((k) => ({ ...k, writes: false }));
-      return r.words;
-    }
+    if (!r.ok) return OFFLINE.has(r.code) ? here() : r.words;
     if (!r.data?.marker) return WORDS.other;
     if (typeof r.data.undo === "string") saveUndo(r.data.marker.id, r.data.undo);
     const m = fromMarker(r.data.marker);
@@ -118,8 +117,8 @@ export function useAddedEvents(name: string): AddedEvents {
   };
 
   const remove = async (id: string): Promise<string | null> => {
-    if (current.status === "off") {
-      keep((k) => ({ ...k, events: k.events.filter((e) => e.id !== id) }));
+    if (current.status === "off" || id.startsWith("ev_")) {
+      keep((k) => ({ ...k, events: k.events.filter((e) => e.id !== id) }), true);
       return null;
     }
     const undo = undoOf(id);
@@ -131,7 +130,7 @@ export function useAddedEvents(name: string): AddedEvents {
     return null;
   };
 
-  const canRemove = (id: string) => current.status === "off" || undoOf(id) != null;
+  const canRemove = (id: string) => current.status === "off" || id.startsWith("ev_") || undoOf(id) != null;
 
   return { events: current.events, status: current.status, writes: current.writes, add, remove, canRemove };
 }
@@ -145,7 +144,7 @@ const fromInput = (v: string) => {
 };
 
 /** The tag on a row: where the marker came from. */
-const FROM: Record<AddedEvent["source"], string> = { manual: "visitor", ai: "AI" };
+const FROM: Record<AddedEvent["source"], string> = { manual: "added", ai: "AI" };
 
 /**
  * The editor: the market's markers (the ones from markets.json, "original",
@@ -175,8 +174,6 @@ export function EventsEditor({
   const toggle = useRef<HTMLButtonElement>(null);
   const slot = useRef<HTMLSpanElement>(null);
   const panel = useRef<HTMLDivElement>(null);
-  const memoryOnly = api.status === "off";
-  const paused = !memoryOnly && !api.writes;
 
   const rows = useMemo(
     () =>
@@ -228,7 +225,7 @@ export function EventsEditor({
     e.preventDefault();
     const t = fromInput(when);
     const text = label.trim().replace(/\s+/g, " ");
-    if (!text || t == null || busy || paused) return;
+    if (!text || t == null || busy) return;
     if (t < bounds[0] || t > bounds[1]) {
       setError(WORDS.bad_time);
       return;
@@ -254,11 +251,7 @@ export function EventsEditor({
         className={`btn btn-ghost btn-sm tl-ev-toggle${open ? " on" : ""}`}
         onClick={() => (open ? setOpen(false) : show())}
         aria-expanded={open}
-        title={
-          memoryOnly
-            ? "Add or remove markers on this timeline (local dev server only)"
-            : "Add a marker to this timeline: what happened, and when (ET)"
-        }
+        title="Add a marker to this timeline: what happened, and when (ET)"
       >
         Events
         {rows.length > 0 && <span className="tl-ev-count tabular">{rows.length}</span>}
@@ -297,7 +290,7 @@ export function EventsEditor({
 
           {/* noValidate: a time outside the market's span gets this page's words, not the browser's bubble */}
           <form className="tl-ev-form" onSubmit={add} noValidate>
-            <fieldset className="tl-ev-fields" disabled={paused}>
+            <fieldset className="tl-ev-fields">
               <label>
                 <span className="label">What happened</span>
                 <input
@@ -334,13 +327,7 @@ export function EventsEditor({
               {error}
             </p>
           )}
-          <p className="tl-ev-note">
-            {memoryOnly
-              ? "Not saved yet: markers go away when the page reloads."
-              : paused
-                ? "Adding markers is paused right now."
-                : "Markers you add are shown to everyone. You can remove yours for 24 hours; the site's owner can remove any."}
-          </p>
+          <p className="tl-ev-note">Markers you add are shown to everyone. You can remove yours for 24 hours.</p>
         </div>
       )}
     </div>

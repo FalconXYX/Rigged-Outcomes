@@ -1,13 +1,26 @@
-import { useEffect, useMemo, useRef, type CSSProperties, type MouseEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, type CSSProperties, type MouseEvent } from "react";
 import type { ClosedData, ClosedDay, ClosedPick } from "../types";
 import { loadClosed, loadIndex, loadOpen, useAsync } from "../lib/data";
 import { fmtDay, fmtInt, fmtUSD } from "../lib/format";
-import { closeSheet, openSheet, setQuery, useQuery } from "../lib/router";
+import { closeSheet, setQuery, useQuery } from "../lib/router";
 import { ErrorNote, Loading, Select } from "../components/ui";
 import { OpenNow, isOpenKey } from "./watchlist/OpenNow";
-import { Sheet } from "./watchlist/Sheet";
-import { AddToMain } from "./watchlist/controls";
-import { Chevron, DAY_MS, MoreButton, NewsList, colsFor, dateOnly, dayOf, hhmm, ms, plural } from "./watchlist/shared";
+import { AddToMain, CardAdd } from "./watchlist/controls";
+import {
+  Chevron,
+  DAY_MS,
+  MoreButton,
+  NewsList,
+  Panel,
+  colsFor,
+  dateOnly,
+  dayOf,
+  hhmm,
+  ms,
+  openPanel,
+  panelId,
+  plural,
+} from "./watchlist/shared";
 import "./watchlist.css";
 
 // The watchlist. On top, "Open now" (watchlist/OpenNow.tsx): open markets
@@ -15,9 +28,10 @@ import "./watchlist.css";
 // moving toward it. Below, the recently closed ones (watchlist/upsets.py):
 // one day at a time, that day's 3-5 markets worth a look as possible insider
 // cases, each a card under a rule in its verdict's colour. "Details" on a
-// card in either section opens the rest in a side sheet (watchlist/Sheet.tsx),
-// as a history step, so Back closes it. In the sheets a visitor can ask for a
-// closed market to go to the main page, or watch an open one
+// card in either section opens the rest in a panel of its own under the
+// card's row (watchlist/shared.tsx), as a history step, so Back closes it. On
+// each card, beside "Details", and again in its panel, a visitor can add a
+// closed market to the main page, or put an open one on the site's watchlist
 // (watchlist/controls.tsx, through the site's API). Older days are a pick away.
 // `?day=` and `?open=` hold the state (one card open on the whole page). All times are UTC.
 
@@ -44,6 +58,10 @@ const longDate = (day: string) =>
   new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 const clean = (s: string) =>
   s.replace(STAMP_IN_BRACKETS, "").replace(CLOCK, "").replace(STAMP, (_, day: string) => longDate(day));
+
+/** The same, and a bare ISO date ("first reported on 2026-11-11") as the page writes dates in a sentence. */
+const BARE_DAY = /\b(\d{4}-\d\d-\d\d)\b/g;
+const words = (s: string) => clean(s).replace(BARE_DAY, (_, day: string) => longDate(day));
 
 /**
  * When the news broke against the close, in words: "news broke 17 h before
@@ -128,21 +146,26 @@ function Checks({ p }: { p: ClosedPick }) {
 
 const moreId = (p: ClosedPick) => `cl-more-${shortId(p)}`;
 
+/** a list of the markets counted under one this long or longer starts folded */
+const FOLD = 4;
+
 /**
  * A closed card, top to bottom: the verdict in its colour (the card's top
  * rule is the same colour), the question, how it resolved and when the news
  * broke against the close, what happened (two lines), the three checks with
- * their marks in the verdict's colour, "Details".
+ * their marks in the verdict's colour; at the foot "Details" and "+ Add to
+ * main page" (watchlist/controls.tsx).
  */
-function Card({ p, open }: { p: ClosedPick; open: boolean }) {
-  const show = () => openSheet(shortId(p));
+function Card({ p, open, onMain, onClose }: { p: ClosedPick; open: boolean; onMain: string | null; onClose: () => void }) {
+  const id = shortId(p);
   const when = broke(p);
   return (
     <article
       className="card cl-card"
       data-verdict={p.verdict}
-      // opens from anywhere on it, unless the click ended a text selection
-      onClick={() => !window.getSelection()?.toString() && show()}
+      data-open={open || undefined}
+      // while shut it opens from anywhere on it, unless the click ended a text selection
+      onClick={() => !open && !window.getSelection()?.toString() && openPanel(id)}
     >
       <p className="cl-verdict label">{VERDICT[p.verdict][0]}</p>
       <h3 className="cl-card-title">{p.question}</h3>
@@ -150,12 +173,15 @@ function Card({ p, open }: { p: ClosedPick; open: boolean }) {
         Resolved <b>{p.winner}</b>
         {when && <> · {when}</>}
       </p>
-      <p className="cl-what">{clean(p.what_happened)}</p>
+      <p className="cl-what">{words(p.what_happened)}</p>
       {/* the wrapper is the size container (on the card it would switch the subgrid off) */}
       <div className="cl-checks-box">
         <Checks p={p} />
       </div>
-      <MoreButton id={moreId(p)} open={open} onOpen={show} />
+      <div className="cl-card-foot">
+        <MoreButton id={moreId(p)} open={open} panel={panelId(id)} onToggle={() => (open ? onClose() : openPanel(id))} />
+        <CardAdd p={p} onMain={onMain} />
+      </div>
     </article>
   );
 }
@@ -168,12 +194,16 @@ const RUN_IN: Record<ClosedPick["verdict"], string> = {
 };
 
 /**
- * The closed card's sheet: what happened, large; why (its opening words
- * naming the verdict); the three checks with their answers and reasons; the
- * open list's "who would know first" when the market was on it; the markets
- * counted under this one (settled by the same news); the headlines as a
- * plain list, newest last, the first report marked in the verdict's colour;
- * then the actions: "Add to main page" (watchlist/controls.tsx) and Polymarket.
+ * The closed card's panel. On the left the story: what happened, large;
+ * why (its opening words naming the verdict); the three checks, a line each
+ * (mark, check, answer, what the news said); the open list's "who would
+ * know first" when the market was on it; under them the actions: "Add to
+ * main page" (watchlist/controls.tsx) and Polymarket. On the right the
+ * news: the headlines as a plain list, newest last, folded when long, the
+ * first report marked in the verdict's colour and always shown; under them
+ * the markets counted under this one (settled by the same news), folded
+ * when there are many. With fewer than 3 headlines the checks head the
+ * right column, so the two columns end near each other.
  */
 function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null; onClose: () => void }) {
   const id = shortId(p);
@@ -181,87 +211,126 @@ function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null;
   const first = firstReport(p);
   const all = checks(p);
   const yes = all.filter((c) => c.state === "met").length;
+  const same = p.same_event;
+  const sameTitle = `Counted under this one: ${plural(same.length, "other market")}`;
+  // the three checks, a line each: a mark, the check, its answer, what the news said (under them on a phone);
+  // with fewer than 3 headlines they head the right column instead, so the two columns end near each other
+  const fewNews = p.headlines.length < 3;
+  const checksSec = (
+    <section className="wl-panel-sec" aria-labelledby={`cl-checks-${id}`}>
+      <h4 className="cl-h" id={`cl-checks-${id}`}>
+        The three checks{" "}
+        <span className="cl-h-aside tabular">
+          <span aria-hidden="true">· </span>yes on {fmtInt(yes)} of 3
+        </span>
+      </h4>
+      <ul className="cl-ledger">
+        {all.map((c) => (
+          <li key={c.short} data-state={c.state}>
+            <span className="cl-glyph" aria-hidden />
+            <b title={c.long}>{c.short}</b>
+            <span className="cl-ledger-ans">
+              <span className="visually-hidden">: </span>
+              {STATE_WORD[c.state]}
+            </span>
+            <span className="cl-ledger-why">{c.detail}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
   return (
-    <Sheet label={p.question} returnTo={moreId(p)} onClose={onClose} verdict={p.verdict}>
-      <section className="wl-sheet-sec">
-        <h4 className="visually-hidden">What happened</h4>
-        <p className="wl-sheet-lead wl-sheet-first">{clean(p.what_happened)}</p>
-        {group && (
-          <p className="cl-event">
-            Part of <span>{group}</span>
-          </p>
-        )}
-        <p className="wl-sheet-text">
-          <b>{RUN_IN[p.verdict]}</b> {clean(p.reason)}
-        </p>
-      </section>
-
-      {/* the three checks: a mark, the check and its answer, what the news said under them */}
-      <section className="wl-sheet-sec" aria-labelledby={`cl-checks-${id}`}>
-        <h4 className="cl-h" id={`cl-checks-${id}`}>
-          The three checks{" "}
-          <span className="cl-h-aside tabular">
-            <span aria-hidden="true">· </span>yes on {fmtInt(yes)} of 3
-          </span>
-        </h4>
-        <ul className="cl-ledger">
-          {all.map((c) => (
-            <li key={c.short} data-state={c.state}>
-              <span className="cl-glyph" aria-hidden />
-              <b title={c.long}>{c.short}</b>
-              <span className="cl-ledger-ans">
-                <span className="visually-hidden">: </span>
-                {STATE_WORD[c.state]}
-              </span>
-              <span className="cl-ledger-why">{c.detail}</span>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      {(p.who_knows || p.on_open_list_from) && (
-        <section className="wl-sheet-sec">
-          {p.who_knows && <p className="wl-sheet-text">{p.who_knows}</p>}
-          {p.on_open_list_from && (
-            <p className="cl-onlist">
-              On the open list from {fmtDay(new Date(`${p.on_open_list_from}T00:00:00Z`))}
-              {(p.watchers ?? 0) > 0 && <> · watched by {plural(p.watchers!, "visitor")}</>}
+    <Panel
+      id={panelId(id)}
+      question={p.question}
+      returnTo={moreId(p)}
+      onClose={onClose}
+      verdict={p.verdict}
+      main={
+        <>
+          <section className="wl-panel-sec">
+            <h4 className="visually-hidden">What happened</h4>
+            <p className="wl-panel-lead">{words(p.what_happened)}</p>
+            {group && (
+              <p className="cl-event">
+                Part of <span>{group}</span>
+              </p>
+            )}
+            <p className="wl-panel-text">
+              <b>{RUN_IN[p.verdict]}</b> {words(p.reason)}
             </p>
+          </section>
+
+          {!fewNews && checksSec}
+
+          {(p.who_knows || p.on_open_list_from) && (
+            <section className="wl-panel-sec">
+              {p.who_knows && <p className="wl-panel-text">{p.who_knows}</p>}
+              {p.on_open_list_from && (
+                <p className="cl-onlist">
+                  On the open list from {fmtDay(new Date(`${p.on_open_list_from}T00:00:00Z`))}
+                </p>
+              )}
+            </section>
           )}
-        </section>
-      )}
 
-      {p.same_event.length > 0 && (
-        <section className="wl-sheet-sec" aria-labelledby={`cl-same-${id}`}>
-          <h4 className="cl-h" id={`cl-same-${id}`}>
-            Counted under this one: {plural(p.same_event.length, "other market")}
-          </h4>
-          <ul className="wl-plain">
-            {p.same_event.map((q) => (
-              <li key={q}>{q}</li>
+        </>
+      }
+      side={
+        <>
+          {fewNews && checksSec}
+          <section className="wl-panel-sec" aria-labelledby={`cl-news-${id}`}>
+            <h4 className="cl-h" id={`cl-news-${id}`}>
+              {p.headlines.length ? `${plural(p.headlines.length, "headline")} checked` : "Headlines checked"}
+            </h4>
+            {p.headlines.length ? (
+              <NewsList
+                id={`cl-news-${id}-list`}
+                items={p.headlines}
+                mark={(h) => (h === first ? "First report" : null)}
+                pin={(h) => h === first}
+              />
+            ) : (
+              <p className="cl-empty">None found.</p>
+            )}
+          </section>
+
+          {same.length > 0 &&
+            (same.length >= FOLD ? (
+              <details className="cl-more wl-panel-fold">
+                <summary>
+                  {sameTitle}
+                  <Chevron />
+                </summary>
+                <ul className="wl-plain">
+                  {same.map((q) => (
+                    <li key={q}>{q}</li>
+                  ))}
+                </ul>
+              </details>
+            ) : (
+              <section className="wl-panel-sec" aria-labelledby={`cl-same-${id}`}>
+                <h4 className="cl-h" id={`cl-same-${id}`}>
+                  {sameTitle}
+                </h4>
+                <ul className="wl-plain">
+                  {same.map((q) => (
+                    <li key={q}>{q}</li>
+                  ))}
+                </ul>
+              </section>
             ))}
-          </ul>
-        </section>
-      )}
-
-      <section className="wl-sheet-sec" aria-labelledby={`cl-news-${id}`}>
-        <h4 className="cl-h" id={`cl-news-${id}`}>
-          {p.headlines.length ? `${plural(p.headlines.length, "headline")} checked` : "Headlines checked"}
-        </h4>
-        {p.headlines.length ? (
-          <NewsList items={p.headlines} mark={(h) => (h === first ? "First report" : null)} />
-        ) : (
-          <p className="cl-empty">None found.</p>
-        )}
-      </section>
-
-      <div className="wl-sheet-foot">
-        <AddToMain p={p} onMain={onMain} />
-        <a className="cl-link cl-ext" href={p.url} target="_blank" rel="noopener noreferrer">
-          Polymarket <span aria-hidden>↗</span>
-        </a>
-      </div>
-    </Sheet>
+        </>
+      }
+      foot={
+        <>
+          <AddToMain p={p} onMain={onMain} />
+          <a className="cl-link cl-ext" href={p.url} target="_blank" rel="noopener noreferrer">
+            Polymarket <span aria-hidden>↗</span>
+          </a>
+        </>
+      }
+    />
   );
 }
 
@@ -322,28 +391,8 @@ function DayPicker({ data, day }: { data: ClosedData; day: ClosedDay }) {
   );
 }
 
-/** What the filters took out, in words that read after a count. */
-const DROPPED: Record<string, [one: string, many: string]> = {
-  "game or sport": ["game or sport", "games or sports"],
-  "price market": ["price market", "price markets"],
-  "election or vote": ["election or vote", "elections or votes"],
-  weather: ["weather market", "weather markets"],
-  "nothing happened by the deadline": ["where nothing happened by the deadline", "where nothing happened by the deadline"],
-  "no single winner": ["with no single winner", "with no single winner"],
-  "later date of the same event": ["later date of an event already in", "later dates of an event already in"],
-  "same news as another market": ["settled by the same news as another", "settled by the same news as another"],
-  "counted or charted in public (views, box office, charts, ...)": ["counted or ranked in public", "counted or ranked in public"],
-  "words said in public (mention market)": ["mention market (words said in public)", "mention markets (words said in public)"],
-  "embargoed release (official statistic, rate decision, company results or share offering)": [
-    "release kept secret until a set time",
-    "releases kept secret until a set time",
-  ],
-};
-
-function HowPicked({ data, day, cut }: { data: ClosedData; day: ClosedDay; cut: string }) {
-  const dropped = Object.entries(day.dropped ?? {});
-  // what is left once the kinds below are taken out ("could not be checked" is one of them): the markets checked
-  const left = day.checked;
+function HowPicked({ data }: { data: ClosedData }) {
+  const r = data.rules;
   return (
     <details className="cl-more cl-dayinfo">
       <summary>
@@ -351,35 +400,12 @@ function HowPicked({ data, day, cut }: { data: ClosedData; day: ClosedDay; cut: 
         <Chevron />
       </summary>
       <p>
-        {plural(day.closed_markets, "market")} closed on this day{cut} (a UTC day; markets with less than{" "}
-        {fmtUSD(data.rules.min_volume)} traded aren't counted). {fmtInt(left)} {left === 1 ? "was" : "were"} left after taking
-        out the kinds below. Official statistics, central bank decisions, scheduled company results and share-offering prices
-        are always left out: they come out at a set time under rules built to keep them secret until then. A model read each
-        of those with the news about it and answered three questions: could a small group know first, was the outcome a
-        surprise, and was it kept quiet until it came out. It sees no prices or trading data. Every potential or weaker case
-        is shown (up to {fmtInt(data.rules.per_day)}), topped up to {fmtInt(data.rules.at_least)} with the closest of the rest
-        when the day has that many. A market that was on the Open now list is always shown, whatever its verdict.
-      </p>
-      {dropped.length > 0 && (
-        <ul>
-          {dropped.map(([why, n]) => {
-            const [one, many] = DROPPED[why] ?? [why, why];
-            return (
-              <li key={why}>
-                <span className="tabular">{fmtInt(n)}</span> {n === 1 ? one : many}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      <p className="cl-glyph-key">
-        Check answers:{" "}
-        {(Object.keys(STATE_WORD) as CheckState[]).map((s) => (
-          <span key={s} data-state={s}>
-            <span className="cl-glyph" aria-hidden />
-            {STATE_WORD[s]}
-          </span>
-        ))}
+        Markets that closed on this UTC day with at least {fmtUSD(r.min_volume)} traded, leaving out games, prices, weather,
+        elections, public counts, mention markets and releases kept secret until a set time. A model reads each one with the
+        news about it, never prices or trades, and answers three questions: could a small group know first, was the outcome a
+        surprise, and was it kept quiet until it came out. Every potential or weaker case is shown, up to {fmtInt(r.per_day)},
+        topped up to {fmtInt(r.at_least)} with the closest of the rest, and a market that was on the Open now list is always
+        shown.
       </p>
     </details>
   );
@@ -449,10 +475,9 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs
   const dayCut = cutOf(data, day).long;
   const n = day.picks.length;
   const many = n >= 4;
-  const sheet = day.picks.find((p) => query.open === shortId(p));
   // a card opened from a link that names no day, on a day other than the default: closing it stays on its day
-  const keepDay = sheet && !data.days.some((d) => d.day === query.day) && day !== chosenDay(data, undefined) ? day.day : null;
-  const close = () => sheet && closeSheet(shortId(sheet), { open: null, ...(keepDay ? { day: keepDay } : {}) });
+  const keepDay = !data.days.some((d) => d.day === query.day) && day !== chosenDay(data, undefined) ? day.day : null;
+  const close = (p: ClosedPick) => closeSheet(shortId(p), { open: null, ...(keepDay ? { day: keepDay } : {}) });
   return (
     <>
       <header className="cl-top">
@@ -478,9 +503,16 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs
 
       {n ? (
         <div className="cl-cards" data-many={many || undefined} style={{ "--cols": colsFor(n) } as CSSProperties}>
-          {day.picks.map((p) => (
-            <Card key={p.condition_id} p={p} open={query.open === shortId(p)} />
-          ))}
+          {day.picks.map((p) => {
+            const open = query.open === shortId(p);
+            const onMain = mainSlugs.get(p.slug) ?? null;
+            return (
+              <Fragment key={p.condition_id}>
+                <Card p={p} open={open} onMain={onMain} onClose={() => close(p)} />
+                {open && <Details p={p} onMain={onMain} onClose={() => close(p)} />}
+              </Fragment>
+            );
+          })}
         </div>
       ) : (
         <p className="cl-empty">
@@ -488,10 +520,7 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs
         </p>
       )}
 
-      <HowPicked data={data} day={day} cut={dayCut} />
-      {sheet && (
-        <Details key={sheet.condition_id} p={sheet} onMain={mainSlugs.get(sheet.slug) ?? null} onClose={close} />
-      )}
+      <HowPicked data={data} />
     </>
   );
 }

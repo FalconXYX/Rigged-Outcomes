@@ -4,17 +4,18 @@ D1 database; docs/DEPLOY.md). Visitors and the site's owner write there; the
 job reads what they wrote, acts on it, and reports back:
 
   pull     GET /api/job/work: the owner's pending decisions on the open
-           list's queue, the "Add to main page" requests the owner
-           approved, and how many visitors watch each open card
-           -> data/watchlist/work.json
+           list's queue, the markets visitors sent to the main page ("Add
+           to main page" records one as approved at once), and the stories
+           on the site's one watchlist -> data/watchlist/work.json
   decide   the decisions into the store, as --approve and --reject record
            them (store.save_review), and the ones the owner took back
            ("withdrawn") out of it again (a run may have saved them before
            they were taken back); in "apply" mode the reviewed day is
            rebuilt at once (opennow.rebuild_reviewed), in "full" and "local"
            mode the day's run that follows reads them itself
-  add      each approved request through add_market.add (markets.json, the
-           trades, clean, score); the workflow commits the files to main.
+  add      each of those markets through add_market.add (markets.json, the
+           trades, clean, score; the page name made from its slug when it
+           has none); the workflow commits the files to main.
            Before each one, add_results.json already says it failed ("stopped
            part way"), so a step killed by its timeout still reports it
   catalog  PUT /api/job/catalog: what visitors may write to (the main
@@ -50,7 +51,7 @@ The shapes (worker/src, web/src/lib/api.ts):
                                                                                  "withdrawn": taken back, only in work)
   AddRequest {condition_id, slug, question, url, winner, closed, day, status, name, note, requested_at,
               decided_at, done_at}
-  work       GET /api/job/work -> {now, decisions: [Decision], requests: [AddRequest], watched: [{story, count}]}
+  work       GET /api/job/work -> {now, decisions: [Decision], requests: [AddRequest], watched: [{story}]}
   catalog    PUT /api/job/catalog {markets: [{name, slug}], closed: [{condition_id, slug, question, url, winner,
              closed, day}], open: [{story, question, url}]}
   done       POST /api/job/done {applied: [{story, headline_key, decided_at}], requests: [{condition_id,
@@ -210,11 +211,11 @@ def pull(c, out_path, now=None):
         try:
             got = c.request("GET", "/api/job/work") or {}
             doc.update({k: list(got.get(k) or []) for k in ("decisions", "requests", "watched")})
-            log(f"work: {len(doc['decisions'])} decision(s), {len(doc['requests'])} approved request(s), "
-                f"{len(doc['watched'])} watched card(s)")
+            log(f"work: {len(doc['decisions'])} decision(s), {len(doc['requests'])} market(s) to add, "
+                f"{len(doc['watched'])} card(s) on the watchlist")
         except ApiError as e:
             doc["error"] = str(e)
-            _warn(f"the API did not give the job its work ({e}); decisions and requests wait for the next run")
+            _warn(f"the API did not give the job its work ({e}); decisions and markets to add wait for the next run")
     _write(out_path, doc)
     _output(decisions=bool(doc["decisions"]), requests=any(r.get("status") == "approved" for r in doc["requests"]))
     return doc
@@ -257,8 +258,9 @@ def decide(conn, work, mode, results_path, open_out=OPEN_JSON, rebuild=None, now
 
 
 def add(work, results_path, dry_run=False, adder=None, now=None):
-    """Each approved request through add_market.add. Returns the results; sets markets=true when one was added
-    and changed the files (the workflow then commits them to main)."""
+    """Each market to add (status approved) through add_market.add, named from its slug there when it has no
+    name. Returns the results; sets markets=true when one was added and changed the files (the workflow then
+    commits them to main)."""
     now = int(now if now is not None else now_epoch())
     if adder is None:
         import add_market
@@ -266,7 +268,7 @@ def add(work, results_path, dry_run=False, adder=None, now=None):
     results = []
 
     def record(running=None):
-        # the request being added is on record as failed until it finishes, so a step killed part way reports it
+        # the market being added is on record as failed until it finishes, so a step killed part way reports it
         if not dry_run:
             stopped = [{"condition_id": running["condition_id"], "status": "failed", "name": running.get("name"),
                         "note": STOPPED, "changed": False}] if running else []
@@ -277,13 +279,13 @@ def add(work, results_path, dry_run=False, adder=None, now=None):
             continue
         record(r)
         try:
-            got = adder(r["condition_id"], r["slug"], r["name"], outcome=r["winner"], dry_run=dry_run)
-        except Exception as e:                       # one request never stops the others
+            got = adder(r["condition_id"], r["slug"], r.get("name"), outcome=r["winner"], dry_run=dry_run)
+        except Exception as e:                       # one market never stops the others
             got = {"status": "failed", "name": r.get("name"), "note": f"unexpected error ({type(e).__name__})",
                    "changed": False}
         results.append({"condition_id": r["condition_id"], "status": got["status"], "name": got.get("name"),
                         "note": got.get("note"), "changed": bool(got.get("changed"))})
-        log(f"add {r.get('name')}: {got['status']}" + (f" ({got.get('note')})" if got.get("note") else ""))
+        log(f"add {got.get('name') or r.get('slug')}: {got['status']}" + (f" ({got.get('note')})" if got.get("note") else ""))
     record()
     _output(markets=any(x["status"] == "added" and x["changed"] for x in results) and not dry_run)
     return results
@@ -429,10 +431,10 @@ def push(c, conn, job_dir, mode, status, started_at, run_url=None, now=None, clo
               f"(harmless)")
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
-        reported = ", ".join(f"{r['name']} {r['status']}" for r in body["requests"]) or "none"
+        reported = ", ".join(f"{r['name'] or r['condition_id'][:10]} {r['status']}" for r in body["requests"]) or "none"
         with open(path, "a") as f:
             f.write(f"### Watchlist job ({mode}, {status})\n\n{body['run']['summary']}.\n\n"
-                    f"Decisions applied: {len(body['applied'])}. Requests reported: {reported}.\n")
+                    f"Decisions applied: {len(body['applied'])}. Markets added or failed: {reported}.\n")
     return body
 
 
@@ -451,7 +453,7 @@ def main(argv=None):
     p.add_argument("--db", default=None)
     p = sub.add_parser("add")
     p.add_argument("--work", default=work_path)
-    p.add_argument("--dry-run", action="store_true", help="check each request on Polymarket only")
+    p.add_argument("--dry-run", action="store_true", help="check each market on Polymarket only")
     p = sub.add_parser("catalog")
     p.add_argument("--closed", default=CLOSED_JSON)
     p.add_argument("--open", default=OPEN_JSON)

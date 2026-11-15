@@ -48,7 +48,7 @@ Output CSVs go to the `data/` folder. Only `_clean.csv` and `_insiders.csv` are 
 ```bash
 python3 tests/test_offline.py        # pipeline unit tests, seconds
 for f in tests/test_watchlist_*.py; do python3 "$f" || break; done   # the watchlist modules, about a second each
-python3 tests/test_add_market.py     # adding an approved market to markets.json (fake pipeline steps)
+python3 tests/test_add_market.py     # adding a market sent to the main page to markets.json (fake pipeline steps)
 python3 tests/test_v2_parity.py      # network, 2-3 minutes: re-fetches two markets and compares them with the committed CSVs
 npm --prefix web run typecheck
 ```
@@ -268,16 +268,16 @@ The old per-wallet history fetch also failed silently: on a rate limit or any er
 
 ## Backend and the daily job
 
-The static site gets a small backend for what visitors do, and the two Watchlist lists get a daily job. All of it is free; [`docs/DEPLOY.md`](docs/DEPLOY.md) explains each piece in plain words and is the step-by-step runbook for putting it live.
+The static site gets a small backend for what visitors do, and the two Watchlist lists get a daily job. All of it is free; deploying it is [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 | Piece | Where | What it does |
 |---|---|---|
-| API | `worker/` (a Cloudflare Worker with one D1 database) | Timeline markers visitors add, Watch counts, "Add to main page" requests, the owner's decisions and the job's reports; a Turnstile bot check and daily limits on every visitor write. See `worker/README.md` |
-| Review page | `#/review` (linked from nowhere) | The owner's page: the Open now queue, requests, markers, watched markets, the last runs, a pause switch |
-| Daily job | `.github/workflows/watchlist.yml` | At about 04:17 UTC: the owner's decisions, both lists, approved markets, then the deploy. Its `apply` mode only applies decisions and approved markets |
+| API | `worker/` (a Cloudflare Worker with one D1 database) | Timeline markers visitors add, the site's one watchlist ("Watch" puts a market on it for everyone), the markets sent with "Add to main page" (added by the job's next run, no review), the owner's decisions and the job's reports; a Turnstile bot check and daily limits on every visitor write. See `worker/README.md` |
+| Review page | `#/review` (linked from nowhere) | The owner's page: the Open now queue, the markets sent to the main page, markers, the watchlist, the last runs, a pause switch |
+| Job | `.github/workflows/watchlist.yml` | At about 04:17 UTC: the owner's decisions, both lists, the markets sent to the main page, then the deploy. Every hour its light `apply` mode applies decisions and adds markets (with nothing waiting it ends in seconds, with no deploy) |
 | Job state | the `watchlist-data` branch (`watchlist/state.py`) | The job's memory between runs (the store tables the lists use, as JSONL), the published lists, a backup of the API's database |
 | API client | `watchlist/sync.py` | The job's side of the API: fetch the work, save decisions, send the review queue and the catalog of what visitors may write to, report the run |
-| Adding a market | `add_market.py` | An approved request: checks it on Polymarket, adds it to `markets.json`, downloads, cleans and scores it |
+| Adding a market | `add_market.py` | A market sent with "Add to main page": names its page from the slug, checks it on Polymarket, adds it to `markets.json`, downloads, cleans and scores it |
 | Mac fallback | `scripts/watchlist-mac.sh` | The same daily job on this Mac (it never adds markets) |
 
 ```bash
@@ -285,7 +285,7 @@ python3 -m watchlist.state pull                     # the branch's state into da
 python3 -m watchlist.state push                     # prune, then commit the state and the lists to the branch (refused if it moved since the pull)
 python3 -m watchlist.state dump DIR                 # the state as files, no git (load DIR reads them back)
 python3 -m watchlist.sync catalog                   # tell the API what visitors may write to (needs WATCHLIST_API_URL and WATCHLIST_JOB_TOKEN)
-python3 add_market.py --condition-id 0x... --slug SLUG --name NAME --outcome Yes --dry-run   # check one on Polymarket
+python3 add_market.py --condition-id 0x... --slug SLUG --outcome Yes --dry-run   # check one on Polymarket (--name NAME, else from the slug)
 python3 tests/test_watchlist_state.py               # offline tests, git work in a throwaway repository
 ```
 
@@ -293,10 +293,4 @@ python3 tests/test_watchlist_state.py               # offline tests, git work in
 
 ## One-time production setup
 
-Everything below is done once, on GitHub (repository `FalconXYX/Rigged-Outcomes`), in this order (the settings first: a merge before them makes the first deploy fail on the environment rule). The backend and the daily job have their own steps, in order, in [`docs/DEPLOY.md`](docs/DEPLOY.md); these are its steps 9 and 10.
-
-> **Heads-up:** `parthjain.ca/Rigged-Outcomes/` currently serves the older D3 story site ("The Story: Insider Trading Radar") straight from the `D3.js` branch. Step 1 replaces it with this dashboard. If that site needs to stay up (for example, as the CCT416 submission), move it or keep a copy before you switch — this is still an open decision.
-
-1. **Pages source → GitHub Actions, with HTTPS enforced.** Settings → Pages → Build and deployment → Source: choose **GitHub Actions** (it is on "Deploy from a branch: `D3.js`" today), and tick **Enforce HTTPS**. Or: `gh api -X PUT repos/FalconXYX/Rigged-Outcomes/pages -f build_type=workflow -F https_enforced=true`. (Over plain `http://` the visitor controls can't reach the API: it only answers `https://parthjain.ca`.)
-2. **Allow `main` to deploy.** Settings → Environments → `github-pages` → Deployment branches and tags: add `main`. The environment only allows `D3.js` right now, so without this the deploy job is rejected with *"Branch "main" is not allowed to deploy to github-pages due to environment protection rules"*. Or: `gh api -X POST repos/FalconXYX/Rigged-Outcomes/environments/github-pages/deployment-branch-policies -f name=main`.
-3. **Merge this work into `main`** and push. `deploy.yml` runs on pushes to `main`, so this deploys; the site is served at https://parthjain.ca/Rigged-Outcomes/. (Later deploys: push to `main`, or run "Deploy dashboard to GitHub Pages" from the Actions tab.)
+See [`docs/DEPLOY.md`](docs/DEPLOY.md).

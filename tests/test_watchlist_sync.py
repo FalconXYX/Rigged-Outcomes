@@ -8,8 +8,10 @@ a fake HTTP layer, temporary files, an in-memory store. No network.
 Covers no API configured (every command a no-op that exits 0, an empty
 work.json), retries (a 5xx or a network error, never a 4xx) and the token
 never printed, the queue's candidate keys, decisions saved twice harmlessly,
-withdrawn ones taken out of the store, and the apply-mode rebuild, a step
-killed part way through adding a market still reporting it as failed, the catalog from the published files, and the
+withdrawn ones taken out of the store, and the apply-mode rebuild, each
+market to add sent to add_market (a market with no page name sent without
+one, so it is named from its slug), a step killed part way through adding a
+market still reporting it as failed, the catalog from the published files, and the
 run's report: decisions counted as applied only once this run pushed the
 state, a market as added only once main was pushed (or when it was there
 already), failed ones always, results older than the run never.
@@ -143,8 +145,8 @@ def test_settings_come_from_the_env_file():
 
 def test_retries_and_the_token_never_printed():
     c, waits = fake_client([(503, {"error": "server"}), requests.ConnectionError(f"boom {TOKEN}"),
-                            (200, {"decisions": [], "requests": [], "watched": [{"story": "s", "count": 2}]})])
-    assert c.request("GET", "/api/job/work")["watched"] == [{"story": "s", "count": 2}]
+                            (200, {"decisions": [], "requests": [], "watched": [{"story": "s"}]})])
+    assert c.request("GET", "/api/job/work")["watched"] == [{"story": "s"}]
     assert waits == [2, 8]
     call = c.session.calls[0]
     assert call["url"] == "https://api.example/api/job/work" and call["headers"]["Authorization"] == f"Bearer {TOKEN}"
@@ -369,29 +371,31 @@ def test_push_sends_the_queue_the_catalog_and_the_report():
     assert "closed list: updated" in body["run"]["summary"]
 
 
-def test_add_runs_each_approved_request():
+def test_add_runs_each_market_to_add():
     seen = []
 
     def adder(cid, slug, name, outcome, dry_run=False):
         seen.append((cid, slug, name, outcome, dry_run))
         if name == "boom":
             raise ValueError("unexpected")
-        return {"status": "added", "name": name, "note": None, "changed": True}
+        return {"status": "added", "name": name or slug, "note": None, "changed": True}
 
-    work = {"requests": [{"condition_id": "0x1", "slug": "m-1", "name": "gemini-carbon", "winner": "Yes",
-                          "status": "approved"},
+    # "Add to main page" records a market with no page name (add_market names it from its slug); only the
+    # approved ones are added
+    work = {"requests": [{"condition_id": "0x1", "slug": "m-1", "name": None, "winner": "Yes", "status": "approved"},
                          {"condition_id": "0x2", "slug": "m-2", "name": "boom", "winner": "No", "status": "approved"},
-                         {"condition_id": "0x3", "slug": "m-3", "name": "x", "winner": "No", "status": "requested"}]}
+                         {"condition_id": "0x3", "slug": "m-3", "name": "x", "winner": "No", "status": "added"}]}
     with tempfile.TemporaryDirectory() as tmp:
         gh = os.path.join(tmp, "gh")
         res = os.path.join(tmp, "add_results.json")
         with env(GITHUB_OUTPUT=gh), captured():
             got = sync.add(work, res, adder=adder, now=NOW)
-        assert [x[0] for x in seen] == ["0x1", "0x2"] and seen[0] == ("0x1", "m-1", "gemini-carbon", "Yes", False)
+        assert [x[0] for x in seen] == ["0x1", "0x2"] and seen[0] == ("0x1", "m-1", None, "Yes", False)
         assert [r["status"] for r in got] == ["added", "failed"] and "ValueError" in got[1]["note"]
+        assert got[0]["name"] == "m-1"
         assert json.load(open(res))["at"] == NOW and open(gh).read() == "markets=true\n"
         assert json.load(open(res))["results"] == [{k: r[k] for k in r} for r in got]
-        # killed part way through the second request: the first's result and the second on record as failed
+        # killed part way through the second market: the first's result and the second on record as failed
         def killed(cid, slug, name, outcome, dry_run=False):
             if cid == "0x2":
                 raise KeyboardInterrupt

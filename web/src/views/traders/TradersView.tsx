@@ -143,13 +143,16 @@ function TradersBody({ title, data }: { title: string; data: TradersData }) {
         ) : (
           <>
             <p className="tr-lead">
-              Analysis of “{smartQuotes(title, { nested: true })}” reveals a critical structural imbalance in capital deployment.
+              In “{smartQuotes(title, { nested: true })}”, a large share of the whale capital sits with flagged accounts.
             </p>
+            {/* the flag rule in words (scrape_insiders.analyze_whale): at most firstX trades before the account's first
+                trade here, or this position at least pctVol% of everything it had staked by then */}
             <p className="tr-callout rule-key" style={keyed(CRITICAL)}>
-              <strong className="tabular">{fmtPct(summary.pctSuspicious)}</strong> of the capital (
-              <strong className="tabular">{fmtUSD(summary.suspiciousVolume)}</strong>) is artificially concentrated among
-              flagged accounts. These accounts exhibit suspicious signatures: they possess low prior trading history on the
-              platform, yet they executed large, targeted positions exclusively on this outcome.
+              <strong className="tabular">{fmtPct(summary.pctSuspicious)}</strong> of it (
+              <strong className="tabular">{fmtUSD(summary.suspiciousVolume)}</strong>) is held by accounts that had made{" "}
+              <span className="tabular">{firstX}</span> or fewer trades before their first bet here, or that put{" "}
+              <span className="tabular">{pctVol}%</span> or more of their money into this market. That pattern fits someone
+              who knew the outcome early, but it is not proof of it.
             </p>
           </>
         )}

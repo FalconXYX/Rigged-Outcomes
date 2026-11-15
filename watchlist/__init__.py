@@ -15,6 +15,17 @@ The site's lists, each written to web/public/data/ (gitignored):
   deep     the trade-data look at one closed market, kept for later; not
            used by either list yet.
 
+The daily job that runs them (.github/workflows/watchlist.yml, or
+scripts/watchlist-mac.sh; docs/DEPLOY.md):
+
+  state    the job's memory between runs: the store tables the lists read
+           and write, kept on the repository's watchlist-data branch with
+           the published lists.
+  sync     the job's side of the site's API (worker/): the owner's decisions
+           on the open list's queue, approved "Add to main page" requests
+           (add_market.py at the repo root adds them), watch counts, and the
+           run's report.
+
 The earlier statistical scans (closed_scan, open_scan, track_record,
 backtest, parity; built on method) are not used by the site. Their demo
 JSON goes to data/watchlist/demo/.

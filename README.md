@@ -4,7 +4,7 @@ Detects potential insider trading on Polymarket prediction markets by analyzing 
 
 Every trade in a resolved market is fetched, aggregated and scored, then published on the static site at **https://parthjain.ca/Rigged-Outcomes/** (bet timeline with replay, flagged traders, a home page you can sort and filter). A Watchlist page adds two daily lists made from market text and the news, with no trade data: open markets worth watching, and recently closed markets someone may have known about early.
 
-**Contents:** [Quick start](#quick-start) · [What it does](#what-it-does) · [Data flow](#data-flow) · [markets.json](#marketsjson-structure) · [Key columns](#key-columns) · [Detection logic](#insider-detection-logic) · [Web dashboard](#web-dashboard) · [Export](#export-exportpy) · [Recently closed list](#recently-closed-list-watchlistupsetspy) · [Open now list](#open-now-list-watchlistopennowpy) · [Data sources](#a-note-on-data-sources) · [One-time production setup](#one-time-production-setup)
+**Contents:** [Quick start](#quick-start) · [What it does](#what-it-does) · [Data flow](#data-flow) · [markets.json](#marketsjson-structure) · [Key columns](#key-columns) · [Detection logic](#insider-detection-logic) · [Web dashboard](#web-dashboard) · [Export](#export-exportpy) · [Recently closed list](#recently-closed-list-watchlistupsetspy) · [Open now list](#open-now-list-watchlistopennowpy) · [Data sources](#a-note-on-data-sources) · [Backend and the daily job](#backend-and-the-daily-job) · [One-time production setup](#one-time-production-setup)
 
 ---
 
@@ -48,6 +48,7 @@ Output CSVs go to the `data/` folder. Only `_clean.csv` and `_insiders.csv` are 
 ```bash
 python3 tests/test_offline.py        # pipeline unit tests, seconds
 for f in tests/test_watchlist_*.py; do python3 "$f" || break; done   # the watchlist modules, about a second each
+python3 tests/test_add_market.py     # adding an approved market to markets.json (fake pipeline steps)
 python3 tests/test_v2_parity.py      # network, 2-3 minutes: re-fetches two markets and compares them with the committed CSVs
 npm --prefix web run typecheck
 ```
@@ -186,11 +187,11 @@ Re-run `python3 export.py` (or `npm run data` from `web/`) whenever the CSVs or 
 - `npm run preview`: serve the production build locally.
 - `npm run typecheck`: type-check only.
 
-**How deploy works:** every push to `main` (or a manual run from the Actions tab) triggers `.github/workflows/deploy.yml`. The workflow runs `pip install -r requirements.txt` and `python export.py`, then `npm ci && npm run build` in `web/`, uploads `web/dist/` as a Pages artifact and deploys it with `actions/deploy-pages`. It does not make the Watchlist's data: `closed.json` and `open.json` are made only by local runs of `watchlist.upsets` and `watchlist.opennow` and are gitignored, so a deployed build has neither (its Watchlist page shows a load error under Recently closed and "Coming soon" under Open now). The build uses a relative base (`./`) and hash routes (`#/m/usiran/traders`), so it works under any sub-path and survives page refreshes on GitHub Pages without extra config. First-time setup is in [One-time production setup](#one-time-production-setup).
+**How deploy works:** every push to `main` (or a manual run from the Actions tab, or the daily Watchlist job when it finishes) triggers `.github/workflows/deploy.yml`. The workflow runs `pip install --require-hashes -r requirements.lock` (the same packages as `requirements.txt`, at the tested versions with their hashes) and `python export.py`, copies the Watchlist's `closed.json` and `open.json` from the `watchlist-data` branch (where the daily job publishes them; before that branch exists the Watchlist shows its placeholders), then `npm ci && npm run build` in `web/` with the repository variables `API_URL` and `TURNSTILE_SITEKEY` as `VITE_API_URL` and `VITE_TURNSTILE_SITEKEY` (unset, the build is the site without the visitor controls), uploads `web/dist/` as a Pages artifact and deploys it with `actions/deploy-pages`. The build uses a relative base (`./`) and hash routes (`#/m/usiran/traders`), so it works under any sub-path and survives page refreshes on GitHub Pages without extra config. First-time setup is in [One-time production setup](#one-time-production-setup).
 
 ### Home page
 
-Markets appear in `markets.json` order. A **Sort & filter** button above the grid opens a bar to sort (*Most suspicious* — flagged wallets' share of the market's net winnings, falling back to their share of whale capital — *Flagged winnings*, *Flagged accounts*, *Volume*, *Newest*) and filter (resolved Yes/No, only markets with flagged wallets). Nothing is applied by default; the choice lives in the URL (`#/?sort=volume&resolved=yes&flagged=1`) so a sorted view is a shareable link. Ranking logic is in `web/src/views/home/ranking.ts`.
+Markets appear in `markets.json` order. A **Sort & filter** button above the grid opens a bar to sort (*Most suspicious* — the Flagged capital figure the cards show, flagged accounts' share of whale capital — *Flagged winnings*, *Flagged accounts*, *Volume*, *Newest*) and filter (resolved Yes/No, only markets with flagged wallets). Nothing is applied by default; the choice lives in the URL (`#/?sort=volume&resolved=yes&flagged=1`) so a sorted view is a shareable link. Ranking logic is in `web/src/views/home/ranking.ts`.
 
 ### Market replay and shareable links (timeline view)
 
@@ -230,7 +231,7 @@ python3 -m watchlist.upsets --out PATH --keep-days 14   # another output file; d
 python3 tests/test_watchlist_upsets.py               # offline tests (the check: tests/test_watchlist_judge.py)
 ```
 
-There is no dry run: every run asks Gamma, Gemini and Google News. AI labels and checks are cached in `data/watchlist/watchlist.db`, so a re-run only asks about markets it has not checked. The file is written after every day, so a stalled run keeps the days it finished. The key is read from `GEMINI_API_KEY` or from the `.env` file next to the repository.
+There is no dry run: every run asks Gamma, Gemini and Google News. AI labels and checks are cached in `data/watchlist/watchlist.db`, so a re-run only asks about markets it has not checked. The file is written after every day (oldest first), so a stalled run keeps the days it finished. Each day records when it was counted (`counted_at`): one counted before it was over is a partial count, which the page says ("so far" while the day lasts, then "by 04:17"), and any run also counts again every kept day still partial, so a day whose next run failed is finished by the one after. The key is read from `GEMINI_API_KEY` or from the `.env` file next to the repository.
 
 ---
 
@@ -253,7 +254,7 @@ python3 -m watchlist.opennow --consistency DIR      # the consistency test of th
 python3 tests/test_watchlist_opennow.py             # offline tests
 ```
 
-`--approve` and `--reject` rebuild the list that `--review` showed (the latest stored day), as it was made: at that day's own run time, from its searches (up to 30 hours older than the run) and its stored readings. The rebuild never asks the step model, so it takes seconds; a card that moves up to fill a freed place may cost one flash-lite request for its "already out" check. A day the model was down for stays "not updated today". A daily run takes about 15 minutes of Google News at about one search a second (about 1,400 searches, since stories whose outcomes can each happen, such as "Who will Trump pardon?", became one story per outcome), then the step reading: one Gemma request per shortlisted story (about 145 on a heavy day such as 2026-11-13), three at a time, 20 to 90 seconds each because the model is often busy (its 503s come back at once and are retried), so one to two hours; then the second reading of the stories with a step (10 to 25 requests). The rerun of 2026-11-13 read 144 stories and 25 again in 124 minutes: 169 answers from 525 HTTP requests (356 were busy retries), plus 3 flash-lite requests. Later runs read only headlines no reading has had before it: a reading is given up to 8 of a story's step-word headlines, and the others it picked from count as seen too, so a second run on the same news asks nothing and lists the same cards. It also makes a handful of flash-lite requests for the "already out" check, and naming a new story for its sentences costs one flash-lite request per 40 stories, once. `--workers N` sets how many step readings run at once. The key is read from `GEMINI_API_KEY` or from the `.env` file next to the repository. When a model is busy or down (three step readings in a row fail, every one fails for any reason, the key is refused, or an "already out" request fails every try), the day keeps yesterday's cards that are still live, adds none, and says "not updated today"; one story whose step reading fails while others are answered is only left for the next run. Run it at about 04:00 UTC, once a day. A second run on the same day replaces that day's list only when it finishes: one made while a model is down leaves the list already made that day as it was.
+`--approve` and `--reject` rebuild the list that `--review` showed (the latest stored day), as it was made: at that day's own run time, from its searches (up to 30 hours older than the run) and its stored readings. The rebuild never asks the step model, so it takes seconds; a card that moves up to fill a freed place may cost one flash-lite request for its "already out" check. A day the model was down for stays "not updated today". A daily run takes about 15 minutes of Google News at about one search a second (about 1,400 searches, since stories whose outcomes can each happen, such as "Who will Trump pardon?", became one story per outcome), then the step reading: one Gemma request per shortlisted story (about 145 on a heavy day such as 2026-11-13), three at a time, 20 to 90 seconds each because the model is often busy (its 503s come back at once and are retried), so one to two hours; then the second reading of the stories with a step (10 to 25 requests). The rerun of 2026-11-13 read 144 stories and 25 again in 124 minutes: 169 answers from 525 HTTP requests (356 were busy retries), plus 3 flash-lite requests. Later runs read only headlines no reading has had before it: a reading is given up to 8 of a story's step-word headlines, and the others it picked from count as seen too, so a second run on the same news asks nothing and lists the same cards. It also makes a handful of flash-lite requests for the "already out" check, and naming a new story for its sentences costs one flash-lite request per 40 stories, once. `--workers N` sets how many step readings run at once. The key is read from `GEMINI_API_KEY` or from the `.env` file next to the repository. When a model is busy or down (three step readings in a row fail, every one fails for any reason, the key is refused, or an "already out" request fails every try), the day keeps yesterday's cards that are still live, adds none, and says "not updated today"; one story whose step reading fails while others are answered is only left for the next run. Run it once a day at about 04:00 UTC (the daily job, `.github/workflows/watchlist.yml`, runs it at about 04:17; when news searches fail 20 times in a row it stops searching and keeps the last list as "not updated today"). A second run on the same day replaces that day's list only when it finishes: one made while a model is down leaves the list already made that day as it was.
 
 ---
 
@@ -265,13 +266,37 @@ The old per-wallet history fetch also failed silently: on a rate limit or any er
 
 ---
 
+## Backend and the daily job
+
+The static site gets a small backend for what visitors do, and the two Watchlist lists get a daily job. All of it is free; [`docs/DEPLOY.md`](docs/DEPLOY.md) explains each piece in plain words and is the step-by-step runbook for putting it live.
+
+| Piece | Where | What it does |
+|---|---|---|
+| API | `worker/` (a Cloudflare Worker with one D1 database) | Timeline markers visitors add, Watch counts, "Add to main page" requests, the owner's decisions and the job's reports; a Turnstile bot check and daily limits on every visitor write. See `worker/README.md` |
+| Review page | `#/review` (linked from nowhere) | The owner's page: the Open now queue, requests, markers, watched markets, the last runs, a pause switch |
+| Daily job | `.github/workflows/watchlist.yml` | At about 04:17 UTC: the owner's decisions, both lists, approved markets, then the deploy. Its `apply` mode only applies decisions and approved markets |
+| Job state | the `watchlist-data` branch (`watchlist/state.py`) | The job's memory between runs (the store tables the lists use, as JSONL), the published lists, a backup of the API's database |
+| API client | `watchlist/sync.py` | The job's side of the API: fetch the work, save decisions, send the review queue and the catalog of what visitors may write to, report the run |
+| Adding a market | `add_market.py` | An approved request: checks it on Polymarket, adds it to `markets.json`, downloads, cleans and scores it |
+| Mac fallback | `scripts/watchlist-mac.sh` | The same daily job on this Mac (it never adds markets) |
+
+```bash
+python3 -m watchlist.state pull                     # the branch's state into data/watchlist/watchlist.db (refuses to replace newer local data)
+python3 -m watchlist.state push                     # prune, then commit the state and the lists to the branch (refused if it moved since the pull)
+python3 -m watchlist.state dump DIR                 # the state as files, no git (load DIR reads them back)
+python3 -m watchlist.sync catalog                   # tell the API what visitors may write to (needs WATCHLIST_API_URL and WATCHLIST_JOB_TOKEN)
+python3 add_market.py --condition-id 0x... --slug SLUG --name NAME --outcome Yes --dry-run   # check one on Polymarket
+python3 tests/test_watchlist_state.py               # offline tests, git work in a throwaway repository
+```
+
+---
+
 ## One-time production setup
 
-Everything below is done once, on GitHub (repository `FalconXYX/Rigged-Outcomes`).
+Everything below is done once, on GitHub (repository `FalconXYX/Rigged-Outcomes`), in this order (the settings first: a merge before them makes the first deploy fail on the environment rule). The backend and the daily job have their own steps, in order, in [`docs/DEPLOY.md`](docs/DEPLOY.md); these are its steps 9 and 10.
 
-> **Heads-up:** `parthjain.ca/Rigged-Outcomes/` currently serves the older D3 story site ("The Story: Insider Trading Radar") straight from the `D3.js` branch. Steps 2–3 replace it with this dashboard. If that site needs to stay up (for example, as the CCT416 submission), move it or keep a copy before you switch — this is still an open decision.
+> **Heads-up:** `parthjain.ca/Rigged-Outcomes/` currently serves the older D3 story site ("The Story: Insider Trading Radar") straight from the `D3.js` branch. Step 1 replaces it with this dashboard. If that site needs to stay up (for example, as the CCT416 submission), move it or keep a copy before you switch — this is still an open decision.
 
-1. **Merge this work into `main`.** `deploy.yml` runs on pushes to `main`.
-2. **Pages source → GitHub Actions.** Settings → Pages → Build and deployment → Source: choose **GitHub Actions** (it is on "Deploy from a branch: `D3.js`" today). Or: `gh api -X PUT repos/FalconXYX/Rigged-Outcomes/pages -f build_type=workflow`.
-3. **Allow `main` to deploy.** Settings → Environments → `github-pages` → Deployment branches and tags: add `main`. The environment only allows `D3.js` right now, so without this the deploy job is rejected with *"Branch "main" is not allowed to deploy to github-pages due to environment protection rules"*. Or: `gh api -X POST repos/FalconXYX/Rigged-Outcomes/environments/github-pages/deployment-branch-policies -f name=main`.
-4. **Deploy.** Push to `main` or run "Deploy dashboard to GitHub Pages" from the Actions tab; the site is served at https://parthjain.ca/Rigged-Outcomes/.
+1. **Pages source → GitHub Actions, with HTTPS enforced.** Settings → Pages → Build and deployment → Source: choose **GitHub Actions** (it is on "Deploy from a branch: `D3.js`" today), and tick **Enforce HTTPS**. Or: `gh api -X PUT repos/FalconXYX/Rigged-Outcomes/pages -f build_type=workflow -F https_enforced=true`. (Over plain `http://` the visitor controls can't reach the API: it only answers `https://parthjain.ca`.)
+2. **Allow `main` to deploy.** Settings → Environments → `github-pages` → Deployment branches and tags: add `main`. The environment only allows `D3.js` right now, so without this the deploy job is rejected with *"Branch "main" is not allowed to deploy to github-pages due to environment protection rules"*. Or: `gh api -X POST repos/FalconXYX/Rigged-Outcomes/environments/github-pages/deployment-branch-policies -f name=main`.
+3. **Merge this work into `main`** and push. `deploy.yml` runs on pushes to `main`, so this deploys; the site is served at https://parthjain.ca/Rigged-Outcomes/. (Later deploys: push to `main`, or run "Deploy dashboard to GitHub Pages" from the Actions tab.)

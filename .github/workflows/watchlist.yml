@@ -1,0 +1,198 @@
+# The daily Watchlist lists and the site owner's decisions (docs/DEPLOY.md). One modest run a day that
+# builds and publishes this site's own data; "apply" runs only when the owner asks for it from the review
+# page (or from the Actions tab).
+#
+#   full   the owner's decisions, the Recently closed list (the last 2 UTC days), the Open now list,
+#          approved "Add to main page" markets, then the site's deploy
+#   apply  only the owner's decisions (the reviewed day rebuilt) and approved markets, then the deploy
+#
+# The job's memory lives on the `watchlist-data` branch (watchlist/state.py): it is pulled first and pushed
+# after the lists, so a fresh runner starts from yesterday. The news searches cache rides in the Actions
+# cache (it only saves a same-day rebuild its searches). The only commit this job makes to `main` is an
+# approved market (markets.json and its two CSVs).
+#
+# One-time setup (docs/DEPLOY.md): the `watchlist-data` branch seeded from the Mac
+# (`python3 -m watchlist.state push --seed --by mac`), the secrets GEMINI_API_KEY and WATCHLIST_JOB_TOKEN,
+# and the variable API_URL (the Worker's address; the job runs without it, but decisions, requests and watch
+# counts then wait). GitHub turns schedules off after 60 days without activity in the repository; the
+# review page warns when no run has reported for 30 hours.
+
+name: Watchlist
+
+on:
+  schedule:
+    - cron: "17 4 * * *"            # about 04:17 UTC; off the hour (GitHub delays on-the-hour schedules)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full = the daily lists; apply = only the owner's decisions and approved markets"
+        type: choice
+        options: [full, apply]
+        default: full
+
+permissions:
+  contents: write                   # the watchlist-data branch, and main for an approved market
+
+concurrency:
+  group: watchlist                  # never two writers of the state branch
+  cancel-in-progress: false
+
+# The API's address and the job's token are given only to the three steps that call the API (fetching the work,
+# saving the state with the API's backup, the report), never to the installs or the list steps.
+env:
+  PYTHONUNBUFFERED: "1"
+  MODE: ${{ inputs.mode || 'full' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  lists:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355                # the step limits add up to 330; GitHub's own limit is 360
+    outputs:
+      publish: ${{ steps.publish.outputs.publish }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      # exact versions with their hashes: a changed release on PyPI can't be installed by a job that pushes
+      - name: Install Python dependencies
+        run: pip install --require-hashes -r requirements.lock
+
+      - name: Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - id: started
+        run: echo "at=$(date +%s)" >> "$GITHUB_OUTPUT"
+
+      # Refuses (and stops the run) when the branch is missing or does not match its manifest
+      - name: Restore the state and the published lists
+        id: pull
+        run: python3 -m watchlist.state pull
+
+      - name: Restore the news cache
+        if: steps.pull.outcome == 'success'
+        uses: actions/cache/restore@v6
+        with:
+          path: data/watchlist/cache/open_news.json
+          key: wl-news-${{ github.run_id }}
+          restore-keys: wl-news-
+
+      - name: Fetch the owner's decisions, approved requests and watch counts
+        id: work
+        if: steps.pull.outcome == 'success'
+        env:
+          WATCHLIST_API_URL: ${{ vars.API_URL }}
+          WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
+        run: python3 -m watchlist.sync pull
+
+      - name: Apply the owner's decisions
+        id: decide
+        if: steps.pull.outcome == 'success' && steps.work.outputs.decisions == 'true'
+        continue-on-error: true
+        timeout-minutes: 45                 # an apply-mode rebuild searches the news again if the cache was evicted
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 -m watchlist.sync decide --mode "$MODE"
+
+      - name: Recently closed list
+        id: closed
+        if: steps.pull.outcome == 'success' && env.MODE == 'full'
+        continue-on-error: true
+        timeout-minutes: 45
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 -m watchlist.upsets --days 2 --watched data/watchlist/work.json
+
+      - name: Open now list
+        id: open
+        if: steps.pull.outcome == 'success' && env.MODE == 'full'
+        continue-on-error: true
+        timeout-minutes: 200
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 -m watchlist.opennow --report data/watchlist/open_report.json
+
+      - name: Save the news cache
+        if: always() && steps.pull.outcome == 'success' && hashFiles('data/watchlist/cache/open_news.json') != ''
+        uses: actions/cache/save@v6
+        with:
+          path: data/watchlist/cache/open_news.json
+          key: wl-news-${{ github.run_id }}
+
+      # Refuses when the branch moved since the pull (a Mac run overlapped): nothing is lost, the next run
+      # starts from the new head
+      - name: Save the state and the lists
+        id: state
+        if: always() && steps.pull.outcome == 'success'
+        env:
+          WATCHLIST_API_URL: ${{ vars.API_URL }}
+          WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
+        run: python3 -m watchlist.state push --by github --run-url "$RUN_URL"
+
+      - name: Add approved markets
+        id: add
+        if: steps.pull.outcome == 'success' && steps.work.outputs.requests == 'true'
+        continue-on-error: true
+        timeout-minutes: 40
+        run: python3 -m watchlist.sync add
+
+      - name: Commit added markets to main
+        id: commit
+        if: steps.add.outputs.markets == 'true'
+        continue-on-error: true
+        run: |
+          git add markets.json data/*_clean.csv data/*_insiders.csv
+          git commit -m "Add approved market(s) to the main page"
+          git push origin HEAD:main || { git pull --rebase origin main && git push origin HEAD:main; }
+          touch data/watchlist/markets_pushed.ok
+
+      - name: Report to the API
+        if: always()
+        env:
+          WATCHLIST_API_URL: ${{ vars.API_URL }}
+          WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
+        run: |
+          STATUS=success
+          for o in "${{ steps.decide.outcome }}" "${{ steps.closed.outcome }}" "${{ steps.open.outcome }}" \
+                   "${{ steps.add.outcome }}" "${{ steps.commit.outcome }}"; do
+            if [ "$o" = failure ]; then STATUS=partial; fi
+          done
+          for o in "${{ steps.pull.outcome }}" "${{ steps.state.outcome }}"; do
+            if [ "$o" = failure ]; then STATUS=failure; fi
+          done
+          python3 -m watchlist.sync push --mode "$MODE" --status "$STATUS" \
+            --started-at "${{ steps.started.outputs.at }}" --run-url "$RUN_URL"
+
+      - name: Decide whether to publish
+        id: publish
+        if: always()
+        run: |
+          if [ "${{ steps.state.outcome }}" = success ] && { [ "$MODE" = full ] || [ "${{ steps.decide.outcome }}" = success ] || [ -f data/watchlist/markets_pushed.ok ]; }; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mark the run failed when a list failed
+        if: always() && (steps.closed.outcome == 'failure' || steps.open.outcome == 'failure' || steps.decide.outcome == 'failure' || steps.add.outcome == 'failure' || steps.commit.outcome == 'failure')
+        run: exit 1
+
+  deploy:
+    needs: lists
+    if: always() && needs.lists.outputs.publish == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      ref: main

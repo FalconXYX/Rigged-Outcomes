@@ -6,6 +6,7 @@ search (watchlist.news): no network, a fake Gemini client and a fake feed.
     python3 tests/test_watchlist_judge.py
 
 Covers the RSS parsing (CDATA, entities, the " - Source" cut, dates to UTC),
+an answer that is not a news feed (a consent page) being an error,
 the after: / before: operators, what the model sees of a market (no trading
 numbers), normalising its answer, the sort order, the cache, a market
 whose news search fails being left for the next run, and the prompt's
@@ -46,6 +47,31 @@ def test_parse_rss():
                      "published": "2026-11-05T20:12:04Z", "url": "https://news.google.com/rss/articles/abc"}
     assert hs[1]["title"] == "Banxico & the peso: what's next" and hs[1]["published"] == "2026-11-06T01:12:37Z"
     assert news.parse("") == [] and news.parse(None) == []
+
+
+def test_an_answer_that_is_not_a_feed_is_an_error():
+    """A refusing Google answers 200 with a consent or captcha page: that is a failed search, never "no news"."""
+    class Session:
+        def __init__(self, text):
+            self.text = text
+
+        def get(self, url, params=None, timeout=None):
+            return type("R", (), {"status_code": 200, "text": self.text})()
+
+    empty = '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>x</title></channel></rss>'
+    old = news.MIN_INTERVAL
+    news.MIN_INTERVAL = 0
+    try:
+        assert news.search("q", session=Session(RSS))[0]["source"] == "Bloomberg.com"
+        assert news.search("q", session=Session(empty)) == []                  # a real feed with nothing in it
+        for page in ("<!doctype html><html><body>Before you continue to Google</body></html>", "", "   "):
+            try:
+                news.search("q", session=Session(page))
+                raise AssertionError(f"read {page[:20]!r} as news")
+            except news.NewsError as e:
+                assert "not a news feed" in str(e)
+    finally:
+        news.MIN_INTERVAL = old
 
 
 def test_build_query():

@@ -4,7 +4,8 @@ import { Cross } from "./shared";
 
 // A card's details, in either section: a side sheet that slides in from the
 // right over the page, full height under the site header (the whole screen
-// on a phone), over a light dim. ×, Escape or a click on the dim closes it.
+// on a phone), over a light dim. ×, Escape, a click on the dim or the
+// browser's Back closes it (it opens as a history step: router.openSheet).
 // Tab stays inside while it is open, and focus goes back to the card's
 // Details button when it closes. `?open=` names the one open card, so only
 // one sheet is ever open.

@@ -13,10 +13,10 @@ the "who acts" check, what one reading is given, the verdicts: a step only
 when both readings mark it, the first reading of a headline sets it), the
 word-for-word "already out" copy check, the odds and betting filter and the
 14-day window, news threads, the five places on the proposal's own replay
-(final/f03_replay.py, Nov 6-13: Huang's 3-day stay, Syria and Israel held
-back, the dated place) and its faster variant (f06), the caps, a short day
-never padded, the labels, and whole runs: a first day whose cards need no
-approval, a second reading that disagrees, a person's override (a rejected
+(the approved open-list proposal (2026-11-13), Nov 6-13: Huang's 3-day stay,
+Syria and Israel held back, the dated place) and its faster variant, the
+caps, a short day never padded, the labels, and whole runs: a first day
+whose cards need no approval, a second reading that disagrees, a person's override (a rejected
 headline never shows, an approved one always counts), a day the model is
 down (yesterday's live cards stay, none added, "not updated today"), one
 story's reading failing, a day an answer comes out (held back), a re-run
@@ -480,10 +480,11 @@ def test_who_knows_names_are_people():
     assert O.check_names("charge_or_arrest", ans, text) == (None, None)
 
 
-# ── the five places on the proposal's replay (final/f03_replay.py) ───────────
+# ── the five places on the proposal's replay (the approved open-list proposal (2026-11-13)) ──
 
 # name, group, decider, thread, created, deadline, resolved, steps [(time, source, title)], held [(time, source, title)];
-# the steps and "already out" headlines f03 graded by hand. Times "T07:00" / "T08:00" are date-only reports.
+# the steps and "already out" headlines the proposal's replay graded by hand. Times "T07:00" / "T08:00" are
+# date-only reports.
 REPLAY = [
     ("Israel strikes Iran (the ceasefire ends)", 1, "Israel", "iran_war", "2026-07-16", "2026-12-31", None, [
         ("2026-10-22T07:00", "ABC News", "US and Israel drawing up plans to resume attacks on Iran post-election, sources say"),
@@ -585,7 +586,8 @@ def _hd(t, source, title):
 
 
 def replay(stay_days=K.STAY_DAYS):
-    """The list each day Nov 6-13 at 04:00 UTC from REPLAY, through story_row and select, as f03 builds it."""
+    """The list each day Nov 6-13 at 04:00 UTC from REPLAY, through story_row and select, as the proposal's
+    replay builds it."""
     prev, out, held_out = [], {}, {}
     for d in range(6, 14):
         now = to_epoch(f"2026-11-{d:02d}T04:00:00Z")
@@ -1109,9 +1111,9 @@ def test_a_persons_rebuild_reads_no_new_step():
 
 
 def test_steps_wait_for_a_person_when_set():
-    # STEPS_BY "person" (final.md's fallback when the bars are not met, as they were not out of sample on
-    # 2026-11-14): the readings' steps are only proposed; a card shows once a person approves its step, and a
-    # dated card still shows on its own
+    # STEPS_BY "person" (the fallback in the approved open-list proposal (2026-11-13) when the bars are not
+    # met, as they were not out of sample on 2026-11-14): the readings' steps are only proposed; a card shows
+    # once a person approves its step, and a dated card still shows on its own
     assert SHIPPED_STEPS_BY == "person"
     conn = store.connect(":memory:")
     old = O.STEPS_BY
@@ -1236,6 +1238,95 @@ def test_consistency_files():
         # the daily cache is untouched by the test (names are kept)
         for v in (O.PROMPT_VERSION, O.OUT_VERSION):
             assert store.open_answer_history(conn, ROE_K, v) == []
+
+
+# ── the daily job's entry points: the headline key, the rebuild, the news-down guard ──
+
+def test_headline_key():
+    # the key a decision is stored under (store.open_reviews), which the job sends with every candidate
+    assert O.headline_key is O._key
+    assert O.headline_key({"title": "  White House  weighs Jane Roe’s future "}) == \
+        O.headline_key({"title": "white house weighs jane roe's future"}) == "white house weighs jane roe's future"
+    assert O.headline_key(None) == "" and O.headline_key({}) == ""
+
+
+def test_rebuild_reviewed_is_the_approve_path():
+    # rebuild_reviewed() does what --approve / --reject did after recording: the latest day at its own run time,
+    # no new step reading; the same decision on two copies of a store gives the same list either way
+    outs = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for way in ("daily", "rebuild"):
+            conn = store.connect(":memory:")
+            out = os.path.join(tmp, f"{way}.json")
+            s = _run(conn, NOW, FakeClient(), out)
+            O.decide(conn, [str(next(w["n"] for w in s["awaiting"] if w["story"] == ACME_K))], False, now=NOW)
+            c = FakeClient()
+            if way == "daily":
+                reviewed = store.get_open_day(conn, "2026-11-13")
+                got = O.daily(conn=conn, now=reviewed["run_at"], client=c, walk=lambda: EVENTS, search=plus_search,
+                              out_path=out, news_cache_path=None, sleep=lambda s: None, workers=1, read_steps=False,
+                              review_of=reviewed, news_max_age_hours=O.REVIEW_NEWS_HOURS)
+            else:
+                got = O.rebuild_reviewed(conn, out_path=out, news_cache_path=None, client=c, walk=lambda: EVENTS,
+                                         search=plus_search, sleep=lambda s: None, workers=1)
+            assert not c.steps_asked() and got["status"] == "updated" and got["run_at"] == "2026-11-13T04:00:00Z"
+            outs.append((json.load(open(out)), got["awaiting"], O.latest_day(conn)["cards"]))
+    assert outs[0] == outs[1]
+    assert [c["id"] for c in outs[0][0]["days"][0]["cards"]] == [ROE_K, TURNER_K]
+    # no list yet: nothing to rebuild
+    assert O.rebuild_reviewed(store.connect(":memory:"), out_path=None) is None
+
+
+def test_news_down_keeps_the_last_list():
+    # NEWS_DOWN_AFTER searches failing in a row: the feed is given up on, no model is asked after it, the last
+    # list's live cards stay (with the headlines they had) and the day is "not updated today"
+    old = O.NEWS_DOWN_AFTER
+    O.NEWS_DOWN_AFTER = 3                    # the fixture makes fewer than 20 searches
+    try:
+        conn = store.connect(":memory:")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "open.json")
+            _run(conn, NOW, FakeClient(), out)
+            day1 = json.load(open(out))["days"][0]
+            calls = []
+
+            class Logged(FakeClient):
+                def generate(self, prompt, schema=None):
+                    calls.append("model")
+                    return super().generate(prompt, schema)
+
+            def blocked(query, after=None, before=None, limit=None):
+                calls.append("search")
+                raise O.news.NewsError("news search: HTTP 503")
+
+            c = Logged()
+            s = _run(conn, NOW + DAY, c, out, blocked)
+            assert s["news_down"] and s["model_down"] == O.NEWS_DOWN and s["status"] == "not updated today", s
+            assert calls.count("search") == O.NEWS_DOWN_AFTER * O.NEWS_TRIES          # it stopped there
+            last = max(i for i, x in enumerate(calls) if x == "search")
+            assert "model" not in calls[last:] and not c.steps_asked() and not c.outs_asked()
+            d2 = json.load(open(out))["days"][0]
+            assert d2["day"] == "2026-11-14" and d2["status"] == "not updated today" and d2["new_today"] == 0
+            assert [x["id"] for x in d2["cards"]] == [x["id"] for x in day1["cards"]]
+            roe = next(x for x in d2["cards"] if x["id"] == ROE_K)
+            assert [h["title"] for h in roe["headlines"]] == ["White House weighs Jane Roe's future, officials say",
+                                                             "Jane Roe should go"]           # kept from day 1
+            assert roe["headline"]["title"] == "White House weighs Jane Roe's future, officials say"
+
+        # failures that a success interrupts are not the feed being down
+        conn = store.connect(":memory:")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "open.json")
+
+            def roe_blocked(query, after=None, before=None, limit=None):
+                if query.startswith("Jane Roe"):
+                    raise O.news.NewsError("news search: HTTP 503")
+                return fake_search(query, after, before, limit)
+
+            s = _run(conn, NOW, FakeClient(), out, roe_blocked)
+            assert not s["news_down"] and s["status"] == "updated" and s["counts"]["news searches failed"] == 2
+    finally:
+        O.NEWS_DOWN_AFTER = old
 
 
 if __name__ == "__main__":

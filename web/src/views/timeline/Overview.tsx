@@ -182,8 +182,8 @@ export function Overview({
           <path className="tl-ov-crowd-area" d={paths.crowdArea} />
           <path className="tl-ov-crowd" d={paths.crowdLine} />
           {showOdds && <path className="tl-ov-odds" d={paths.odds} />}
-          {events.map((e) => (
-            <line key={e.t} className="tl-ov-event" x1={ox(e.t)} x2={ox(e.t)} y1={3} y2={H - 3} />
+          {events.map((e, i) => (
+            <line key={`${e.t}-${i}`} className="tl-ov-event" x1={ox(e.t)} x2={ox(e.t)} y1={3} y2={H - 3} />
           ))}
         </g>
         <path

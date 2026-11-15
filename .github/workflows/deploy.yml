@@ -1,12 +1,20 @@
 # Build the static dashboard (web/) and publish it to GitHub Pages.
 #
-# One-time setup (see README → Web Dashboard), or the deploy job is rejected:
+# One-time setup (see docs/DEPLOY.md, or README → One-time production setup), or the deploy job is rejected:
 #   1. Settings → Pages → Build and deployment → Source: "GitHub Actions"
-#      (it currently publishes the D3.js branch; switching replaces that site).
+#      (it currently publishes the D3.js branch; switching replaces that site), and "Enforce HTTPS"
+#      (the API answers https://parthjain.ca only).
 #   2. Settings → Environments → github-pages → Deployment branches: add "main"
 #      (the environment only allows "D3.js" today).
+#   3. Optional, for the visitor controls (timeline markers, Watch, Add to main page): the repository
+#      variables API_URL (the Worker's address) and TURNSTILE_SITEKEY (the bot check's site key). With
+#      neither set, the build is exactly the site without them ("Not available yet").
 # The site is served at https://parthjain.ca/Rigged-Outcomes/ (Vite base "./" + hash
 # routing, so no path configuration is needed here).
+#
+# The Watchlist's two lists (closed.json, open.json) come from the `watchlist-data` branch, which the daily
+# Watchlist job (.github/workflows/watchlist.yml) writes; that job also calls this workflow after each run.
+# Before the branch exists, the build goes ahead without them (the Watchlist shows its placeholders).
 
 name: Deploy dashboard to GitHub Pages
 
@@ -14,16 +22,17 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "the commit to build (the Watchlist job passes main, which it may just have pushed to)"
+        type: string
+        default: main
 
+# The build (which installs packages from npm and PyPI) reads the repository only; the Pages permissions belong
+# to the deploy job alone.
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-# One deployment at a time; let an in-progress production deploy finish.
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -32,6 +41,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -39,11 +50,21 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.lock
 
       # Turns data/*.csv into web/public/data/*.json (gitignored, so built here).
       - name: Export dashboard data
         run: python export.py
+
+      # The Watchlist's lists, as the daily job last published them
+      - name: Add the Watchlist lists
+        run: |
+          if git fetch --depth=1 origin watchlist-data 2>/dev/null; then
+            git show FETCH_HEAD:site/closed.json > web/public/data/closed.json || rm -f web/public/data/closed.json
+            git show FETCH_HEAD:site/open.json > web/public/data/open.json || rm -f web/public/data/open.json
+          else
+            echo "::notice::No watchlist-data branch yet: the Watchlist shows its placeholders"
+          fi
 
       - name: Set up Node
         uses: actions/setup-node@v7
@@ -58,6 +79,9 @@ jobs:
 
       - name: Type-check and build
         working-directory: web
+        env:
+          VITE_API_URL: ${{ vars.API_URL }}
+          VITE_TURNSTILE_SITEKEY: ${{ vars.TURNSTILE_SITEKEY }}
         run: npm run build
 
       - name: Upload Pages artifact
@@ -69,6 +93,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    # One deployment at a time; let an in-progress production deploy finish.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

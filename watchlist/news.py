@@ -10,7 +10,10 @@ it was called a surprise.
 A headline is {"title", "source", "published" (ISO UTC), "url"}, in Google's
 relevance order. after / before (epoch seconds or ISO) become Google's own
 after:YYYY-MM-DD / before:YYYY-MM-DD operators. Requests are spaced
-MIN_INTERVAL apart across threads; errors raise NewsError.
+MIN_INTERVAL apart across threads; errors raise NewsError, and so does an
+answer that is not a news feed at all (a consent or captcha page, an empty
+body: what a refusing Google sends with status 200), so it is never read as
+"no news".
 """
 import html
 import re
@@ -91,4 +94,7 @@ def search(query, after=None, before=None, limit=LIMIT, session=requests):
         raise NewsError(f"news search failed: {type(e).__name__}") from e
     if resp.status_code != 200:
         raise NewsError(f"news search: HTTP {resp.status_code}")
+    head = (resp.text or "")[:2048].lower()
+    if "<rss" not in head and "<channel" not in head:
+        raise NewsError("news search: the answer was not a news feed")
     return parse(resp.text)[:limit]

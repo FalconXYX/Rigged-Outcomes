@@ -1,0 +1,33 @@
+# Rigged Outcomes API: one Worker and one D1 database, both on Cloudflare's free plan (docs/DEPLOY.md).
+# Local runs read .dev.vars (copied from .dev.vars.example), whose values replace [vars] below.
+name = "rigged-outcomes-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+workers_dev = true
+send_metrics = false
+
+[observability]
+enabled = true
+
+# The Worker's own log lines (src/lib.ts log(): never tokens, hashes or addresses) are kept; Cloudflare's
+# per-request invocation logs, which record request headers such as CF-Connecting-IP, are turned off.
+[observability.logs]
+enabled = true
+invocation_logs = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rigged-outcomes"
+# replace with the id `wrangler d1 create` prints (docs/DEPLOY.md)
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# Production values. Secrets (wrangler secret put): TURNSTILE_SECRET, OWNER_TOKEN, JOB_TOKEN, VISITOR_SALT,
+# and optionally GITHUB_DISPATCH_TOKEN (the review page's "Apply decisions now").
+[vars]
+ALLOWED_ORIGINS = "https://parthjain.ca"
+TURNSTILE_HOSTNAMES = "parthjain.ca"
+TURNSTILE_STRICT = "on"
+GITHUB_REPO = "FalconXYX/Rigged-Outcomes"
+GITHUB_WORKFLOW = "watchlist.yml"
+DEV = "off"

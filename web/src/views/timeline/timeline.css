@@ -1065,7 +1065,7 @@
   }
 }
 
-/* ── Events editor (local dev server only) ─────────────────────────── */
+/* ── Events editor (with the API; without one, the local dev server) ─ */
 
 .tl-ev {
   position: relative;
@@ -1148,11 +1148,28 @@
 }
 
 .tl-ev-form {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* the form's fields (a fieldset, so pausing disables them all at once) */
+.tl-ev-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.tl-ev-fields:disabled {
+  opacity: 0.55;
+}
+
+/* where the bot check shows if Cloudflare asks for a click (empty otherwise) */
+.tl-ev .ts-slot:empty {
+  display: none;
 }
 
 .tl-ev-form label {

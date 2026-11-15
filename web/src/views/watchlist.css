@@ -885,7 +885,7 @@ a.op-quote:hover .op-quote-text {
   color: var(--text-3);
 }
 
-/* the markets the same news settled */
+/* the markets counted under this one (the same news settled them) */
 .wl-plain {
   display: grid;
   gap: 4px;
@@ -967,18 +967,24 @@ a.op-quote:hover .op-quote-text {
   color: var(--text-3);
 }
 
-/* "+ Add to main page · Not available yet": a quiet text button, greyed out
-   (not built yet), no box around it */
+/* "+ Add to main page · The site's owner reviews each request", "Watch this
+   market · …": a quiet text button, then what happens next, no box around
+   it; greyed out while it can't be used ("· Not available yet"). A longer
+   note wraps beside its button. */
 .cl-add {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 2px 6px;
   color: var(--text-3);
 }
 
-.cl-add-btn,
-.cl-add-btn:hover {
+.cl-add-btn {
   padding-block: 4px;
+}
+
+.cl-add-btn[aria-disabled="true"],
+.cl-add-btn[aria-disabled="true"]:hover {
   color: var(--text-3);
   cursor: not-allowed;
 }
@@ -988,6 +994,25 @@ a.op-quote:hover .op-quote-text {
   line-height: 1.3;
   color: var(--text-3);
   white-space: nowrap;
+}
+
+.cl-note-wrap {
+  flex: 1 1 14em;
+  white-space: normal;
+}
+
+/* the open sheet's "Watch this market": a line of its own under the others */
+.op-watch {
+  flex-basis: 100%;
+}
+
+/* where the bot check shows if Cloudflare asks for a click (empty otherwise) */
+.ts-slot {
+  flex-basis: 100%;
+}
+
+.ts-slot:empty {
+  display: none;
 }
 
 /* "Polymarket ↗": a link, level with the button beside it */

@@ -1,35 +1,139 @@
 // Timeline markers ("at this time, this happened") beyond the ones export.py
-// takes from markets.json. Not saved yet: they last until the page reloads.
-// They will live in the database once the backend exists (the user chose to
-// wait for it, 2026-11-12), where any visitor can add them and a model may
-// add them too (source "ai"). Until then the editor shows on the local dev
-// server only.
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+// takes from markets.json. Any visitor can add one: the site's API keeps it
+// (lib/api.ts) and everyone sees it at once. Whoever added a marker can remove
+// it for 24 hours (this browser keeps its undo token); the site's owner can
+// remove any on the review page. A model may add them later (source "ai").
+// With no API in the build, or the API down, there is no editor and the chart
+// keeps its markets.json markers; on the local dev server without an API the
+// editor keeps markers in memory until the page reloads, as before.
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { AddedEvent, MarketData, MarketEvent } from "../../types";
 import { fmtT } from "../../lib/format";
+import { WORDS, apiConfigured, apiGet, apiSend, dropUndo, saveUndo, undoOf, type Marker } from "../../lib/api";
 
-export const EVENTS_EDITABLE = import.meta.env.DEV;
 const MAX_LABEL = 40;
 
-/** The market with its added markers merged into timeline.events (by time). */
-export function withAddedEvents(market: MarketData, added: AddedEvent[]): MarketData {
-  if (!added.length) return market;
-  const events: MarketEvent[] = [...market.timeline.events, ...added.map(({ t, label }) => ({ t, label }))].sort(
+/**
+ * The market with its added markers merged into timeline.events (by time).
+ * Markers outside `bounds` (the market's own span) are left out, so none can
+ * stretch the chart.
+ */
+export function withAddedEvents(market: MarketData, added: AddedEvent[], bounds: readonly [number, number]): MarketData {
+  const inside = added.filter((e) => e.t >= bounds[0] && e.t <= bounds[1]);
+  if (!inside.length) return market;
+  const events: MarketEvent[] = [...market.timeline.events, ...inside.map(({ t, label }) => ({ t, label }))].sort(
     (a, b) => a.t - b.t,
   );
   return { ...market, timeline: { ...market.timeline, events } };
 }
 
-/** This page's added markers, per market; kept in memory until the database exists. */
-const session = new Map<string, AddedEvent[]>();
+/**
+ * "off": no API in the build (the dev server's in-memory editor); "loading";
+ * "ready": the API's markers; "down": the API failed or doesn't list the market (no editor).
+ */
+export type MarkerStatus = "off" | "loading" | "ready" | "down";
 
-export function useAddedEvents(name: string) {
-  const [events, setEvents] = useState<AddedEvent[]>(() => session.get(name) ?? []);
-  const save = async (next: AddedEvent[]) => {
-    session.set(name, next);
-    setEvents(next);
+type MarkersReply = { listed: boolean; writes: boolean; markers: Marker[] };
+type Kept = { events: AddedEvent[]; writes: boolean };
+
+/** This page's markers per market, so switching views doesn't ask again (the dev server's only copy without an API). */
+const session = new Map<string, Kept>();
+
+const byTime = (a: AddedEvent, b: AddedEvent) => a.t - b.t;
+const fromMarker = (m: Marker): AddedEvent => ({ id: m.id, t: m.t, label: m.label, source: m.source, created_at: m.created_at });
+
+export type AddedEvents = {
+  events: AddedEvent[];
+  status: MarkerStatus;
+  /** false while the owner has paused visitors' changes */
+  writes: boolean;
+  /** add a marker; an error in words, or null once it is added */
+  add: (t: number, label: string, slot?: HTMLElement | null) => Promise<string | null>;
+  /** remove one of this browser's markers; an error in words, or null once it is gone */
+  remove: (id: string) => Promise<string | null>;
+  /** this browser added it, less than 24 hours ago */
+  canRemove: (id: string) => boolean;
+};
+
+export function useAddedEvents(name: string): AddedEvents {
+  const [state, setState] = useState<{ name: string; status: MarkerStatus } & Kept>(() => {
+    const kept = session.get(name);
+    if (!apiConfigured) return { name, status: "off", events: kept?.events ?? [], writes: true };
+    return kept ? { name, status: "ready", ...kept } : { name, status: "loading", events: [], writes: true };
+  });
+  // a new market's first render, before the effect below has caught up
+  const fresh = { name, status: (apiConfigured ? "loading" : "off") as MarkerStatus, events: [] as AddedEvent[], writes: true };
+  const current = state.name === name ? state : fresh;
+
+  useEffect(() => {
+    const kept = session.get(name);
+    if (!apiConfigured) {
+      setState({ name, status: "off", events: kept?.events ?? [], writes: true });
+      return;
+    }
+    if (kept) {
+      setState({ name, status: "ready", ...kept });
+      return;
+    }
+    let live = true;
+    apiGet<MarkersReply>(`/api/markers?market=${encodeURIComponent(name)}`).then((r) => {
+      if (!live) return;
+      if (!r || r.listed !== true || !Array.isArray(r.markers)) {
+        setState({ name, status: "down", events: [], writes: false });
+        return;
+      }
+      const next: Kept = { events: r.markers.map(fromMarker).sort(byTime), writes: r.writes !== false };
+      session.set(name, next);
+      setState({ name, status: "ready", ...next });
+    });
+    return () => {
+      live = false;
+    };
+  }, [name]);
+
+  const keep = (update: (k: Kept) => Kept) =>
+    setState((s) => {
+      if (s.name !== name) return s;
+      const next = update({ events: s.events, writes: s.writes });
+      session.set(name, next);
+      return { ...s, ...next };
+    });
+
+  const add = async (t: number, label: string, slot?: HTMLElement | null): Promise<string | null> => {
+    if (current.status === "off") {
+      const e: AddedEvent = { id: `ev_${Date.now().toString(36)}`, t, label, source: "manual" };
+      keep((k) => ({ ...k, events: [...k.events, e].sort(byTime) }));
+      return null;
+    }
+    const r = await apiSend<{ marker: Marker; undo: string }>("POST", "/api/markers", { market: name, t, label }, { bot: "marker", slot });
+    if (!r.ok) {
+      if (r.code === "paused") keep((k) => ({ ...k, writes: false }));
+      return r.words;
+    }
+    if (!r.data?.marker) return WORDS.other;
+    if (typeof r.data.undo === "string") saveUndo(r.data.marker.id, r.data.undo);
+    const m = fromMarker(r.data.marker);
+    keep((k) => ({ ...k, events: [...k.events.filter((e) => e.id !== m.id), m].sort(byTime) }));
+    return null;
   };
-  return { events, save };
+
+  const remove = async (id: string): Promise<string | null> => {
+    if (current.status === "off") {
+      keep((k) => ({ ...k, events: k.events.filter((e) => e.id !== id) }));
+      return null;
+    }
+    const undo = undoOf(id);
+    if (!undo) return WORDS.not_yours;
+    const r = await apiSend<null>("DELETE", `/api/markers/${encodeURIComponent(id)}`, undefined, { headers: { "x-undo": undo } });
+    if (!r.ok && r.code !== "not_found") return r.words;
+    dropUndo(id);
+    keep((k) => ({ ...k, events: k.events.filter((e) => e.id !== id) }));
+    return null;
+  };
+
+  const canRemove = (id: string) => current.status === "off" || undoOf(id) != null;
+
+  return { events: current.events, status: current.status, writes: current.writes, add, remove, canRemove };
 }
 
 /* `t` is the US/Eastern wall clock read as UTC (types.ts), so a
@@ -40,20 +144,25 @@ const fromInput = (v: string) => {
   return Number.isFinite(ms) ? Math.round(ms / 1000) : null;
 };
 
+/** The tag on a row: where the marker came from. */
+const FROM: Record<AddedEvent["source"], string> = { manual: "visitor", ai: "AI" };
+
 /**
- * The editor: the market's markers (the ones from markets.json can't be
- * removed here) and a form to add one, its time starting at the replay
- * playhead so scrubbing to a moment and pressing Add is enough.
+ * The editor: the market's markers (the ones from markets.json, "original",
+ * can't be removed here; a visitor's own, for 24 hours, can) and a form to
+ * add one, its time starting at the replay playhead so scrubbing to a moment
+ * and pressing Add marker is enough. Times stay inside `bounds`, the
+ * market's span.
  */
 export function EventsEditor({
   fixed,
-  added,
-  save,
+  api,
+  bounds,
   playhead,
 }: {
   fixed: MarketEvent[];
-  added: AddedEvent[];
-  save: (events: AddedEvent[]) => Promise<void>;
+  api: AddedEvents;
+  bounds: readonly [number, number];
   playhead: () => number;
 }) {
   const [open, setOpen] = useState(false);
@@ -64,21 +173,37 @@ export function EventsEditor({
   const root = useRef<HTMLDivElement>(null);
   const labelInput = useRef<HTMLInputElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
+  const slot = useRef<HTMLSpanElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const memoryOnly = api.status === "off";
+  const paused = !memoryOnly && !api.writes;
 
   const rows = useMemo(
     () =>
       [
-        ...fixed.map((e) => ({ key: `f${e.t}${e.label}`, t: e.t, label: e.label, from: "markets.json", id: null })),
-        ...added.map((e) => ({ key: e.id, t: e.t, label: e.label, from: e.source === "ai" ? "AI" : "added", id: e.id })),
+        ...fixed.map((e) => ({ key: `f${e.t}${e.label}`, t: e.t, label: e.label, from: "original", id: null as string | null })),
+        ...api.events.map((e) => ({ key: e.id, t: e.t, label: e.label, from: FROM[e.source], id: e.id })),
       ].sort((a, b) => a.t - b.t),
-    [fixed, added],
+    [fixed, api.events],
   );
 
+  const clamp = (t: number) => Math.min(bounds[1], Math.max(bounds[0], t));
   const show = () => {
-    setWhen(toInput(playhead()));
+    setWhen(toInput(clamp(playhead())));
     setError(null);
     setOpen(true);
   };
+
+  // the panel hangs from the button's right edge; on a phone the button sits left of the screen's edge,
+  // so the panel is nudged back inside the page's 16px margins
+  useLayoutEffect(() => {
+    const el = panel.current;
+    if (!open || !el) return;
+    el.style.transform = "";
+    const r = el.getBoundingClientRect();
+    const shift = r.left < 16 ? 16 - r.left : r.right > window.innerWidth - 16 ? window.innerWidth - 16 - r.right : 0;
+    if (shift) el.style.transform = `translateX(${Math.round(shift)}px)`;
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -90,27 +215,25 @@ export function EventsEditor({
     return () => window.removeEventListener("pointerdown", away);
   }, [open]);
 
-  const run = async (events: AddedEvent[]) => {
+  const run = async (job: () => Promise<string | null>) => {
     setBusy(true);
     setError(null);
-    try {
-      await save(events);
-      return true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return false;
-    } finally {
-      setBusy(false);
-    }
+    const err = await job();
+    setBusy(false);
+    setError(err);
+    return !err;
   };
 
   const add = async (e: FormEvent) => {
     e.preventDefault();
     const t = fromInput(when);
-    const text = label.trim();
-    if (!text || t == null) return;
-    const next = [...added, { id: `ev_${Date.now().toString(36)}`, t, label: text, source: "manual" as const }];
-    if (await run(next.sort((a, b) => a.t - b.t))) setLabel("");
+    const text = label.trim().replace(/\s+/g, " ");
+    if (!text || t == null || busy || paused) return;
+    if (t < bounds[0] || t > bounds[1]) {
+      setError(WORDS.bad_time);
+      return;
+    }
+    if (await run(() => api.add(t, text, slot.current))) setLabel("");
   };
 
   return (
@@ -131,27 +254,33 @@ export function EventsEditor({
         className={`btn btn-ghost btn-sm tl-ev-toggle${open ? " on" : ""}`}
         onClick={() => (open ? setOpen(false) : show())}
         aria-expanded={open}
-        title="Add or remove markers on this timeline (local dev server only)"
+        title={
+          memoryOnly
+            ? "Add or remove markers on this timeline (local dev server only)"
+            : "Add a marker to this timeline: what happened, and when (ET)"
+        }
       >
         Events
         {rows.length > 0 && <span className="tl-ev-count tabular">{rows.length}</span>}
       </button>
 
       {open && (
-        <div className="tl-ev-panel" role="dialog" aria-label="Timeline events">
+        <div className="tl-ev-panel" ref={panel} role="dialog" aria-label="Timeline events">
           <p className="label">Events on this timeline</p>
           {rows.length > 0 ? (
             <ul className="tl-ev-list">
               {rows.map((r) => (
                 <li key={r.key}>
                   <span className="tl-ev-time tabular">{fmtT(r.t)}</span>
-                  <span className="tl-ev-label">{r.label}</span>
-                  {r.id ? (
+                  <span className="tl-ev-label" title={r.label}>
+                    {r.label}
+                  </span>
+                  {r.id && api.canRemove(r.id) ? (
                     <button
                       type="button"
                       className="tl-ev-remove"
                       disabled={busy}
-                      onClick={() => run(added.filter((a) => a.id !== r.id))}
+                      onClick={() => run(() => api.remove(r.id!))}
                       aria-label={`Remove “${r.label}”`}
                     >
                       Remove
@@ -166,32 +295,52 @@ export function EventsEditor({
             <p className="tl-ev-empty">None yet.</p>
           )}
 
-          <form className="tl-ev-form" onSubmit={add}>
-            <label>
-              <span className="label">What happened</span>
-              <input
-                ref={labelInput}
-                value={label}
-                maxLength={MAX_LABEL}
-                onChange={(e) => setLabel(e.target.value)}
-                placeholder="e.g. Strikes reported"
-              />
-            </label>
-            <label>
-              <span className="label">When (ET)</span>
-              <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
-            </label>
-            <div className="tl-ev-actions">
-              <button type="button" className="tl-ev-link" onClick={() => setWhen(toInput(playhead()))}>
-                Use the replay time
-              </button>
-              <button type="submit" className="btn btn-solid btn-sm" disabled={busy || !label.trim() || !fromInput(when)}>
-                Add
-              </button>
-            </div>
+          {/* noValidate: a time outside the market's span gets this page's words, not the browser's bubble */}
+          <form className="tl-ev-form" onSubmit={add} noValidate>
+            <fieldset className="tl-ev-fields" disabled={paused}>
+              <label>
+                <span className="label">What happened</span>
+                <input
+                  ref={labelInput}
+                  value={label}
+                  maxLength={MAX_LABEL}
+                  onChange={(e) => setLabel(e.target.value)}
+                  placeholder="e.g. Strikes reported"
+                />
+              </label>
+              <label>
+                <span className="label">When (ET)</span>
+                <input
+                  type="datetime-local"
+                  value={when}
+                  min={toInput(bounds[0])}
+                  max={toInput(bounds[1])}
+                  onChange={(e) => setWhen(e.target.value)}
+                />
+              </label>
+              <div className="tl-ev-actions">
+                <button type="button" className="tl-ev-link" onClick={() => setWhen(toInput(clamp(playhead())))}>
+                  Use the replay time
+                </button>
+                <button type="submit" className="btn btn-solid btn-sm" disabled={busy || !label.trim() || !fromInput(when)}>
+                  {busy ? "Adding…" : "Add marker"}
+                </button>
+              </div>
+            </fieldset>
           </form>
-          {error && <p className="tl-ev-error">Could not save: {error}</p>}
-          <p className="tl-ev-note">Not saved yet: markers go away when the page reloads.</p>
+          <span className="ts-slot" ref={slot} />
+          {error && (
+            <p className="tl-ev-error" role="alert">
+              {error}
+            </p>
+          )}
+          <p className="tl-ev-note">
+            {memoryOnly
+              ? "Not saved yet: markers go away when the page reloads."
+              : paused
+                ? "Adding markers is paused right now."
+                : "Markers you add are shown to everyone. You can remove yours for 24 hours; the site's owner can remove any."}
+          </p>
         </div>
       )}
     </div>

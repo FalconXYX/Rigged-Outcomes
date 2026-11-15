@@ -41,6 +41,8 @@ const market = routeChunk(() => import("./views/MarketPage").then((m) => m.Marke
 const { Route: MarketPage } = market;
 const watchlist = routeChunk(() => import("./views/WatchlistPage").then((m) => m.WatchlistPage));
 const { Route: WatchlistPage } = watchlist;
+// the owner's review page: linked from nowhere, so never preloaded
+const { Route: ReviewPage } = routeChunk(() => import("./views/ReviewPage").then((m) => m.ReviewPage));
 
 function preloadRoutes() {
   const run = () => {
@@ -133,6 +135,7 @@ export default function App() {
           ? `Market not found · ${SITE}`
           : SITE;
     else if (page === "watchlist") document.title = `Watchlist · ${SITE}`;
+    else if (page === "review") document.title = `Review · ${SITE}`;
     else document.title = `Page not found · ${SITE}`;
   }, [page, marketTitle, index.status]);
 
@@ -229,6 +232,8 @@ export default function App() {
                 <MarketPage name={route.name} view={route.view} index={index} />
               ) : route.page === "watchlist" ? (
                 <WatchlistPage />
+              ) : route.page === "review" ? (
+                <ReviewPage />
               ) : (
                 <NotFound />
               )}

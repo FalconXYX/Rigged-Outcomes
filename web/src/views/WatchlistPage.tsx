@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, type CSSProperties, type MouseEvent } from 
 import type { ClosedData, ClosedDay, ClosedPick } from "../types";
 import { loadClosed, loadIndex, loadOpen, useAsync } from "../lib/data";
 import { fmtDay, fmtInt, fmtUSD } from "../lib/format";
-import { href, setQuery, useQuery } from "../lib/router";
+import { closeSheet, openSheet, setQuery, useQuery } from "../lib/router";
 import { ErrorNote, Loading, Select } from "../components/ui";
 import { OpenNow, isOpenKey } from "./watchlist/OpenNow";
 import { Sheet } from "./watchlist/Sheet";
-import { Chevron, DAY_MS, MoreButton, NewsList, colsFor, dateOnly, dayOf, ms, plural } from "./watchlist/shared";
+import { AddToMain } from "./watchlist/controls";
+import { Chevron, DAY_MS, MoreButton, NewsList, colsFor, dateOnly, dayOf, hhmm, ms, plural } from "./watchlist/shared";
 import "./watchlist.css";
 
 // The watchlist. On top, "Open now" (watchlist/OpenNow.tsx): open markets
@@ -14,9 +15,10 @@ import "./watchlist.css";
 // moving toward it. Below, the recently closed ones (watchlist/upsets.py):
 // one day at a time, that day's 3-5 markets worth a look as possible insider
 // cases, each a card under a rule in its verdict's colour. "Details" on a
-// card in either section opens the rest in a side sheet (watchlist/Sheet.tsx);
-// a market a person likes can go to the main page (once the database
-// exists). Older days are a pick away.
+// card in either section opens the rest in a side sheet (watchlist/Sheet.tsx),
+// as a history step, so Back closes it. In the sheets a visitor can ask for a
+// closed market to go to the main page, or watch an open one
+// (watchlist/controls.tsx, through the site's API). Older days are a pick away.
 // `?day=` and `?open=` hold the state (one card open on the whole page). All times are UTC.
 
 const shortId = (p: ClosedPick) => p.condition_id.slice(0, 12);
@@ -133,7 +135,7 @@ const moreId = (p: ClosedPick) => `cl-more-${shortId(p)}`;
  * their marks in the verdict's colour, "Details".
  */
 function Card({ p, open }: { p: ClosedPick; open: boolean }) {
-  const show = () => setQuery({ open: shortId(p) });
+  const show = () => openSheet(shortId(p));
   const when = broke(p);
   return (
     <article
@@ -158,12 +160,6 @@ function Card({ p, open }: { p: ClosedPick; open: boolean }) {
   );
 }
 
-const Plus = () => (
-  <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
-    <path d="M6 2v8M2 6h8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-  </svg>
-);
-
 /** The opening words of the note's "why", naming the verdict. */
 const RUN_IN: Record<ClosedPick["verdict"], string> = {
   "potential case": "Why it could be a case.",
@@ -175,8 +171,9 @@ const RUN_IN: Record<ClosedPick["verdict"], string> = {
  * The closed card's sheet: what happened, large; why (its opening words
  * naming the verdict); the three checks with their answers and reasons; the
  * open list's "who would know first" when the market was on it; the markets
- * the same news settled; the headlines as a plain list, newest last, the
- * first report marked in the verdict's colour; then the actions.
+ * counted under this one (settled by the same news); the headlines as a
+ * plain list, newest last, the first report marked in the verdict's colour;
+ * then the actions: "Add to main page" (watchlist/controls.tsx) and Polymarket.
  */
 function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null; onClose: () => void }) {
   const id = shortId(p);
@@ -226,7 +223,10 @@ function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null;
         <section className="wl-sheet-sec">
           {p.who_knows && <p className="wl-sheet-text">{p.who_knows}</p>}
           {p.on_open_list_from && (
-            <p className="cl-onlist">On the open list from {fmtDay(new Date(`${p.on_open_list_from}T00:00:00Z`))}</p>
+            <p className="cl-onlist">
+              On the open list from {fmtDay(new Date(`${p.on_open_list_from}T00:00:00Z`))}
+              {(p.watchers ?? 0) > 0 && <> · watched by {plural(p.watchers!, "visitor")}</>}
+            </p>
           )}
         </section>
       )}
@@ -234,7 +234,7 @@ function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null;
       {p.same_event.length > 0 && (
         <section className="wl-sheet-sec" aria-labelledby={`cl-same-${id}`}>
           <h4 className="cl-h" id={`cl-same-${id}`}>
-            The same news settled {plural(p.same_event.length, "other market")}
+            Counted under this one: {plural(p.same_event.length, "other market")}
           </h4>
           <ul className="wl-plain">
             {p.same_event.map((q) => (
@@ -256,28 +256,7 @@ function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null;
       </section>
 
       <div className="wl-sheet-foot">
-        {onMain ? (
-          <a className="btn btn-solid btn-sm" href={href.market(onMain)}>
-            On the main page →
-          </a>
-        ) : (
-          <span className="cl-add">
-            {/* aria-disabled, not disabled: it stays reachable so its note is read out */}
-            <button
-              type="button"
-              className="cl-link cl-add-btn"
-              aria-disabled="true"
-              aria-describedby={`cl-note-${id}`}
-              onClick={(e) => e.preventDefault()}
-            >
-              <Plus /> Add to main page
-            </button>
-            <span aria-hidden="true">·</span>
-            <span className="cl-note" id={`cl-note-${id}`}>
-              Not available yet
-            </span>
-          </span>
-        )}
+        <AddToMain p={p} onMain={onMain} />
         <a className="cl-link cl-ext" href={p.url} target="_blank" rel="noopener noreferrer">
           Polymarket <span aria-hidden>↗</span>
         </a>
@@ -286,7 +265,8 @@ function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null;
   );
 }
 
-function DayPicker({ days, day, partial }: { days: ClosedDay[]; day: ClosedDay; partial: string }) {
+function DayPicker({ data, day }: { data: ClosedData; day: ClosedDay }) {
+  const days = data.days;
   const i = days.indexOf(day);
   // a new day is a new history step, so Back returns to the day before; it
   // closes this section's open card, never the open section's
@@ -325,11 +305,11 @@ function DayPicker({ days, day, partial }: { days: ClosedDay[]; day: ClosedDay; 
         value={day.day}
         label="Day (UTC)"
         options={days.map((d) => {
-          const so = d.day === partial ? ", so far" : "";
+          const so = cutOf(data, d).short;
           // the chosen day shows just its date (the header has its counts); the others say if they hold a potential case
-          if (d === day) return { value: d.day, label: `${dayShort(d.day)} (UTC${so})` };
+          if (d === day) return { value: d.day, label: `${dayShort(d.day)} (UTC${so && `, ${so}`})` };
           const n = d.picks.filter((p) => p.verdict === "potential case").length;
-          return { value: d.day, label: `${dayShort(d.day)}${so ? " (so far)" : ""}${n ? ` · ${plural(n, "potential case")}` : ""}` };
+          return { value: d.day, label: `${dayShort(d.day)}${so && ` (${so})`}${n ? ` · ${plural(n, "potential case")}` : ""}` };
         })}
         onChange={(v) => go(days.find((d) => d.day === v))}
       />
@@ -360,7 +340,7 @@ const DROPPED: Record<string, [one: string, many: string]> = {
   ],
 };
 
-function HowPicked({ data, day, today }: { data: ClosedData; day: ClosedDay; today: boolean }) {
+function HowPicked({ data, day, cut }: { data: ClosedData; day: ClosedDay; cut: string }) {
   const dropped = Object.entries(day.dropped ?? {});
   // what is left once the kinds below are taken out ("could not be checked" is one of them): the markets checked
   const left = day.checked;
@@ -371,7 +351,7 @@ function HowPicked({ data, day, today }: { data: ClosedData; day: ClosedDay; tod
         <Chevron />
       </summary>
       <p>
-        {plural(day.closed_markets, "market")} closed on this day{today ? " so far" : ""} (a UTC day; markets with less than{" "}
+        {plural(day.closed_markets, "market")} closed on this day{cut} (a UTC day; markets with less than{" "}
         {fmtUSD(data.rules.min_volume)} traded aren't counted). {fmtInt(left)} {left === 1 ? "was" : "were"} left after taking
         out the kinds below. Official statistics, central bank decisions, scheduled company results and share-offering prices
         are always left out: they come out at a set time under rules built to keep them secret until then. A model read each
@@ -420,6 +400,26 @@ const ClosedTitle = () => (
 );
 
 /**
+ * A day counted before it was over stops at the run that counted it: its
+ * counted_at (in a file from before days carried one, the file's
+ * generated_at) falls on the day itself. While that UTC day lasts its counts
+ * are "so far"; once it is over they say where they stop, "by 04:17" (the
+ * run's time), so a partial count never reads as a whole day, the file's
+ * last day or an older one whose next run failed. `short` goes in the day
+ * picker, `long` after "closed" in a sentence.
+ */
+type Cut = { short: string; long: string };
+
+function cutOf(data: ClosedData, d: ClosedDay): Cut {
+  const run = d.counted_at ?? data.generated_at;
+  // counted on a later day than its own: the whole day
+  if (!run || run.slice(0, 10) !== d.day) return { short: "", long: "" };
+  if (d.day === new Date().toISOString().slice(0, 10)) return { short: "so far", long: " so far" };
+  const by = hhmm(run);
+  return { short: `by ${by}`, long: ` by ${by} UTC` };
+}
+
+/**
  * The day shown: `?day=`; else the day of the closed card `?open=` names (a
  * shared link made before a newer day came in still opens its card); else by
  * default the newest day, unless that is today's partial day with fewer
@@ -435,23 +435,24 @@ function chosenDay(data: ClosedData, day: string | undefined, open?: string): Cl
   );
 }
 
-function ClosedSection({ data, mainSlugs }: { data: ClosedData; mainSlugs: Map<string, string> }) {
+/** `data` null: no closed list yet (a missing file), which reads like a list with no day in it. */
+function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs: Map<string, string> }) {
   const query = useQuery();
-  const day = chosenDay(data, query.day, query.open);
-  if (!day)
+  const day = data ? chosenDay(data, query.day, query.open) : undefined;
+  if (!data || !day)
     return (
       <>
         <ClosedTitle />
         <p className="cl-empty">Nothing checked yet.</p>
       </>
     );
-  const today = day.day === data.partial_day;
+  const dayCut = cutOf(data, day).long;
   const n = day.picks.length;
   const many = n >= 4;
   const sheet = day.picks.find((p) => query.open === shortId(p));
   // a card opened from a link that names no day, on a day other than the default: closing it stays on its day
   const keepDay = sheet && !data.days.some((d) => d.day === query.day) && day !== chosenDay(data, undefined) ? day.day : null;
-  const closeSheet = () => setQuery({ open: null, ...(keepDay ? { day: keepDay } : {}) });
+  const close = () => sheet && closeSheet(shortId(sheet), { open: null, ...(keepDay ? { day: keepDay } : {}) });
   return (
     <>
       <header className="cl-top">
@@ -467,12 +468,12 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData; mainSlugs: Map<s
               ) : null;
             })}
             <li>
-              <b>{fmtInt(day.closed_markets)}</b> markets closed{today ? " so far" : ""}
+              <b>{fmtInt(day.closed_markets)}</b> markets closed{dayCut}
             </li>
             <li>Times UTC</li>
           </ul>
         </div>
-        <DayPicker days={data.days} day={day} partial={data.partial_day} />
+        <DayPicker data={data} day={day} />
       </header>
 
       {n ? (
@@ -487,9 +488,9 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData; mainSlugs: Map<s
         </p>
       )}
 
-      <HowPicked data={data} day={day} today={today} />
+      <HowPicked data={data} day={day} cut={dayCut} />
       {sheet && (
-        <Details key={sheet.condition_id} p={sheet} onMain={mainSlugs.get(sheet.slug) ?? null} onClose={closeSheet} />
+        <Details key={sheet.condition_id} p={sheet} onMain={mainSlugs.get(sheet.slug) ?? null} onClose={close} />
       )}
     </>
   );

@@ -22,7 +22,15 @@ function getJSON<T>(path: string): Promise<T> {
 export const loadIndex = () => getJSON<MarketIndex>("data/index.json");
 export const loadMarket = (name: string) =>
   getJSON<MarketData>(`data/markets/${encodeURIComponent(name)}.json`);
-export const loadClosed = () => getJSON<ClosedData>("data/closed.json");
+/**
+ * The closed list (data/closed.json), or null while there is none: like
+ * loadOpen, a missing file (or the dev server's HTML fallback) resolves to null.
+ */
+export const loadClosed = (): Promise<ClosedData | null> =>
+  getJSON<ClosedData>("data/closed.json").then(
+    (d) => (d && Array.isArray(d.days) ? d : null),
+    () => null,
+  );
 /**
  * The open list (data/open.json), or null while there is none: a missing file
  * (or the dev server's HTML fallback for it) resolves to null, never rejects.

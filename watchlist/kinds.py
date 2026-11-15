@@ -5,7 +5,8 @@ store, no model, so anything can import it (it imports nothing from the
 package but the standard library).
 
 The user approved the "Open now" proposal on 2026-11-13 ("ok try to
-implement this"; final.md in the session scratchpad). What it fixes here:
+implement this"). What the approved open-list proposal (2026-11-13) fixes
+here:
 
 1. Embargoed releases. Official statistics, central bank rate decisions
    (scheduled or emergency), scheduled company results and scheduled share
@@ -64,7 +65,7 @@ from datetime import datetime, timezone
 _R = lambda p: re.compile(p, re.I)  # noqa: E731
 
 
-# ── the open list's rules (final.md sections 2-4) ────────────────────────────
+# ── the open list's rules (the approved open-list proposal (2026-11-13)) ─────
 
 MIN_VOLUME = 10_000        # an event needs this much traded to be in the pool (the closed list's bar)
 PRICE_CAP = 0.99           # ... and no outcome at 99c or more when it FIRST entered the pool (checked once,
@@ -182,7 +183,7 @@ ELECTION = re.compile(r"\b(election|elected|primary|runoff|referendum|mayoral|go
 CONTINUES = re.compile(r"\b(continues?|remains?|stays?|still|holds?|keeps?)\b", re.I)
 NEGATED = re.compile(r"\bwill there be no\b|\bno (new|next)\b", re.I)
 
-# The approved factual changes (final.md section 6, items 3-5). A company's own year-end list is
+# The factual changes in the approved open-list proposal (2026-11-13). A company's own year-end list is
 # compiled from its own data and revealed on one day: not a public count (Google's Year in Search is
 # the case the Justice Department charged). The words of a scripted, scheduled speech or a produced
 # video are written before they are said: not a public speech (a White House teleprompter operator
@@ -541,9 +542,9 @@ def group_of(kind):
 
 
 # The word rules. Each is (kind or exclusion reason, regex) on "<event title> || <first question>",
-# checked in order; the first match files the event. Ported from the proposal's filing (p02_kinds.py,
-# p03_profile.py) with the review's corrections (final.md section 2): joke markets out; picks by one
-# leader or a small body are personnel picks, not votes; Google's lists go to the dated place; a
+# checked in order; the first match files the event. Ported from the proposal's own filing of the pool,
+# with the review's corrections in the approved open-list proposal (2026-11-13): joke markets out; picks
+# by one leader or a small body are personnel picks, not votes; Google's lists go to the dated place; a
 # "ceasefire continues through" market is filed by the strike that would end it; and no default kind.
 # On the Nov 13 pool they agree with the proposal's hand-checked filing on all but a few dozen of 1,087
 # events; the ones they cannot place go to the model or a person.
@@ -728,10 +729,11 @@ def event_text(title, question=""):
 
 def open_exclusion(title, question=""):
     """Why the open pool leaves an event out by its words, or None. The
-    reasons follow final.md's "Left out" table: embargoed releases, joke
-    markets and unscripted public speech, live public votes, games, prices,
-    public counts and rankings, elections and votes, ground taken in a war
-    (it builds up in public), nature and disease. A dated answer of a kind
+    reasons follow the "Left out" table of the approved open-list proposal
+    (2026-11-13): embargoed releases, joke markets and unscripted public
+    speech, live public votes, games, prices, public counts and rankings,
+    elections and votes, ground taken in a war (it builds up in public),
+    nature and disease. A dated answer of a kind
     the dated place takes, and a pick by one leader or a small body, are not
     left out (file_event places them)."""
     t = event_text(title, question)
@@ -970,12 +972,12 @@ DECIDER_ALIASES = {
                         "the president of the united states", "potus"}),
 }
 
-# Stories one piece of news settles that the title rules cannot join (final.md's hand-checked merges,
-# p03_profile.py MERGE, with the Israel x Hamas ceasefire split from Israel x Iran as final/f01_pool.py
-# does). Groups that are one news thread rather than one story are not here (invasions of different
-# Latin American countries, Greenland's purchase and its invasion, two carriers, Starship's separate
-# milestones, two Hormuz agreements, two crypto reserves, separate maths problems): one piece of news
-# would not settle them all. {event id: story key}; a person keeps this.
+# Stories one piece of news settles that the title rules cannot join (the hand-checked merges in the
+# approved open-list proposal (2026-11-13), with the Israel x Hamas ceasefire split from Israel x Iran,
+# as the proposal's pool does). Groups that are one news thread rather than one story are not here
+# (invasions of different Latin American countries, Greenland's purchase and its invasion, two carriers,
+# Starship's separate milestones, two Hormuz agreements, two crypto reserves, separate maths problems): one
+# piece of news would not settle them all. {event id: story key}; a person keeps this.
 STORY_MERGES = {eid: key for key, ids in (
     ("trump leaves office", ("74050", "34349", "73969", "73176")),
     ("modi out", ("79221", "1162367")),
@@ -1019,13 +1021,15 @@ STORY_MERGES = {eid: key for key, ids in (
 # ── 5. headlines: step words, leaks, odds, sources, copies ───────────────────
 
 # A story goes on the model's shortlist when a new headline has one of these (yes or no, never a count,
-# so heavy coverage never crowds out a quiet story). final/f02_shortlist.py.
+# so heavy coverage never crowds out a quiet story), as the approved open-list proposal (2026-11-13)
+# builds its shortlist.
 STEP_WORDS = _R(r"\b(prepar\w*|weigh\w*|consider\w*|shortlist\w*|finalists?|screen[- ]tests?|talks|negotiat\w*|"
                 r"launch\w*|oust\w*|plans? to|planning|discuss\w*|narrow\w*|offer\w*|bid|deploy\w*|order(s|ed)?|"
                 r"draft\w*|sources say|people familiar|officials say|reportedly|exclusive|mainnet|TGE|airdrop|"
                 r"filing|files for|to announce|could be announced|set to)\b")
-# A step reported through a leak ranks before one the deciders announced (final.md section 3): a leak
-# shows the group holds the answer loosely. The code decides this, never the model.
+# A step reported through a leak ranks before one the deciders announced (the five places of the
+# approved open-list proposal (2026-11-13)): a leak shows the group holds the answer loosely. The code
+# decides this, never the model.
 LEAK_WORDS = _R(r"sources? say|: sources|people familiar|officials say|said to|reportedly|reports? says?|"
                 r"bloomberg reports|exclusive|: report\b")
 # Headlines that report odds or come from betting sites never reach the model. A percentage counts as

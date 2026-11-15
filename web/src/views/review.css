@@ -1,0 +1,287 @@
+/* The owner's review page (#/review): plain, in the site's type and tokens.
+   Sections under hairlines, rows under hairlines, no boxes and no colour
+   except the critical red for a warning or an error. */
+
+.rv {
+  display: grid;
+  align-content: start;
+  padding-block: 20px 40px;
+}
+
+.rv > * {
+  max-width: 900px;
+}
+
+.rv-title {
+  font-size: var(--fs-h1);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin-bottom: 14px;
+}
+
+.rv-sec {
+  display: grid;
+  gap: 10px;
+  padding-block: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.rv-h {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.rv-line {
+  font-size: var(--fs-ui);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* a run's summary may be long: it wraps, unlike the other facts on its line */
+.rv-line > .rv-wrap {
+  white-space: normal;
+}
+
+.rv-muted {
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.rv-warn,
+.rv-error {
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--c-critical);
+}
+
+.rv-apply {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+}
+
+/* the queue and the requests: one item per hairline */
+.rv-list,
+.rv-cands,
+.rv-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rv-list {
+  display: grid;
+}
+
+.rv-item {
+  display: grid;
+  gap: 6px;
+  padding-block: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.rv-item:first-child {
+  padding-top: 2px;
+  border-top: 0;
+}
+
+.rv-q {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+
+.rv-sub {
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.rv-why {
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.rv-a {
+  font-weight: 500;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.rv-a:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--text-3);
+  text-underline-offset: 3px;
+}
+
+/* a candidate headline: the headline on the left, its buttons or its decision on the right */
+.rv-cands {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.rv-cand {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 16px;
+  font-size: var(--fs-ui);
+  line-height: 1.45;
+}
+
+.rv-cand > .rv-error {
+  grid-column: 1 / -1;
+}
+
+.rv-cand-do {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.rv-src {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.rv-decided {
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+.rv-decided b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rv-elsewhere {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* fields */
+.rv-unlock {
+  display: grid;
+  gap: 10px;
+  max-width: 360px;
+  padding-top: 4px;
+}
+
+.rv-field {
+  display: grid;
+  gap: 4px;
+}
+
+.rv-field input {
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  font-size: var(--fs-ui);
+  color: var(--text);
+  color-scheme: inherit;
+}
+
+.rv-name {
+  max-width: 320px;
+}
+
+.rv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* markers and watched markets: one row each */
+.rv-rows {
+  display: grid;
+}
+
+.rv-row {
+  display: grid;
+  grid-template-columns: 100px 150px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 14px;
+  padding-block: 7px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-ui);
+}
+
+.rv-row-watch {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.rv-row:first-child {
+  border-top: 0;
+}
+
+.rv-row[data-gone] .rv-label {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+
+.rv-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rv-row-do {
+  justify-self: end;
+}
+
+/* a quiet text button (the Watchlist's, which this page may load without) */
+.rv .cl-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.rv .cl-link:hover:not(:disabled) {
+  color: var(--text);
+  text-decoration: underline;
+  text-decoration-color: var(--text-3);
+  text-underline-offset: 3px;
+}
+
+.rv-foot {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 640px) {
+  .rv-cand {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rv-cand-do {
+    justify-content: flex-start;
+  }
+
+  .rv-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .rv-row-watch {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}

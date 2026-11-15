@@ -11,8 +11,9 @@ export interface MarketEvent {
 }
 
 /**
- * A timeline marker added on the page (by hand for now, by a model later).
- * Not saved yet: it lasts until the page reloads, until the database exists.
+ * A timeline marker added on the page: by a visitor ("manual"), or later by a
+ * model ("ai"). Kept by the site's API (lib/api.ts) and shown to everyone; with
+ * no API, the local dev server keeps them in memory until the page reloads.
  * `t` follows the time convention above. Markers from markets.json
  * `importantDates` arrive in timeline.events.
  */
@@ -21,6 +22,8 @@ export interface AddedEvent {
   t: number;
   label: string;
   source: "manual" | "ai";
+  /** when it was added (epoch seconds, UTC); absent on the dev server's in-memory markers */
+  created_at?: number;
 }
 
 export interface MarketIndexEntry {
@@ -188,10 +191,15 @@ export interface ClosedPick {
   group?: 1 | 2 | 3;
   /** the "who would know first" sentence of the open card the market was on, when it was on one */
   who_knows?: string;
+  /** how many visitors watched its open card (as of the run that last checked the day); absent at 0 */
+  watchers?: number;
 }
 
 export interface ClosedDay {
   day: string;
+  /** when the day was counted (ISO UTC); on the day itself, the counts are partial ("so far", "by 04:17"). Absent in
+   * files from before it was kept: the file's generated_at stands in */
+  counted_at?: string;
   closed_markets: number;
   /** left after the filters (games, prices, weather, elections, public counts, nothing happened, ladders, same news) */
   candidates: number;

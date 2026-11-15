@@ -12,8 +12,7 @@ import { HOUR, clampDomain, fullDomainOf, sameDomain, type Domain, type SeriesKe
 import { ZOOM_MOD, useMedia, useThrottled } from "./hooks";
 import { ReplayEngine, useReplaySnapshot } from "./replay";
 import { ReplayBar } from "./ReplayBar";
-import { EVENTS_EDITABLE, EventsEditor, useAddedEvents, withAddedEvents } from "./events";
-import type { AddedEvent } from "../../types";
+import { EventsEditor, useAddedEvents, withAddedEvents, type AddedEvents } from "./events";
 import { TOGGLE_KEYS, readTimelineQuery, timelineQueryPatch, useQueryWriter, type TimelinePrefs } from "./urlState";
 import "./timeline.css";
 
@@ -54,30 +53,38 @@ export function TimelineView({ market }: { market: MarketData }) {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, [market.name]);
-  // markers added on the page join the ones from markets.json
+  // markers visitors added (lib/api.ts) join the ones from markets.json, inside the market's own span
   const added = useAddedEvents(market.name);
-  const merged = useMemo(() => withAddedEvents(market, added.events), [market, added.events]);
+  const bounds = useMemo(() => fullDomainOf(market.timeline), [market]);
+  const merged = useMemo(() => withAddedEvents(market, added.events, bounds), [market, added.events, bounds]);
   return (
     <TimelineInner
       key={`${market.name}:${gen}`}
       market={merged}
       fixedEvents={market.timeline.events}
-      added={added.events}
-      saveAdded={added.save}
+      added={added}
+      bounds={bounds}
     />
   );
 }
+
+/**
+ * The Events control: with the API, once it has answered for this market;
+ * without one, only on the local dev server (markers kept in memory). Hidden
+ * while the API is down or doesn't list the market.
+ */
+const showEditor = (a: AddedEvents) => a.status === "ready" || (a.status === "off" && import.meta.env.DEV);
 
 function TimelineInner({
   market,
   fixedEvents,
   added,
-  saveAdded,
+  bounds,
 }: {
   market: MarketData;
   fixedEvents: MarketData["timeline"]["events"];
-  added: AddedEvent[];
-  saveAdded: (events: AddedEvent[]) => Promise<void>;
+  added: AddedEvents;
+  bounds: readonly [number, number];
 }) {
   const tl = market.timeline;
   const ranges = tl.timeRanges;
@@ -336,7 +343,7 @@ function TimelineInner({
                 Reset zoom
               </button>
             </div>
-            {EVENTS_EDITABLE && <EventsEditor fixed={fixedEvents} added={added} save={saveAdded} playhead={() => replay.t} />}
+            {showEditor(added) && <EventsEditor fixed={fixedEvents} api={added} bounds={bounds} playhead={() => replay.t} />}
             <CopyLink beforeCopy={flushQuery} />
           </div>
         </div>

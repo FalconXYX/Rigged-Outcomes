@@ -7,9 +7,9 @@ Offline tests for the shared vocabulary of the closed and the open list
 
 Covers the embargo rule (all 15 embargoed events of the closed list's old
 replay, Oct 31 - Nov 12, and nothing else of its 201; none of the seven
-featured cases), the filing of the review's corrected examples (final.md
-section 2), the dated place, the odds and betting headline filter, step and
-leak words, source ranks, the word-for-word copy check, the card sentences
+featured cases), the filing of the review's corrected examples (the
+approved open-list proposal (2026-11-13)), the dated place, the odds and
+betting headline filter, step and leak words, source ranks, the word-for-word copy check, the card sentences
 (the proposal's own five cards; no sentence ever says "bet"), and that
 watchlist.upsets still uses the same rules.
 """
@@ -23,7 +23,7 @@ from watchlist import kinds as K  # noqa: E402
 from watchlist import upsets as up  # noqa: E402
 
 # The closed list's old replay: one (question, event title) per event, the 201 events that closed
-# Oct 31 - Nov 12, 2026 (scratchpad proposal/testset.json, built by proposal/s01_closed_set.py).
+# Oct 31 - Nov 12, 2026 (the test set of the approved open-list proposal (2026-11-13)).
 REPLAY_EVENTS = [
     ("Will \"Wild Horse Nine\" score at least 92 on the Rotten Tomatoes Tomatometer?",
      "\"Wild Horse Nine\" Rotten Tomatoes Score?"),
@@ -742,7 +742,8 @@ def test_headline_must_name_the_story():
 
 def test_story_merges_and_deciders():
     assert K.STORY_MERGES["1367877"] == K.STORY_MERGES["1353337"] == "next nvidia ceo"
-    # final.md correction 1: the Israel x Hamas ceasefire is not the Israel x Iran story
+    # a correction in the approved open-list proposal (2026-11-13): the Israel x Hamas ceasefire is not the
+    # Israel x Iran story
     assert "57057" not in K.STORY_MERGES and "711714" not in K.STORY_MERGES
     al = K.DECIDER_ALIASES["trump"]
     assert {"the president", "donald trump", "the white house"} <= al

@@ -737,6 +737,16 @@ def save_review(conn, story, headline_key, decision, headline=None, by="person",
                       int(at) if at is not None else now_epoch()))
 
 
+def delete_review(conn, story, headline_key, by=None):
+    """Remove a person's decision on the open list's queue (the review page
+    took it back), only one recorded as made `by` when given; the headline
+    is then awaiting a decision again. True when one was removed."""
+    with transaction(conn):
+        cur = conn.execute("DELETE FROM open_reviews WHERE story = ? AND headline_key = ?"
+                           + (" AND decided_by = ?" if by else ""), (story, headline_key) + ((by,) if by else ()))
+    return cur.rowcount > 0
+
+
 def open_reviews(conn):
     """{story: {headline key: {"decision", "headline", "decided_by", "decided_at"}}}: every decision a person made."""
     out = {}

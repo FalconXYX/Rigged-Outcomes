@@ -833,9 +833,10 @@ function ChartBody({ tl, view, vis, domain, fitDomain, full, pinned, onPin, onDo
 
           {/* events: dashed hairline from the label to the baseline */}
           <g className="tl-events" aria-hidden>
-            {chips.map((c) => (
+            {/* keyed by place as well as time: two markers can share a time */}
+            {chips.map((c, i) => (
               <line
-                key={c.e.t}
+                key={`${c.e.t}-${i}`}
                 data-t={c.e.t}
                 className="tl-event-line"
                 x1={Math.round(c.x) + 0.5}
@@ -937,10 +938,10 @@ function ChartBody({ tl, view, vis, domain, fitDomain, full, pinned, onPin, onDo
 
           {/* event labels: plain small text on a surface knockout */}
           <g className="tl-events-labels" aria-hidden>
-            {chips.map((c) => {
+            {chips.map((c, i) => {
               const y = c.row === 0 ? -mT + 16 : 4 + c.row * 20 + 8;
               return (
-                <text key={c.e.t} data-t={c.e.t} className="tl-event-label" x={c.cx} y={y} textAnchor="middle" dominantBaseline="central">
+                <text key={`${c.e.t}-${i}`} data-t={c.e.t} className="tl-event-label" x={c.cx} y={y} textAnchor="middle" dominantBaseline="central">
                   {c.e.label}
                 </text>
               );

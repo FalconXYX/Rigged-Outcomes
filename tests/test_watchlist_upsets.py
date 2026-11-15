@@ -11,10 +11,13 @@ election keyword, markets settled by the same news, and the day's list
 counted once, checked or under one reason. And the approved factual changes
 (2026-11-13): embargoed releases dropped before any model call, a company's
 year-end list and a scripted speech's words checked, the "On the open list
-from" link to the open list, and --since.
+from" link to the open list, --since, the watch counts (--watched), and
+partial days (counted_at; one left partial is counted again the next run).
 """
+import json
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -278,6 +281,78 @@ def test_open_listed_markets_get_a_verdict_and_the_shared_words():
     p = up.pick(listed, None, [], {"verdict": "not a case", "what_happened": "", "surprise": "no", "who_knew_first": "",
                                     "public_signals": "none", "reason": ""}, "2026-11-09", words)
     assert p["on_open_list_from"] == "2026-11-09" and p["kind"] == "merger_acquisition" and p["group"] == 1
+
+
+def test_watched_open_cards_carry_their_watchers():
+    # --watched (the daily job's work.json): the pick whose open card visitors watch carries the count; the
+    # others, and a watched card's pick at 0, carry none
+    conn = store.connect(":memory:")
+    card = {"id": "huang-out", "place": "new step", "label": "new", "listed_since": "2026-11-09",
+            "event_ids": ["e9"], "slugs": ["ev-e9"]}
+    store.save_open_day(conn, "2026-11-09", "updated", "2026-11-09T04:00:00Z", [card])
+    huang = _market("h", "Jensen Huang announced resignation or removal by November 12, 2026?",
+                    "Jensen Huang out as Nvidia CEO?", "e9")
+    other = _market("o", "Will Project1 launch a token by November 12, 2026?", "Project1 token launch", "w1")
+
+    def checks(ms, conn, client=None):
+        return {m["conditionId"]: {"verdict": "weak", "what_happened": "", "surprise": "yes", "who_knew_first": "",
+                                   "public_signals": "none", "reason": ""} for m in ms}
+    with tempfile.TemporaryDirectory() as tmp:
+        work = os.path.join(tmp, "work.json")
+        with open(work, "w") as f:
+            json.dump({"watched": [{"story": "huang-out", "count": 4}, {"story": "gone", "count": 9}]}, f)
+        watched = up.load_watched(work)
+        assert watched == {"huang-out": 4, "gone": 9}
+        assert up.load_watched(os.path.join(tmp, "missing.json")) == {}
+        with _Patch(ai__label_markets=lambda kept, conn=None, **k: {}, judge__check_markets=checks):
+            d = up.run_day(to_epoch("2026-11-12T00:00:00Z"), [huang, other], conn, watched=watched)
+            shown = {p["condition_id"]: p for p in d["picks"]}
+            assert shown["h"]["watchers"] == 4 and "watchers" not in shown["o"]
+            d = up.run_day(to_epoch("2026-11-12T00:00:00Z"), [huang, other], conn, watched={"huang-out": 0})
+            assert all("watchers" not in p for p in d["picks"])
+            d = up.run_day(to_epoch("2026-11-12T00:00:00Z"), [huang, other], conn)
+            assert all("watchers" not in p for p in d["picks"])
+    assert up.watcher_count(None, ["e9"], {"huang-out": 2}) == 0 and up.watcher_count(conn, ["nope"], watched) == 0
+
+
+def test_partial_days_say_so_and_are_finished_later():
+    # each recomputed day carries counted_at; a kept day counted before it was over (its next run failed) is
+    # counted again by the next run, oldest first, and a file from before counted_at reads its generated_at
+    seen = []
+    saved = (up.net.install, up.net.closed_markets, up.run_day)
+
+    def run_day(day_ts, markets, conn, client=None, watched=None):
+        seen.append(up.iso(day_ts)[:10])
+        return {"day": up.iso(day_ts)[:10], "closed_markets": 0, "candidates": 0, "checked": 0, "verdicts": {},
+                "dropped": {}, "picks": []}
+    up.net.install, up.net.closed_markets, up.run_day = (lambda: None), (lambda since, now, min_volume=0: []), run_day
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "closed.json")
+            day = lambda d: {"day": d, "closed_markets": 1, "candidates": 0, "checked": 0, "verdicts": {},  # noqa: E731
+                             "dropped": {}, "picks": []}
+            # tonight's file: every day counted at 06:09 on Nov 14, so only Nov 14 is partial
+            with open(out, "w") as f:
+                json.dump({"generated_at": "2026-11-14T06:09:00+00:00", "partial_day": "2026-11-14",
+                           "days": [day("2026-11-14"), day("2026-11-13"), day("2026-11-12")]}, f)
+            assert up.partial(day("2026-11-14"), "2026-11-14T06:09:00+00:00")
+            assert not up.partial(day("2026-11-13"), "2026-11-14T06:09:00+00:00")
+            assert not up.partial(day("2026-11-13")) and not up.partial({"day": "x", "counted_at": "2026-11-14"})
+            # Nov 15's run fails; Nov 16's run, with --days 2, counts Nov 14 again too, oldest first
+            doc = up.build(days=2, now=to_epoch("2026-11-16T04:20:00Z"), conn=store.connect(":memory:"), out_path=out)
+            assert seen == ["2026-11-14", "2026-11-15", "2026-11-16"], seen
+            got = {d["day"]: d for d in doc["days"]}
+            assert all(got[d]["counted_at"] == "2026-11-16T04:20:00+00:00" for d in seen)
+            assert "counted_at" not in got["2026-11-13"] and not up.partial(got["2026-11-13"], doc["generated_at"])
+            assert up.partial(got["2026-11-16"]) and not up.partial(got["2026-11-15"])
+            # the next day's run is back to the last 2 days; a partial day older than the kept days is left
+            seen.clear()
+            up.build(days=2, now=to_epoch("2026-11-17T04:20:00Z"), conn=store.connect(":memory:"), out_path=out)
+            assert seen == ["2026-11-16", "2026-11-17"], seen
+            assert up.unfinished_since({"2026-10-01": day("2026-10-01")}, "2026-10-01T05:00:00+00:00",
+                                       to_epoch("2026-11-17T00:00:00Z"), 14) is None
+    finally:
+        up.net.install, up.net.closed_markets, up.run_day = saved
 
 
 if __name__ == "__main__":

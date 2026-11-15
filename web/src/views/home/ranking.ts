@@ -65,8 +65,8 @@ export const isDefaultView = (sort: SortKey, f: MarketFilters) => sort === DEFAU
 
 /* ── Sort ────────────────────────────────────────────────────────────────── */
 
-/** "How suspicious": flagged wallets' share of the winnings, else their share of whale capital. */
-const suspicion = (m: MarketIndexEntry): number | null => m.flaggedWinningsPct ?? m.pctSuspicious;
+/** "How suspicious": the Flagged capital figure the cards show (flagged accounts' share of whale capital). */
+const suspicion = (m: MarketIndexEntry): number | null => m.pctSuspicious;
 
 /** The number a market is ranked by under `key`; null sorts last (and never under the default). */
 function sortValue(m: MarketIndexEntry, key: SortKey): number | null {

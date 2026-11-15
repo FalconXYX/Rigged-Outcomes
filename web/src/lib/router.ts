@@ -6,6 +6,7 @@ import { useSyncExternalStore } from "react";
 //   #/m/:name/:view        market, view = "timeline" | "traders"
 //   #/watchlist            open markets to watch, and closed ones that look
 //                          like someone knew (#/closed, its old name, redirects here)
+//   #/review               the owner's review page (linked from nowhere)
 // Every route may carry a query string (`#/m/usiran?range=Leadup&pin=0x…`)
 // that views use for shareable state; see useQuery / setQuery.
 
@@ -16,6 +17,7 @@ export type Route =
   | { page: "home"; query: Query }
   | { page: "market"; name: string; view: MarketView; query: Query }
   | { page: "watchlist"; query: Query }
+  | { page: "review"; query: Query }
   | { page: "notfound"; path: string; query: Query };
 
 function currentPath() {
@@ -46,6 +48,7 @@ export function parseRoute(path: string): Route {
   const parts = pathname.split("/").filter(Boolean).map(decodeSegment);
   if (parts.length === 0) return { page: "home", query };
   if ((parts[0] === "watchlist" || parts[0] === "closed") && parts.length === 1) return { page: "watchlist", query };
+  if (parts[0] === "review" && parts.length === 1) return { page: "review", query };
   if (parts[0] === "m" && parts[1]) {
     const view = parts[2] ?? "timeline";
     if ((view === "timeline" || view === "traders") && parts.length <= 3) {
@@ -55,15 +58,18 @@ export function parseRoute(path: string): Route {
   return { page: "notfound", path, query };
 }
 
-// `history.replaceState` does not fire hashchange, so query updates notify
-// subscribers through a custom event on window.
+// `history.replaceState` / `pushState` do not fire hashchange, so query
+// updates notify subscribers through a custom event on window; Back and
+// Forward over a pushed entry arrive as popstate.
 const ROUTE_EVENT = "rigged:routechange";
 
 function subscribe(cb: () => void) {
   window.addEventListener("hashchange", cb);
+  window.addEventListener("popstate", cb);
   window.addEventListener(ROUTE_EVENT, cb);
   return () => {
     window.removeEventListener("hashchange", cb);
+    window.removeEventListener("popstate", cb);
     window.removeEventListener(ROUTE_EVENT, cb);
   };
 }
@@ -85,12 +91,10 @@ function buildQuery(q: Query): string {
   return s ? `?${s}` : "";
 }
 
-/**
- * Merge `patch` into the current query (a `null`/"" value removes the key).
- * Replaces the history entry by default so zooming/pinning doesn't pile up
- * Back-button stops; pass `{ push: true }` for navigation-like changes.
- */
-export function setQuery(patch: Record<string, string | null | undefined>, { push = false } = {}) {
+type QueryPatch = Record<string, string | null | undefined>;
+
+/** The current hash with `patch` merged into its query (a `null`/"" value removes the key). */
+function patchedHash(patch: QueryPatch): string {
   const path = currentPath();
   const qIndex = path.indexOf("?");
   const pathname = qIndex === -1 ? path : path.slice(0, qIndex);
@@ -99,7 +103,16 @@ export function setQuery(patch: Record<string, string | null | undefined>, { pus
     if (v == null || v === "") delete q[k];
     else q[k] = v;
   }
-  const next = `#${pathname}${buildQuery(q)}`;
+  return `#${pathname}${buildQuery(q)}`;
+}
+
+/**
+ * Merge `patch` into the current query (a `null`/"" value removes the key).
+ * Replaces the history entry by default so zooming/pinning doesn't pile up
+ * Back-button stops; pass `{ push: true }` for navigation-like changes.
+ */
+export function setQuery(patch: QueryPatch, { push = false } = {}) {
+  const next = patchedHash(patch);
   if (next === window.location.hash) return;
   if (push) {
     window.location.hash = next.slice(1);
@@ -107,6 +120,27 @@ export function setQuery(patch: Record<string, string | null | undefined>, { pus
     window.history.replaceState(window.history.state, "", next);
     window.dispatchEvent(new Event(ROUTE_EVENT));
   }
+}
+
+/**
+ * Open a Watchlist sheet (`?open=key`) as a new history entry, so the
+ * browser's Back closes it. The entry is tagged with the key, which tells
+ * closeSheet it can step back instead of writing a new URL.
+ */
+export function openSheet(key: string) {
+  const next = patchedHash({ open: key });
+  if (next === window.location.hash) return;
+  window.history.pushState({ ...window.history.state, roSheet: key }, "", next);
+  window.dispatchEvent(new Event(ROUTE_EVENT));
+}
+
+/**
+ * Close the sheet `key`: back to the entry it was opened from when openSheet
+ * pushed it; otherwise (it came open from a link) replace the URL with `patch`.
+ */
+export function closeSheet(key: string, patch: QueryPatch) {
+  if (window.history.state?.roSheet === key) window.history.back();
+  else setQuery(patch);
 }
 
 /**

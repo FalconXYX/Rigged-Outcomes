@@ -1,5 +1,6 @@
-# Python dependencies for the analysis pipeline and the deploy workflow
-# (.github/workflows/deploy.yml installs exactly this).
+# Python dependencies for the analysis pipeline. The workflows install
+# requirements.lock instead: the same packages at the tested versions, each
+# with its hash (pip install --require-hashes -r requirements.lock).
 #
 #   pip install -r requirements.txt
 #

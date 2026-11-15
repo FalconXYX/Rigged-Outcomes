@@ -19,7 +19,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data", "watchlist")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
 DEMO_DIR = os.path.join(DATA_DIR, "demo")
-DB_PATH = os.path.join(DATA_DIR, "watchlist.db")
+# WATCHLIST_DB points every module at another store (a test copy, say); WATCHLIST_JOB_DIR moves the files the
+# daily job's steps leave for each other (work.json, the results, the state stamps; watchlist.sync, .state)
+DB_PATH = os.environ.get("WATCHLIST_DB") or os.path.join(DATA_DIR, "watchlist.db")
+JOB_DIR = os.environ.get("WATCHLIST_JOB_DIR") or DATA_DIR
+SITE_DATA_DIR = os.path.join(ROOT, "web", "public", "data")
 
 DAY = 86_400
 

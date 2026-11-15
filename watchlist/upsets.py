@@ -42,15 +42,23 @@ For each UTC day, every market that closed that day:
    weather and the embargo still leave it out, so the open list's readers
    find its verdict here. Every pick carries the shared vocabulary's kind
    and group (watchlist.kinds.file_event) and, when it was on an open card,
-   that card's "who would know first" sentence.
+   that card's "who would know first" sentence. A market visitors watch is
+   one on an open card (the site lets them watch only those), so it is
+   always checked and shown too; with --watched, its pick carries how many
+   watch that card ("watchers", left out at 0), as counted when the day
+   was last recomputed.
 
 Writes web/public/data/closed.json (the Watchlist page's Recently closed
 section), keeping the
 last KEEP_DAYS days, after every day so a stalled run keeps what it did.
+Each day says when it was counted (counted_at, the run's time): a day
+counted before it was over is a partial count, and the site says where it
+stops ("by 04:17"). A run also counts again every kept day still partial,
+oldest first, so a day whose next run failed is finished by the one after.
 AI labels and checks are cached in data/watchlist/, so a re-run only asks
 about markets it has not checked.
 
-    python3 -m watchlist.upsets [--days 7 | --since 2026-10-30] [--out PATH]
+    python3 -m watchlist.upsets [--days 7 | --since 2026-10-30] [--out PATH] [--watched work.json]
 """
 import argparse
 import json
@@ -61,7 +69,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from watchlist import ai, filters, judge, kinds, net, store
-from watchlist.common import DAY, iso, log, now_epoch, to_epoch
+from watchlist.common import DAY, day_str, iso, log, now_epoch, to_epoch
 # The word rules both lists share live in watchlist.kinds (one vocabulary for the closed and the open
 # list, 2026-11-13): the embargo, public counts, mention markets, nature, the election keyword,
 # "continues through". candidates() applies them through kinds.closed_exclusion; the old names stay
@@ -260,11 +268,12 @@ def vocabulary(market, conn=None, folded=()):
     return out
 
 
-def pick(market, label, folded, check, open_since=None, words=None):
+def pick(market, label, folded, check, open_since=None, words=None, watchers=0):
     """One shown market as closed.json has it. folded: the markets counted
     under it (later dates, same news), listed by question. open_since: the
     first day its market was on an "Open now" card, or None (the key is
-    then left out). words: vocabulary() (kind, group, who_knows)."""
+    then left out). words: vocabulary() (kind, group, who_knows).
+    watchers: how many visitors watch its open card (left out at 0)."""
     ev = filters.event_of(market)
     out = {
         "condition_id": market["conditionId"],
@@ -290,11 +299,35 @@ def pick(market, label, folded, check, open_since=None, words=None):
     for k, v in (words or {}).items():
         if v is not None:
             out[k] = v
+    if watchers and int(watchers) > 0:
+        out["watchers"] = int(watchers)
     return out
 
 
-def run_day(day_ts, markets, conn, client=None):
-    """The closed list of one UTC day from the markets that closed in it."""
+def watcher_count(conn, idents, watched):
+    """How many visitors watch the "Open now" card these markets were last
+    on (watched: {card id: count}, from the job's work.json), or 0."""
+    if not watched or conn is None:
+        return 0
+    card = store.open_listed_card(conn, idents)
+    return max(0, int(watched.get(card["id"]) or 0)) if card else 0
+
+
+def load_watched(path):
+    """{open card id: watchers} from the job's work.json ({"watched": [{"story", "count"}]}); {} when the
+    file is missing or unreadable (the API was not configured or did not answer)."""
+    try:
+        with open(path) as f:
+            rows = json.load(f).get("watched") or []
+    except (OSError, ValueError, AttributeError) as e:
+        log(f"  ! no watch counts ({path}: {type(e).__name__}); picks carry none")
+        return {}
+    return {str(r["story"]): int(r.get("count") or 0) for r in rows if isinstance(r, dict) and r.get("story")}
+
+
+def run_day(day_ts, markets, conn, client=None, watched=None):
+    """The closed list of one UTC day from the markets that closed in it.
+    watched: {open card id: watchers} (load_watched)."""
     cands, dropped = candidates(markets, conn)
     checks = judge.check_markets([m for m, _, _ in cands], conn, client) if cands else {}
     picks = []
@@ -304,8 +337,9 @@ def run_day(day_ts, markets, conn, client=None):
             dropped["could not be checked"] += 1
             continue
         # on an open card if this market or one counted under it was (same event, same news)
-        picks.append(pick(m, lab, folded, c, store.open_listed_since(conn, open_idents([m] + folded)),
-                          vocabulary(m, conn, folded)))
+        idents = open_idents([m] + folded)
+        picks.append(pick(m, lab, folded, c, store.open_listed_since(conn, idents), vocabulary(m, conn, folded),
+                          watcher_count(conn, idents, watched)))
     shown = choose(picks)
     verdicts = Counter(p["verdict"] for p in picks)
     day = datetime.fromtimestamp(day_ts, timezone.utc).strftime("%Y-%m-%d")
@@ -315,14 +349,41 @@ def run_day(day_ts, markets, conn, client=None):
             "verdicts": dict(verdicts), "dropped": dict(dropped.most_common()), "picks": shown}
 
 
-def build(days=1, now=None, conn=None, out_path=OUT_PATH, keep_days=KEEP_DAYS, client=None):
-    """Recompute the last `days` UTC days (today so far included) and merge
-    them into out_path, keeping the last keep_days days."""
+def partial(day, generated_at=None):
+    """True when a day of the file was counted before it was over: its counted_at (or, in a file from before
+    days carried one, the file's generated_at) falls on the day itself."""
+    counted = to_epoch(day.get("counted_at") or generated_at)
+    start = to_epoch(f"{day.get('day')}T00:00:00Z") if re.fullmatch(r"\d{4}-\d\d-\d\d", str(day.get("day"))) else None
+    return counted is not None and start is not None and counted < start + DAY
+
+
+def unfinished_since(old, generated_at, today, keep_days):
+    """The oldest kept day before today that is still a partial count (its next run failed or stalled), as
+    epoch seconds, or None."""
+    days = [to_epoch(f"{d}T00:00:00Z") for d, v in old.items() if partial(v, generated_at)]
+    days = [t for t in days if t is not None and today - keep_days * DAY < t < today]
+    return min(days) if days else None
+
+
+def build(days=1, now=None, conn=None, out_path=OUT_PATH, keep_days=KEEP_DAYS, client=None, watched=None):
+    """Recompute the last `days` UTC days (today so far included), and any
+    older kept day still counted only in part, and merge them into
+    out_path, keeping the last keep_days days. watched: {open card id:
+    watchers} for the recomputed days' picks."""
     now = now or now_epoch()
     conn = conn or store.default_conn()
     net.install()
     today = now - now % DAY
     since = today - (days - 1) * DAY
+    old, generated = {}, None
+    if os.path.exists(out_path):
+        with open(out_path) as f:
+            prev = json.load(f)
+        old, generated = {d["day"]: d for d in prev.get("days", [])}, prev.get("generated_at")
+    behind = unfinished_since(old, generated, today, keep_days)
+    if behind is not None and behind < since:
+        log(f"closed list: {day_str(behind, is_day=False)} was counted before it was over; counting again from it")
+        since = behind
     t0 = time.time()
     closed = net.closed_markets(since, now, min_volume=MIN_VOLUME)
     log(f"closed list: {len(closed)} markets of ${MIN_VOLUME:,}+ closed since {iso(since)}")
@@ -330,13 +391,12 @@ def build(days=1, now=None, conn=None, out_path=OUT_PATH, keep_days=KEEP_DAYS, c
     for m in closed:
         ts = to_epoch(m.get("closedTime"))
         by_day[ts - ts % DAY].append(m)
-    old = {}
-    if os.path.exists(out_path):
-        with open(out_path) as f:
-            old = {d["day"]: d for d in json.load(f).get("days", [])}
     doc = None
-    for day_ts in range(today, since - 1, -DAY):     # written after every day, so a stalled run keeps the rest
-        d = run_day(day_ts, by_day.get(day_ts, []), conn, client)
+    # oldest first, written after every day: a stalled run keeps the rest, and an older partial day is finished
+    # before today's partial one is counted
+    for day_ts in range(since, today + 1, DAY):
+        d = run_day(day_ts, by_day.get(day_ts, []), conn, client, watched)
+        d["counted_at"] = iso(now)
         old[d["day"]] = d
         doc = _write(old, now, today, out_path, keep_days)
     log(f"closed list -> {out_path} ({time.time() - t0:.0f} s)")
@@ -376,6 +436,8 @@ def main(argv=None):
                     help="recompute every UTC day from this one to today instead (the file keeps them all)")
     ap.add_argument("--out", default=OUT_PATH)
     ap.add_argument("--keep-days", type=int, default=KEEP_DAYS, help=f"days kept in the file (default {KEEP_DAYS})")
+    ap.add_argument("--watched", metavar="PATH", default=None,
+                    help="the daily job's work.json: picks whose open card visitors watch carry the count")
     args = ap.parse_args(argv)
     now, days, keep_days = now_epoch(), args.days, args.keep_days
     if args.since:
@@ -383,7 +445,8 @@ def main(argv=None):
         if days is None:
             ap.error(f"--since {args.since!r}: not a YYYY-MM-DD day up to today")
         keep_days = max(keep_days, days)
-    build(days=days, now=now, out_path=args.out, keep_days=keep_days)
+    build(days=days, now=now, out_path=args.out, keep_days=keep_days,
+          watched=load_watched(args.watched) if args.watched else None)
 
 
 if __name__ == "__main__":

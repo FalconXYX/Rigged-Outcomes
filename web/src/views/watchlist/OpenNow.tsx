@@ -1,9 +1,10 @@
 import { type CSSProperties } from "react";
 import type { OpenCard, OpenData, OpenDay } from "../../types";
 import { fmtDate, fmtDay, fmtInt } from "../../lib/format";
-import { setQuery, useQuery } from "../../lib/router";
+import { closeSheet, openSheet, useQuery } from "../../lib/router";
 import { Chevron, MoreButton, NewsList, colsFor, hhmm, ms, plural } from "./shared";
 import { Sheet } from "./Sheet";
+import { WatchControl } from "./controls";
 
 // "Open now": markets still open where a few people will know the answer
 // before the public, and this week's news shows them moving toward it
@@ -144,7 +145,7 @@ function knowers(s: string): string | null {
 
 function Card({ c, day, open }: { c: OpenCard; day: string; open: boolean }) {
   const k = openKey(c);
-  const show = () => setQuery({ open: k });
+  const show = () => openSheet(k);
   const names = knowers(c.who_knows);
   return (
     <article
@@ -174,8 +175,10 @@ const norm = (q: string) => q.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 /**
  * The open card's sheet: what Polymarket asks (its own question for the
  * nearest date, the other dates), why this kind is watched, the other side
- * if a headline denies the step, the news from the last 14 days as a plain
- * list, whether the answer is reported out yet, and since when it is listed.
+ * if a headline denies the step, the recent news as a plain list (the last
+ * 14 days, plus every step, which on a gone-quiet card can be up to 21 days
+ * old), whether the answer is reported out yet; then since when it is listed,
+ * Polymarket and "Watch this market" (controls.tsx) on a line of its own.
  */
 function Details({ c, day }: { c: OpenCard; day: string }) {
   const k = openKey(c);
@@ -183,7 +186,7 @@ function Details({ c, day }: { c: OpenCard; day: string }) {
   const same = norm(c.polymarket.question) === norm(c.question);
   const done = c.timing.kind === "dated" ? "the answer is out" : "it has happened";
   return (
-    <Sheet label={c.question} returnTo={moreId(k)} onClose={() => setQuery({ open: null })}>
+    <Sheet label={c.question} returnTo={moreId(k)} onClose={() => closeSheet(k, { open: null })}>
       <section className="wl-sheet-sec" aria-labelledby={`op-asks-${k}`}>
         <h4 className="cl-h wl-sheet-first" id={`op-asks-${k}`}>
           Polymarket asks
@@ -211,7 +214,7 @@ function Details({ c, day }: { c: OpenCard; day: string }) {
       )}
       <section className="wl-sheet-sec" aria-labelledby={`op-news-${k}`}>
         <h4 className="cl-h" id={`op-news-${k}`}>
-          News from the last 14 days
+          Recent news
         </h4>
         {c.headlines.length ? (
           <NewsList items={c.headlines} mark={(h) => (h.on_card ? "On the card" : h.step ? "Step" : null)} />
@@ -229,6 +232,7 @@ function Details({ c, day }: { c: OpenCard; day: string }) {
         <a className="cl-link cl-ext" href={c.polymarket.url} target="_blank" rel="noopener noreferrer">
           Polymarket <span aria-hidden>↗</span>
         </a>
+        <WatchControl card={c} />
       </div>
     </Sheet>
   );
@@ -363,7 +367,17 @@ export function OpenNow({ data, cols }: { data: OpenData | null | undefined; col
     ? ` ${plural(waiting, n ? "more market" : "market")} with a new step ${waiting === 1 ? "is" : "are"} waiting for a person's check.`
     : "";
   const never = "The list is never padded with markets that have no step in the news.";
-  const few = `${n === 1 ? "Only 1 market qualifies" : `Only ${fmtInt(n)} markets qualify`}${stale ? "" : " today"}.${wait} ${never}`;
+  // "today" only while the list's UTC day lasts; after midnight it names its day ("3 new on Nov 13")
+  const current = !!day && !stale && day.day === new Date().toISOString().slice(0, 10);
+  const onItsDay = day && !stale && !current ? ` on ${onDay(day.day, day.day)}` : "";
+  const few = stale
+    ? `${n === 1 ? "Only 1 market qualifies" : `Only ${fmtInt(n)} markets qualify`}.${wait} ${never}`
+    : current
+      ? `${n === 1 ? "Only 1 market qualifies" : `Only ${fmtInt(n)} markets qualify`} today.${wait} ${never}`
+      : `${n === 1 ? "Only 1 market qualified" : `Only ${fmtInt(n)} markets qualified`}${onItsDay}.${wait} ${never}`;
+  const none = stale
+    ? `No market qualifies.${wait} ${never}`
+    : `No market ${current ? "qualifies today" : `qualified${onItsDay}`}.${wait} ${never}`;
   return (
     <section className="wl-open" aria-labelledby="wl-open-title">
       <header className="cl-top">
@@ -389,7 +403,7 @@ export function OpenNow({ data, cols }: { data: OpenData | null | undefined; col
               </li>
               {!stale && (
                 <li>
-                  <b>{fmtInt(day.new_today)}</b> new today
+                  <b>{fmtInt(day.new_today)}</b> new {current ? "today" : `on ${onDay(day.day, day.day)}`}
                 </li>
               )}
               {stale ? (
@@ -415,7 +429,7 @@ export function OpenNow({ data, cols }: { data: OpenData | null | undefined; col
       {data === null || (data && !day) ? (
         <Ghosts cols={cols} msg="Open markets worth watching will appear here." />
       ) : day && n === 0 ? (
-        <Ghosts cols={cols} msg={`No market qualifies${stale ? "" : " today"}.${wait} ${never}`} />
+        <Ghosts cols={cols} msg={none} />
       ) : (
         day && (
           <div className="cl-cards" data-many={n >= 4 || undefined} style={{ "--cols": colsFor(n) } as CSSProperties}>

@@ -27,7 +27,7 @@ import "./review.css";
 // then the open list's step headlines that wait for a decision, the closed
 // markets sent to the main page (a read-only list), the markers visitors
 // added and the site's watchlist. A decision is applied by the next run: the
-// hourly one, or at once with "Apply decisions now" when the Worker holds a
+// daily one (about 04:17 UTC), or at once with "Apply decisions now" when the Worker holds a
 // GitHub token. Plain on purpose, in the site's type and tokens.
 
 /** a daily run older than this has missed one (they run once a day) */
@@ -175,7 +175,7 @@ function Signed({ data, reload, onForget }: { data: Overview; reload: () => void
 
 const APPLY_NOTE =
   "Starts the update job (about 10–20 minutes): it applies your decisions and adds the markets sent to the main page; " +
-  "the site updates when it finishes. Otherwise the next hourly run does it.";
+  "the site updates when it finishes. Otherwise the next daily run (about 04:17 UTC) does it.";
 
 const RUN_NAME: Record<JobRun["mode"], string> = { full: "Last daily run", apply: "Last apply run", local: "Last run from the Mac" };
 
@@ -253,7 +253,7 @@ function Status({ data, onForget }: { data: Overview; onForget: () => void }) {
           <p className="rv-muted">{applied ?? APPLY_NOTE}</p>
         </div>
       ) : (
-        <p className="rv-muted">Decisions are applied by the next hourly run.</p>
+        <p className="rv-muted">Decisions are applied by the next daily run (about 04:17 UTC).</p>
       )}
       <p className="rv-line">
         <button type="button" className="cl-link" onClick={onForget}>

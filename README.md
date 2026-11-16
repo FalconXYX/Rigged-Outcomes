@@ -274,7 +274,7 @@ The static site gets a small backend for what visitors do, and the two Watchlist
 |---|---|---|
 | API | `worker/` (a Cloudflare Worker with one D1 database) | Timeline markers visitors add, the site's one watchlist ("Watch" puts a market on it for everyone), the markets sent with "Add to main page" (added by the job's next run, no review), the owner's decisions and the job's reports; a Turnstile bot check and daily limits on every visitor write. See `worker/README.md` |
 | Review page | `#/review` (linked from nowhere) | The owner's page: the Open now queue, the markets sent to the main page, markers, the watchlist, the last runs, a pause switch |
-| Job | `.github/workflows/watchlist.yml` | At about 04:17 UTC: the owner's decisions, both lists, the markets sent to the main page, then the deploy. Every hour its light `apply` mode applies decisions and adds markets (with nothing waiting it ends in seconds, with no deploy) |
+| Job | `.github/workflows/watchlist.yml` | At about 04:17 UTC: the owner's decisions, both lists, the markets sent to the main page, then the deploy. |
 | Job state | the `watchlist-data` branch (`watchlist/state.py`) | The job's memory between runs (the store tables the lists use, as JSONL), the published lists, a backup of the API's database |
 | API client | `watchlist/sync.py` | The job's side of the API: fetch the work, save decisions, send the review queue and the catalog of what visitors may write to, report the run |
 | Adding a market | `add_market.py` | A market sent with "Add to main page": names its page from the slug, checks it on Polymarket, adds it to `markets.json`, downloads, cleans and scores it |

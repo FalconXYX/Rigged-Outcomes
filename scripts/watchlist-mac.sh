@@ -8,7 +8,7 @@
 #   scripts/watchlist-mac.sh
 #
 # It never adds a market sent to the main page (that commits to main, and this must not touch your working
-# tree; the hourly GitHub run adds them): it says how many wait, and how to add them. It reads the Gemini key and the API settings
+# tree; the daily GitHub run adds them): it says how many wait, and how to add them. It reads the Gemini key and the API settings
 # the way the Python modules do (the environment, else ../.env); it never prints them. A log of the run goes
 # to data/watchlist/logs/mac-<UTC stamp>.log.
 set -euo pipefail
@@ -75,7 +75,7 @@ except (OSError, ValueError):
     w = {}
 print(sum(1 for r in w.get("requests") or [] if r.get("status") == "approved"))')
 if [ "${waiting:-0}" != "0" ]; then
-  echo "$waiting market(s) sent with \"Add to main page\" wait. This script never adds markets; the hourly GitHub"
+  echo "$waiting market(s) sent with \"Add to main page\" wait. This script never adds markets; the daily GitHub"
   echo "run adds them (or now: gh workflow run watchlist.yml -f mode=apply), or add one by hand with"
   echo "python3 add_market.py --condition-id ... --slug ... --outcome ..., then commit and push."
 fi

@@ -1,13 +1,13 @@
 # The daily Watchlist lists, the site owner's decisions and the markets visitors add to the main page
 # (docs/DEPLOY.md). One full run a day that builds and publishes this site's own data, and a light "apply" run
-# every hour (and when the owner asks for one from the review page, or from the Actions tab).
+# only when the owner asks for one (the review page, or the Actions tab).
 #
 #   full   the owner's decisions, the Recently closed list (the last 2 UTC days), the Open now list, the
 #          markets sent with "Add to main page", then the site's deploy
 #   apply  only the owner's decisions (the reviewed day rebuilt) and the markets to add, then the deploy. It
 #          first asks the API whether anything waits (the `check` job, one curl call): with nothing, the run
 #          ends there in seconds and deploys nothing. It also stands aside while another run of this
-#          workflow is going or waiting (the next hourly run picks the work up), so it never takes the place
+#          workflow is going or waiting (the next daily run picks the work up), so it never takes the place
 #          of a daily run waiting for the `watchlist` concurrency group
 #
 # The job's memory lives on the `watchlist-data` branch (watchlist/state.py): it is pulled first and pushed
@@ -26,7 +26,6 @@ name: Watchlist
 on:
   schedule:
     - cron: "17 4 * * *"            # full: about 04:17 UTC; off the hour (GitHub delays on-the-hour schedules)
-    - cron: "47 * * * *"            # apply: every hour at about :47 (MODE and the check job test this exact string)
   workflow_dispatch:
     inputs:
       mode:
@@ -42,12 +41,12 @@ permissions:
 # work, saving the state with the API's backup, the report), never to the installs or the list steps.
 env:
   PYTHONUNBUFFERED: "1"
-  MODE: ${{ inputs.mode || github.event.schedule == '47 * * * *' && 'apply' || 'full' }}
+  MODE: ${{ inputs.mode || 'full' }}
   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
 jobs:
   check:
-    if: inputs.mode == 'apply' || github.event.schedule == '47 * * * *'
+    if: inputs.mode == 'apply'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -66,7 +65,7 @@ jobs:
           busy=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow watchlist.yml --limit 20 --json databaseId,status \
             --jq "[.[] | select(.status != \"completed\" and .databaseId != $GITHUB_RUN_ID)] | length") || busy=0
           if [ "${busy:-0}" != 0 ]; then
-            echo "Another Watchlist run is going or waiting; the next hourly run takes up what waits."
+            echo "Another Watchlist run is going or waiting; the next daily run takes up what waits."
             exit 0
           fi
           if [ -z "$API_URL" ] || [ -z "$WATCHLIST_JOB_TOKEN" ]; then

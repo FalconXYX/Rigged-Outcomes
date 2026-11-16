@@ -186,7 +186,7 @@ const DISPATCHES_A_DAY = 30;
  * token for this repository with Actions: read and write). At most one every 2 minutes and 30 a day.
  */
 export async function apply({ req, env }: Ctx): Promise<Response> {
-  if (!env.GITHUB_DISPATCH_TOKEN) fail(501, "no_dispatch", "No GITHUB_DISPATCH_TOKEN is set, so the next hourly run applies decisions.");
+  if (!env.GITHUB_DISPATCH_TOKEN) fail(501, "no_dispatch", "No GITHUB_DISPATCH_TOKEN is set, so the next daily run applies decisions.");
   const at = now();
   const prev = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'last_dispatch'").first<string>("value")) ?? "0";
   const claimed = await env.DB.prepare(

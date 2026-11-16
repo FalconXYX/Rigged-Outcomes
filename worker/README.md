@@ -1,6 +1,6 @@
 # Rigged Outcomes API (`worker/`)
 
-A small Cloudflare Worker (`rigged-outcomes-api`) with one D1 database (`rigged-outcomes`), both on Cloudflare's free plan with no card. It keeps what the static site can't: timeline markers that visitors add, the site's one watchlist ("Watch" puts an open market on it and "Stop watching" takes it off, for everyone), the markets sent with "Add to main page" (recorded as approved at once; the job's next run, hourly, adds each under a page name made from its slug), the owner's decisions on the open list's review queue, and the job's reports. The site works exactly as before when no API is configured or the API is down.
+A small Cloudflare Worker (`rigged-outcomes-api`) with one D1 database (`rigged-outcomes`), both on Cloudflare's free plan with no card. It keeps what the static site can't: timeline markers that visitors add, the site's one watchlist ("Watch" puts an open market on it and "Stop watching" takes it off, for everyone), the markets sent with "Add to main page" (recorded as approved at once; the job's next run, daily, adds each under a page name made from its slug), the owner's decisions on the open list's review queue, and the job's reports. The site works exactly as before when no API is configured or the API is down.
 
 Setting it up on the real account (creating the database, secrets, Turnstile, deploying) is in [`docs/DEPLOY.md`](../docs/DEPLOY.md). Nothing in this folder deploys anything by itself.
 

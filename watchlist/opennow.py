@@ -146,7 +146,21 @@ for decisions made on the site's review page). A naming request the
 model gives up on only stops the naming: the unnamed stories wait for the
 next run.
 
-    python3 -m watchlist.opennow [--out PATH] [--db PATH] [--workers 3]
+A run has a time budget (--budget-minutes, BUDGET_MINUTES by default), so
+it ends on its own before the daily job's step timeout kills it (on
+2026-11-15 the step was killed while a slow step model was still reading).
+No step reading starts in its last OUT_RESERVE_MINUTES, which are kept for
+the "already out" readings, and no model request at all starts once it is
+spent. Every reading is stored as it arrives, so nothing read is lost and
+the next run does not ask it again; the stories left unread wait for the
+next run (their step-word headlines count as new then), and the day's list
+is made from what was read: a headline only the first step reading reached
+counts as one reading's (a card needs both, or a person's approval), and a
+story whose "already out" check was not reached is not listed. Such a day
+is still "updated". No news search starts once the budget is spent either:
+the news then counts as down for the day, as above.
+
+    python3 -m watchlist.opennow [--out PATH] [--db PATH] [--workers 3] [--budget-minutes 180]
     python3 -m watchlist.opennow --review
     python3 -m watchlist.opennow --approve 1 3.2 [--reject 2]
     python3 -m watchlist.opennow --dry-run [--skip-news] [--report PATH]
@@ -186,6 +200,7 @@ NEWS_LIMIT = 100            # headlines a search returns at most (Google's feed 
 NEWS_TRIES = 3
 NEWS_DOWN_AFTER = 20        # searches failing in a row (every try) that mean the news feed is down for the day
 NEWS_DOWN = "news searches failed (the news feed could not be reached)"
+NEWS_LATE = "the news searches ran past the run's time budget"
 NEWS_MAX_AGE_HOURS = 3      # a search this recent is not asked again (a re-run after a stall)
 REVIEW_NEWS_HOURS = 30      # --approve / --reject rebuild the reviewed day from searches up to this old at its run time
 FIRST_RUN_HOURS = 24        # "new since the last run" when there is no earlier run
@@ -193,6 +208,8 @@ STEP_HEADLINES = 8          # step-word headlines one step reading is given, at 
 STEP_WORKERS = 3            # step readings asked at once (the step model takes 20-90 s an answer)
 STEP_DOWN_AFTER = 3         # step readings failing in a row that mean the step model is down for the day
 STEP_INTERVAL = 2.5         # seconds between step requests' starts
+BUDGET_MINUTES = 180        # a run's time budget (--budget-minutes): the daily job's step stops it at 210
+OUT_RESERVE_MINUTES = 20    # its last minutes, kept for the "already out" readings: no step reading starts in them
 OUT_HEADLINES = 40          # the "already out" question reads every on-topic headline of the last 7 days, up to this
 RULES_CHARS = 500           # the start of the market's rules
 MODEL_TRIES = 4             # tries of one request while the model is busy, BUSY_WAIT apart
@@ -204,6 +221,9 @@ STATUS_UPDATED, STATUS_STALE = "updated", "not updated today"
 STEP, NOT_STEP, CARD_OK = "step", "not a step", "card approved"   # a person's decisions (store.open_reviews)
 SHOWN, ONE_READING, DATED_SHOWN = "on the list", "one reading", "dated, on the list"   # why a story is in the queue
 AWAITING = "awaiting approval"     # STEPS_BY "person": the readings marked a step; it shows once a person approves it
+# what a run out of time leaves for the next one (Run.left), as its log line names it
+LEFT_FOR = (("names", "to name"), ("steps 1", "first step reading(s)"), ("steps 2", "second step reading(s)"),
+            ("already out", "\"already out\" check(s)"))
 
 
 # ── pool ─────────────────────────────────────────────────────────────────────
@@ -900,13 +920,21 @@ class ModelDown(Exception):
         self.final = final
 
 
-def ask(client, prompt, schema, sleep=time.sleep, wait=K.BUSY_WAIT, tries=MODEL_TRIES):
+class OutOfTime(Exception):
+    """The run's time budget is spent: this request was not asked (again). Not
+    the model failing: what it was for waits for the next run."""
+
+
+def ask(client, prompt, schema, sleep=time.sleep, wait=K.BUSY_WAIT, tries=MODEL_TRIES, stop=None):
     """(parsed JSON, model) for one request. A busy model (503 and the like,
     after the client's own retry) is asked again `wait` seconds later, up to
     `tries` times; then ModelDown. A refused request (a plain 4xx) raises
-    ai.GeminiError with refused=True at once."""
+    ai.GeminiError with refused=True at once. stop: when it returns True
+    (the run's time is spent), OutOfTime instead of the first or another try."""
     last = None
     for attempt in range(tries):
+        if stop is not None and stop():
+            raise OutOfTime("the run's time budget is spent")
         try:
             text, model, _ = client.generate(prompt, schema)
             return ai.parse_json(text), model
@@ -922,6 +950,8 @@ def ask(client, prompt, schema, sleep=time.sleep, wait=K.BUSY_WAIT, tries=MODEL_
         except ValueError as e:
             last = e                                   # not JSON: ask again
         if attempt + 1 < tries:
+            if stop is not None and stop():
+                raise OutOfTime(f"the run's time budget is spent ({ai._scrub(str(last))[:120]})")
             pause = random.uniform(*wait)
             log(f"  model busy or unusable ({ai._scrub(str(last))[:120]}); asking again in {pause:.0f} s")
             sleep(pause)
@@ -1770,12 +1800,15 @@ class Run:
     """One day's list. Every network and model call goes through the
     arguments (walk, search, client for names and "already out",
     step_client for the step reading; step_client defaults to client), so
-    tests run it offline."""
+    tests run it offline. budget: the run's time (a common.Budget, None for
+    no limit; the module docstring)."""
 
     def __init__(self, conn, now=None, client=None, walk=None, search=None, dry_run=False, skip_news=False,
                  news_cache=None, news_limit=None, sleep=time.sleep, step_client=None, workers=STEP_WORKERS,
-                 read_steps=True):
+                 read_steps=True, budget=None):
         self.conn = conn
+        self.budget = budget
+        self.left = defaultdict(set)     # stories the run's time did not reach, by reading (read next run)
         self.read_new_steps = read_steps  # False: a person's rebuild; the steps come from the stored readings
         self.now = int(now or now_epoch())
         self.today = _day(self.now)
@@ -1805,6 +1838,28 @@ class Run:
         self.reveal = {}
         self.since = self.now - FIRST_RUN_HOURS * 3600
         self.short = {}
+
+    def spent(self, reserve_minutes=0):
+        """Less than reserve_minutes of the run's time budget are left: no new request of that kind starts."""
+        return self.budget is not None and self.budget.expired(reserve_minutes * 60)
+
+    def steps_spent(self):
+        """No step reading starts: the rest of the run's time is kept for the "already out" readings."""
+        return self.spent(OUT_RESERVE_MINUTES)
+
+    def leave(self, what, keys):
+        """Stories the run's time did not reach for one reading (what): they are read next run."""
+        with self._lock:
+            self.left[what].update(keys)
+
+    def left_line(self):
+        """The one line a run out of time logs: how many stories wait for the next run, and for what."""
+        n = len(set().union(*self.left.values()))
+        parts = ", ".join(f"{len(self.left[w])} {what}" for w, what in LEFT_FOR if self.left.get(w))
+        minutes = (getattr(self.budget, "seconds", None) or 0) / 60
+        return (f"  out of time: the {minutes:.0f}-minute budget ran out, so {n} "
+                f"{'story was' if n == 1 else 'stories were'} left for the next run ({parts}); "
+                f"today's list is made from what was read")
 
     # 1-3: pool, stories, names
     def build_pool(self):
@@ -1886,7 +1941,8 @@ class Run:
         (and the kind of an unfiled one); save them for each of its events.
         The first group goes first, then the rest by a fixed order, so a run
         the model gives up on part way names the stories that matter most.
-        That does not cost the day: unnamed stories wait for the next run."""
+        That does not cost the day: unnamed stories wait for the next run,
+        as they do when the run's time is spent."""
         self.share_names()
         todo = sorted((s for s in self.stories.values() if s["names"] is None and s["source"] != "person"),
                       key=lambda s: (s["group"], s["place"] != "any_day", s["kind"] is None, s["key"]))
@@ -1902,8 +1958,14 @@ class Run:
             chunk = todo[i:i + NAMES_PER_REQUEST]
             items = [{"id": f"n{j}", "title": s["head"]["title"], "kind": s["kind"],
                       "questions": name_questions(s["head"])} for j, s in enumerate(chunk)]
+            if self.spent():                                   # out of time: the rest wait for the next run
+                self.leave("names", [s["key"] for s in todo[i:]])
+                break
             try:
-                parsed, model = ask(self.client, names_prompt(items), NAMES_SCHEMA, self.sleep)
+                parsed, model = ask(self.client, names_prompt(items), NAMES_SCHEMA, self.sleep, stop=self.spent)
+            except OutOfTime:
+                self.leave("names", [s["key"] for s in todo[i:]])
+                break
             except ModelDown as e:
                 self.names_down = str(e)
                 log(f"  ! model down while naming ({e}); unnamed stories wait for the next run")
@@ -1948,7 +2010,8 @@ class Run:
         self.label_client = client
         try:
             labels = ai.label_markets(heads, conn=self.conn, events=events, today=self.today, client=client,
-                                      budget=Budget(0) if self.dry_run else None, save=not self.dry_run, workers=1)
+                                      budget=Budget(0) if self.dry_run else self.budget, save=not self.dry_run,
+                                      workers=1)
         except ai.GeminiError as e:
             log(f"  ! reveal dates unavailable ({e}); no dated place today")
             labels = {}
@@ -1989,13 +2052,18 @@ class Run:
         log(f"  news: {n_search} searches for {len(todo)} stories")
         # NEWS_DOWN_AFTER searches failing in a row (a cache hit or an answer resets the count) mean the feed
         # is down or refuses this machine: stop there, rather than wait out every try of every search (about
-        # 30 s each, over 11 hours for a whole day), and keep the last list as on a day the model is down
-        t0, done, failed, streak = time.time(), 0, 0, 0
+        # 30 s each, over 11 hours for a whole day), and keep the last list as on a day the model is down. So
+        # does running past the run's time budget: no list can be made on a part of the news
+        t0, done, failed, streak, late = time.time(), 0, 0, 0, False
         for s in todo:
             raw, complete = [], True
             for q in s["queries"]:
                 key = f"{q}|{news.build_query('', after, before).strip()}"
                 hs = self.news_cache.get(key, self.now)
+                if hs is None and self.spent():
+                    self.news_down = late = True
+                    complete = False
+                    break
                 if hs is None:
                     for attempt in range(NEWS_TRIES):
                         try:
@@ -2022,8 +2090,9 @@ class Run:
             if complete:
                 self.searched.add(s["key"])
             if self.news_down:
-                self.down = self.down or NEWS_DOWN
-                log(f"  ! {NEWS_DOWN}: {NEWS_DOWN_AFTER} searches in a row failed; no new cards today")
+                self.down = self.down or (NEWS_LATE if late else NEWS_DOWN)
+                log(f"  ! {NEWS_LATE}: {done} of {n_search} searches made; no new cards today" if late else
+                    f"  ! {NEWS_DOWN}: {NEWS_DOWN_AFTER} searches in a row failed; no new cards today")
                 break
         self.news_cache.save(self.now)
         self.counts["news searches"] = done
@@ -2073,9 +2142,11 @@ class Run:
 
     def seen_step_headlines(self):
         """This run's step-word headlines, as the next run's shortlist compares
-        them. A story whose step reading failed is left out, so its headlines
-        count as new at the next run and it is read then."""
-        return sorted(k + "\x1f" + _key(h) for k, s in self.stories.items() if k not in self.step_failed
+        them. A story whose step reading failed, or that the run's time did
+        not reach, is left out, so its headlines count as new at the next run
+        and it is read then."""
+        unread = self.step_failed | self.left["steps 1"]
+        return sorted(k + "\x1f" + _key(h) for k, s in self.stories.items() if k not in unread
                       for h in s.get("headlines") or [] if K.has_step_words(h["title"]))
 
     def ident(self, key):
@@ -2161,7 +2232,9 @@ class Run:
         request fails every try stays unread (its headlines count as new at
         the next run). STEP_DOWN_AFTER failures in a row, a refused key or a
         spent allowance mean the step model is down, and so does every job
-        failing: no new cards today."""
+        failing: no new cards today. Once the run's time for step readings is
+        spent (steps_spent) no reading starts and none is asked again: those
+        stories are left for the next run (Run.left), which is no failure."""
         if not jobs or self.down:
             return
         if self.dry_run:
@@ -2185,6 +2258,11 @@ class Run:
                                                           f" (all {len(jobs)} readings failed)")
                     log(f"  ! step model down ({self.down}): no new cards today")
 
+        def left(j):
+            self.leave(f"steps {j['run']}", [j["key"]])
+            with self._lock:
+                self.step_stats[f"reading {j['run']}: stories left for the next run (out of time)"] += 1
+
         def one(j):
             if self.down:
                 return
@@ -2193,12 +2271,18 @@ class Run:
             data = parsed = model = None
             try:
                 for _ in range(2):
+                    if self.steps_spent():
+                        raise OutOfTime("the run's time for step readings is spent")
                     with self._lock:
                         self.requests[f"steps {j['run']}"] += 1
-                    parsed, model = ask(self.step_client, prompt, STEP_SCHEMA, self.sleep, wait=K.STEP_BUSY_WAIT)
+                    parsed, model = ask(self.step_client, prompt, STEP_SCHEMA, self.sleep, wait=K.STEP_BUSY_WAIT,
+                                        stop=self.steps_spent)
                     data = check_steps(parsed, j["given"])
                     if data["answered"]:
                         break
+            except OutOfTime:
+                left(j)
+                return
             except ModelDown as e:
                 log(f"  ! step reading {j['run']} of {j['key']!r} failed every try ({ai._scrub(str(e))[:120]})")
                 failed(j, "the key was refused or no model is left today" if e.final else "the model was busy or down",
@@ -2245,13 +2329,14 @@ class Run:
         second of every reading that marked a step, then each named any-day
         story's verdicts (step_verdicts: today's readings and the last 21
         days')."""
-        named = [k for k in self.stories if self.step_readable(k)]
+        # the first group first, as with the names: a run its time cuts short has read the stories that matter most
+        named = sorted((k for k in self.stories if self.step_readable(k)), key=lambda k: self.stories[k]["group"])
         hist = {k: self.step_history(k) for k in named}
-        keys = [k for k in self.short if self.step_readable(k)] if self.read_new_steps else []
+        keys = [k for k in named if k in self.short] if self.read_new_steps else []
         jobs1 = self.step_jobs(keys, 1, hist)
         self.step_stats["shortlisted any-day stories"] = len(keys)
         self.step_stats["reading 1: stories to read"] = len(jobs1)
-        if jobs1 and not self.dry_run:
+        if jobs1 and not self.dry_run and not self.steps_spent():
             log(f"  steps: reading 1 of {len(jobs1)} stories on {getattr(self.step_client, 'models', ['?'])[0]}, "
                 f"{self.workers} at a time")
         self.read_steps(jobs1)
@@ -2259,7 +2344,7 @@ class Run:
             hist[k] = self.step_history(k)
         jobs2 = self.step_jobs(named, 2, hist) if self.read_new_steps else []
         self.step_stats["reading 2: stories to read"] = len(jobs2)
-        if jobs2 and not self.dry_run and not self.down:
+        if jobs2 and not self.dry_run and not self.down and not self.steps_spent():
             log(f"  steps: reading 2 (reversed order) of {len(jobs2)} stories")
         self.read_steps(jobs2)
         for k in {j["key"] for j in jobs2}:
@@ -2314,7 +2399,8 @@ class Run:
         """Ask the "already out" jobs, STORIES_PER_REQUEST to a request, and
         store each checked answer as it arrives (a stall loses nothing). A
         story the answer leaves out is asked once more; a refused request is
-        asked one story at a time. Stops at the first ModelDown."""
+        asked one story at a time. Stops at the first ModelDown, and once the
+        run's time is spent (the stories left are read at the next run)."""
         if not jobs or self.down:
             return
         if self.dry_run:
@@ -2325,11 +2411,17 @@ class Run:
         queue = [jobs[i:i + K.STORIES_PER_REQUEST] for i in range(0, len(jobs), K.STORIES_PER_REQUEST)]
         tries = Counter()
         while queue and not self.down:
+            if self.spent():
+                self.leave("already out", [j["key"] for c in queue for j in c])
+                return
             chunk = queue.pop(0)
             items = [self.item(self.stories[j["key"]], j["given"], f"s{i}") for i, j in enumerate(chunk)]
             self.requests[f"reading {chunk[0]['run']}"] += 1
             try:
-                parsed, model = ask(self.client, out_prompt(items), OUT_SCHEMA, self.sleep)
+                parsed, model = ask(self.client, out_prompt(items), OUT_SCHEMA, self.sleep, stop=self.spent)
+            except OutOfTime:
+                self.leave("already out", [j["key"] for c in [chunk] + queue for j in c])
+                return
             except ModelDown as e:
                 self.down = f"readings: {e}"
                 log(f"  ! model down ({e}): no new cards today")
@@ -2482,7 +2574,8 @@ class Run:
     def build(self, prev, prev_updated=None):
         """Steps 5-7: the step reading, then rounds of the list and its queue,
         with the stories on either read ("already out", twice) until they
-        hold still. Returns (picks, held, readings, queue)."""
+        hold still or the run's time is spent. Returns (picks, held,
+        readings, queue)."""
         self.reviews = store.open_reviews(self.conn)
         self.shortlist(prev_updated if prev_updated is not None else prev)
         self.read_all_steps()
@@ -2504,7 +2597,7 @@ class Run:
                 for k in {j["key"] for j in jobs}:
                     readings[k] = self.history(k)
                 fresh_jobs += jobs
-            if self.dry_run or not fresh_jobs:
+            if self.dry_run or not fresh_jobs or self.spent():
                 break
         picks, queue = self.lists(readings, prev_cards)
         held = self.rows(readings, provisional=True)[2]
@@ -2582,7 +2675,7 @@ APPROVAL_NOTES = {
 def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT_PATH, dry_run=False,
           skip_news=False, news_cache_path=NEWS_CACHE, news_max_age_hours=NEWS_MAX_AGE_HOURS, news_limit=None,
           report_path=None, sleep=time.sleep, step_client=None, workers=STEP_WORKERS, read_steps=True,
-          review_of=None):
+          review_of=None, budget=None):
     """One day's list: stored, and written to out_path (not in a dry run,
     which asks the model nothing and writes nothing but its report).
     client: names and "already out" (default open_client()); step_client:
@@ -2592,7 +2685,9 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
     review_of: the stored day a person's decisions rebuild; one the model
     was down for stays "not updated today", without new cards. A run the
     model is down for never replaces a list already updated the same day.
-    Returns the run's summary."""
+    budget: the run's time (a common.Budget, None for no limit): once it is
+    spent no new request starts and the list is made from what was read
+    (the module docstring); still "updated". Returns the run's summary."""
     conn = conn or store.default_conn()
     t0 = time.time()
     if dry_run:
@@ -2603,7 +2698,7 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
             make_step_client()
     r = Run(conn, now, client=names_client, walk=walk, search=search, dry_run=dry_run, skip_news=skip_news,
             news_cache=NewsCache(news_cache_path, news_max_age_hours), news_limit=news_limit, sleep=sleep,
-            step_client=steps_client, workers=workers, read_steps=read_steps)
+            step_client=steps_client, workers=workers, read_steps=read_steps, budget=budget)
     if review_of and review_of.get("status") != STATUS_UPDATED:
         r.down = "a rebuild of a day the model was down for: its last cards stay, none added"
     r.build_pool()
@@ -2616,6 +2711,9 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
     if r.news_down:
         r.last_headlines(prev)
     picks, held, readings, queue = r.build(prev, prev_updated)
+    left = {w: len(ks) for w, ks in r.left.items() if ks}
+    if left:
+        log(r.left_line())
     status = STATUS_UPDATED
     earlier = store.get_open_day(conn, r.today) if r.down and not dry_run else None
     kept = bool(earlier and earlier["status"] == STATUS_UPDATED)
@@ -2656,6 +2754,8 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
         "step_reading": dict(r.step_stats), "step_failed": sorted(r.step_failed),
         "requests": dict(r.requests), "would_ask": dict(r.would_ask), "model_down": r.down,
         "names_down": r.names_down, "news_down": r.news_down,
+        "out_of_time": {"budget_minutes": round((getattr(budget, "seconds", None) or 0) / 60, 1),
+                        "left_for_next_run": {w: sorted(ks) for w, ks in r.left.items() if ks}} if left else None,
         "client": {name: c.report() for name, c in clients.items()},
         "kept_earlier_list": _iso_z(earlier["run_at"]) if kept else None,
         "picks": [dict({"id": p["id"], "place": p["place"], "question": stories[p["id"]]["head"]["title"]},
@@ -2677,7 +2777,7 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
                 "counts": dict(r.counts), "requests": dict(r.requests), "model_down": r.down,
                 "names_down": r.names_down, "awaiting": awaiting, "steps_by": STEPS_BY,
                 "step_reading": dict(r.step_stats), "step_failed": sorted(r.step_failed),
-                "seen_step_headlines": r.seen_step_headlines()}
+                "left_for_next_run": left, "seen_step_headlines": r.seen_step_headlines()}
         store.save_open_day(conn, r.today, status, r.now, cards, version=PROMPT_VERSION, info=info)
         if out_path:
             write_json(open_doc(conn, r.now), out_path)
@@ -2781,8 +2881,8 @@ def rebuild_reviewed(conn, now=None, out_path=OUT_PATH, news_cache_path=NEWS_CAC
     REVIEW_NEWS_HOURS old, with no new step reading (the steps come from the
     stored readings and the decisions). What --approve and --reject do after
     recording, and what the daily job does with decisions made on the review
-    page. kw goes to daily() (report_path, workers, and the fakes tests
-    give). Returns daily()'s summary, or None when no list was made yet."""
+    page. kw goes to daily() (report_path, workers, budget, and the fakes
+    tests give). Returns daily()'s summary, or None when no list was made yet."""
     reviewed = latest_day(conn)
     if not reviewed:
         log("no open list has been made yet: nothing to rebuild")
@@ -3008,12 +3108,17 @@ def main(argv=None):
                          "dated answer: its card), then rebuild the reviewed list")
     ap.add_argument("--workers", type=int, default=STEP_WORKERS,
                     help=f"step readings asked at once (default {STEP_WORKERS})")
+    ap.add_argument("--budget-minutes", type=float, default=BUDGET_MINUTES,
+                    help=f"the run's time budget (default {BUDGET_MINUTES}; 0: none): no step reading starts in its "
+                         f"last {OUT_RESERVE_MINUTES} minutes and no model request once it is spent; the list is made "
+                         f"from what was read and the stories left are read at the next run")
     ap.add_argument("--consistency", metavar="DIR", default=None,
                     help="the consistency test of the step reading: read the whole shortlist twice (the second in "
                          "reverse order), write the agreement report and a blind grading sheet to DIR")
     ap.add_argument("--seed", default=None, help="seed of the grading sample (default: the day)")
     ap.add_argument("--sample", type=int, default=30, help="marked steps in the grading sample (default 30)")
     args = ap.parse_args(argv)
+    budget = Budget(args.budget_minutes * 60) if args.budget_minutes > 0 else None    # from the run's start
     conn = store.connect(args.db) if args.db else store.default_conn()
     now = to_epoch(args.now) if args.now else None
     age = args.news_max_age_hours
@@ -3037,12 +3142,13 @@ def main(argv=None):
         # the list the person reviewed is rebuilt, at its own run time and from its searches (not a new day's)
         summary = rebuild_reviewed(conn, now=now, out_path=args.out, news_cache_path=args.news_cache,
                                    news_max_age_hours=age, dry_run=args.dry_run, skip_news=args.skip_news,
-                                   news_limit=args.news_limit, report_path=args.report, workers=args.workers)
+                                   news_limit=args.news_limit, report_path=args.report, workers=args.workers,
+                                   budget=budget)
     else:
         summary = daily(conn=conn, now=now, out_path=args.out, dry_run=args.dry_run, skip_news=args.skip_news,
                         news_cache_path=args.news_cache,
                         news_max_age_hours=age if age is not None else NEWS_MAX_AGE_HOURS,
-                        news_limit=args.news_limit, report_path=args.report, workers=args.workers)
+                        news_limit=args.news_limit, report_path=args.report, workers=args.workers, budget=budget)
     if summary is None:
         return
     if args.dry_run:

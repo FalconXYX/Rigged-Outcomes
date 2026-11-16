@@ -94,7 +94,7 @@ jobs:
       group: watchlist                # never two writers of the state branch
       cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 355                # the step limits add up to 330; GitHub's own limit is 360
+    timeout-minutes: 355                # the step limits add up to 340; GitHub's own limit is 360
     outputs:
       publish: ${{ steps.publish.outputs.publish }}
     steps:
@@ -161,14 +161,17 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python3 -m watchlist.upsets --days 2 --watched data/watchlist/work.json
 
+      # The list stops itself at its 180-minute budget (no step reading starts in its last 20 minutes, which
+      # are kept for the "already out" readings), makes the day's list from what was read and leaves the rest
+      # for the next run; the 30 minutes to the step's timeout cover the requests still in flight then
       - name: Open now list
         id: open
         if: steps.pull.outcome == 'success' && env.MODE == 'full'
         continue-on-error: true
-        timeout-minutes: 200
+        timeout-minutes: 210
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python3 -m watchlist.opennow --report data/watchlist/open_report.json
+        run: python3 -m watchlist.opennow --budget-minutes 180 --report data/watchlist/open_report.json
 
       - name: Save the news cache
         if: always() && steps.pull.outcome == 'success' && hashFiles('data/watchlist/cache/open_news.json') != ''

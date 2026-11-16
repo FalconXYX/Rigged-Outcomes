@@ -23,9 +23,17 @@ story's reading failing, a day an answer comes out (held back), a re-run
 on the same news asking nothing (headlines over the cap are not new), a
 re-run while the model is down keeping the day's earlier list, every step
 reading refused counting as down, a person's rebuild of the reviewed day
-reading no new step, and the consistency test's files.
+reading no new step, the consistency test's files, and the run's time
+budget on a fake clock (no step reading starts in the time kept for
+"already out", which stops when the budget is spent; what was read is
+stored and kept, the list is made from it and the day is "updated"; the
+next run reads only what was left; a killed run keeps its readings; news
+past the budget keeps the last list; the workflow's step timeout leaves
+the budget room).
 """
+import contextlib
 import csv
+import io
 import json
 import os
 import re
@@ -35,7 +43,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from watchlist import ai, kinds as K, opennow as O, store  # noqa: E402
-from watchlist.common import DAY, to_epoch  # noqa: E402
+from watchlist.common import DAY, ROOT, Budget, to_epoch  # noqa: E402
 
 NOW = to_epoch("2026-11-13T04:00:00Z")
 SHIPPED_STEPS_BY = O.STEPS_BY
@@ -1238,6 +1246,216 @@ def test_consistency_files():
         # the daily cache is untouched by the test (names are kept)
         for v in (O.PROMPT_VERSION, O.OUT_VERSION):
             assert store.open_answer_history(conn, ROE_K, v) == []
+
+
+# ── the run's time budget (a fake clock: minutes pass only when the fake model or feed answers) ──
+
+class Clock:
+    """A fake clock for common.Budget."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+class SlowClient(FakeClient):
+    """FakeClient on a fake clock: a step reading takes step_minutes to answer, an "already out" request
+    out_minutes (the answer still comes: a request in flight when the budget runs out finishes)."""
+
+    def __init__(self, clock, step_minutes=0, out_minutes=0, **kw):
+        super().__init__(**kw)
+        self.clock, self.step_minutes, self.out_minutes = clock, step_minutes, out_minutes
+
+    def generate(self, prompt, schema=None):
+        if "Market question:" in prompt:
+            self.clock.t += self.step_minutes * 60
+        elif prompt.startswith(O.OUT_PROMPT):
+            self.clock.t += self.out_minutes * 60
+        return super().generate(prompt, schema)
+
+
+def _timed_run(conn, now, client, out, budget, search=fake_search):
+    """_run with a budget: (summary, the lines it logged)."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        s = O.daily(conn=conn, now=now, client=client, walk=lambda: EVENTS, search=search, out_path=out,
+                    news_cache_path=None, sleep=lambda s: None, workers=1, budget=budget)
+    return s, buf.getvalue().splitlines()
+
+
+def _asked(prompts):
+    """The market question of each step prompt, in the order asked."""
+    return [p.split("Market question: ", 1)[1].split("\n", 1)[0] for p in prompts]
+
+
+ROE_Q, ACME_Q, RUR_Q = (EVENTS[i]["markets"][0]["question"] for i in range(3))
+
+
+def test_ask_stops_once_the_time_is_spent():
+    # no request starts once the run's time is spent, and a busy model is not asked again after it
+    c = FakeClient()
+    try:
+        O.ask(c, "You read news headlines", None, sleep=lambda s: None, stop=lambda: True)
+        raise AssertionError("a request was asked after the time was spent")
+    except O.OutOfTime:
+        pass
+    assert c.prompts == []
+    busy, slept, spent = FakeClient(down=True), [], iter([False, True])
+    try:
+        O.ask(busy, "You read news headlines", None, sleep=slept.append, stop=lambda: next(spent))
+        raise AssertionError("a busy model was asked again after the time was spent")
+    except O.OutOfTime:
+        pass
+    assert len(busy.prompts) == 1 and slept == []
+    # Budget on a fake clock: a reserve is kept back
+    clock = Clock()
+    b = Budget(60 * 60, clock=clock)
+    clock.t = 39 * 60
+    assert not b.expired(20 * 60) and b.left() == 21 * 60
+    clock.t = 40 * 60
+    assert b.expired(20 * 60) and not b.expired() and b.seconds == 3600
+
+
+def test_the_budget_stops_new_step_readings():
+    # a slow step model (20 minutes an answer) and a 60-minute budget: no step reading starts in its last 20
+    # minutes, kept for "already out". Roe's and Acme's first readings are made and stored as they arrive;
+    # Ruritania's first reading and both second readings are left for the next run. A card needs both
+    # readings, so today only the dated card shows, and the day is still "updated"
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "open.json")
+        clock = Clock()
+        slow = SlowClient(clock, step_minutes=20)
+        s, lines = _timed_run(conn, NOW, slow, out, Budget(60 * 60, clock=clock))
+        assert s["status"] == "updated" and not s["model_down"] and not s["step_failed"], s["model_down"]
+        assert _asked(slow.steps_asked()) == [ROE_Q, ACME_Q] and s["requests"]["steps 1"] == 2, s["requests"]
+        assert "steps 2" not in s["requests"]
+        assert s["out_of_time"] == {"budget_minutes": 60.0, "left_for_next_run": {
+            "steps 1": [RUR_K], "steps 2": sorted([ROE_K, ACME_K])}}, s["out_of_time"]
+        st = s["step_reading"]
+        assert st["reading 1: stories read"] == 2 and st["reading 1: stories left for the next run (out of time)"] == 1
+        assert st["reading 2: stories left for the next run (out of time)"] == 2
+        # the readings made are in the store; the "already out" readings had the 20 minutes kept for them
+        for k in (ROE_K, ACME_K):
+            assert [r["run"] for r in store.open_answer_history(conn, k, O.PROMPT_VERSION)] == [1], k
+        assert store.open_answer_history(conn, RUR_K, O.PROMPT_VERSION) == []
+        assert len(slow.outs_asked()) == 2
+        day = json.load(open(out))["days"][0]
+        assert day["status"] == "updated" and [c["id"] for c in day["cards"]] == [TURNER_K], day["cards"]
+        assert [x for x in lines if "out of time" in x] == [
+            "  out of time: the 60-minute budget ran out, so 3 stories were left for the next run (1 first step "
+            "reading(s), 2 second step reading(s)); today's list is made from what was read"], lines
+        # Ruritania's headlines are not counted as seen, so the next day's shortlist has them again
+        info = store.get_open_day(conn, "2026-11-13")["info"]
+        assert not [x for x in info["seen_step_headlines"] if x.startswith(RUR_K + "\x1f")]
+        assert [x for x in info["seen_step_headlines"] if x.startswith(ACME_K + "\x1f")]
+        assert info["left_for_next_run"] == {"steps 1": 1, "steps 2": 2}
+
+        # the next day, with time to spare: Ruritania's first reading (left yesterday) and Roe's on its new
+        # headline; Acme's first reading is not asked again; every second reading is made; the cards show
+        again = SlowClient(Clock(), step_minutes=20)
+        s2, lines2 = _timed_run(conn, NOW + DAY, again, out, Budget(600 * 60, clock=again.clock))
+        assert s2["requests"]["steps 1"] == 2 and s2["requests"]["steps 2"] == 4, s2["requests"]
+        assert _asked(again.steps_asked())[:2] == [ROE_Q, RUR_Q]
+        assert s2["out_of_time"] is None and not [x for x in lines2 if "out of time" in x]
+        d2 = json.load(open(out))["days"][0]
+        assert d2["status"] == "updated" and {c["id"] for c in d2["cards"]} == {ROE_K, ACME_K, TURNER_K}, d2["cards"]
+        assert RUR_K in [h["id"] for h in s2["held_back"]]
+
+
+def test_a_killed_run_keeps_its_readings():
+    # every reading is stored as it arrives: a run killed during the step readings (the step's timeout) keeps
+    # the ones it made, and the next run does not ask them again
+    class Killed(BaseException):
+        pass
+
+    class KilledOnTheThird(FakeClient):
+        def generate(self, prompt, schema=None):
+            if "Market question:" in prompt and len(self.steps_asked()) == 2:
+                raise Killed()
+            return super().generate(prompt, schema)
+
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "open.json")
+        try:
+            _run(conn, NOW, KilledOnTheThird(), out)
+            raise AssertionError("the run was not killed")
+        except Killed:
+            pass
+        assert store.open_days(conn) == []                                  # no list was made ...
+        for k in (ROE_K, ACME_K):                                           # ... but the readings are kept
+            assert [r["run"] for r in store.open_answer_history(conn, k, O.PROMPT_VERSION)] == [1], k
+        again = FakeClient()
+        s = _run(conn, NOW + 3600, again, out)
+        assert s["requests"]["steps 1"] == 1 and s["requests"]["steps 2"] == 3, s["requests"]
+        assert _asked(again.steps_asked())[0] == RUR_Q
+        assert [c["id"] for c in json.load(open(out))["days"][0]["cards"]] == [ROE_K, ACME_K, TURNER_K]
+
+
+def test_the_budget_stops_already_out_too():
+    # the six step readings take 20 minutes each and an "already out" request 15, on a 130-minute budget:
+    # every step reading starts before the last 20 minutes, the first "already out" request runs in them,
+    # the second is left. A story both "already out" readings have not checked is not listed today
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "open.json")
+        clock = Clock()
+        slow = SlowClient(clock, step_minutes=20, out_minutes=15)
+        s, lines = _timed_run(conn, NOW, slow, out, Budget(130 * 60, clock=clock))
+        assert s["status"] == "updated" and not s["model_down"]
+        assert s["requests"]["steps 1"] == 3 and s["requests"]["steps 2"] == 3 and len(slow.outs_asked()) == 1
+        assert s["out_of_time"]["left_for_next_run"] == {"already out": sorted([ROE_K, ACME_K, RUR_K])}
+        assert [c["id"] for c in json.load(open(out))["days"][0]["cards"]] == [TURNER_K]
+        assert [x for x in lines if "out of time" in x] == [
+            "  out of time: the 130-minute budget ran out, so 3 stories were left for the next run (3 \"already "
+            "out\" check(s)); today's list is made from what was read"], lines
+        # a re-run reads only the second "already out" reading, and lists the cards
+        again = FakeClient()
+        _run(conn, NOW + 3600, again, out)
+        assert not again.steps_asked() and len(again.outs_asked()) == 1
+        assert [c["id"] for c in json.load(open(out))["days"][0]["cards"]] == [ROE_K, ACME_K, TURNER_K]
+
+
+def test_news_past_the_budget_keeps_the_last_list():
+    # a search takes a minute and the budget is 3: no list is made on part of the news. As on a day the feed
+    # is down, the last list's live cards stay, no model is asked after it, and the day is "not updated today"
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "open.json")
+        _run(conn, NOW, FakeClient(), out)
+        day1 = json.load(open(out))["days"][0]
+        clock, searched = Clock(), []
+
+        def slow_search(query, after=None, before=None, limit=None):
+            clock.t += 60
+            searched.append(query)
+            return fake_search(query, after, before, limit)
+
+        c = FakeClient()
+        s, lines = _timed_run(conn, NOW + DAY, c, out, Budget(3 * 60, clock=clock), slow_search)
+        assert len(searched) == 3 and s["news_down"] and s["model_down"] == O.NEWS_LATE, s["model_down"]
+        assert s["status"] == "not updated today" and not c.steps_asked() and not c.outs_asked()
+        assert any(x.startswith(f"  ! {O.NEWS_LATE}: 3 of ") for x in lines), lines
+        d2 = json.load(open(out))["days"][0]
+        assert d2["day"] == "2026-11-14" and [x["id"] for x in d2["cards"]] == [x["id"] for x in day1["cards"]]
+
+
+def test_the_workflow_gives_the_budget_room():
+    # the daily job passes a budget its Open now step's timeout leaves room for (the requests in flight when it
+    # runs out, then the list), and the job's own timeout fits every step's, under GitHub's 6 hours
+    with open(os.path.join(ROOT, ".github", "workflows", "watchlist.yml")) as f:
+        text = f.read()
+    step = text.split("- name: Open now list", 1)[1].split("- name:", 1)[0]
+    timeout = int(re.search(r"timeout-minutes: (\d+)", step).group(1))
+    budget = float(re.search(r"--budget-minutes (\d+(?:\.\d+)?)", step).group(1))
+    assert budget + O.OUT_RESERVE_MINUTES <= timeout and O.BUDGET_MINUTES + O.OUT_RESERVE_MINUTES <= timeout
+    job = text.split("\n  lists:\n", 1)[1].split("\n  deploy:\n", 1)[0]
+    job_timeout = int(re.search(r"^    timeout-minutes: (\d+)", job, re.M).group(1))
+    steps = [int(x) for x in re.findall(r"^        timeout-minutes: (\d+)", job, re.M)]
+    assert timeout in steps and sum(steps) + 10 <= job_timeout <= 360, (steps, job_timeout)
 
 
 # ── the daily job's entry points: the headline key, the rebuild, the news-down guard ──

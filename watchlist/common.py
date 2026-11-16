@@ -93,13 +93,15 @@ def now_epoch():
 class Budget:
     """A wall-clock allowance for resumable scripts (--budget-seconds): check
     `budget.expired()` between units of work and stop cleanly; the next run
-    resumes from the store. seconds=None never expires."""
+    resumes from the store. seconds=None never expires. clock: what tells
+    the time (a test's fake clock)."""
 
-    def __init__(self, seconds=None):
-        self.deadline = None if seconds is None else time.monotonic() + float(seconds)
+    def __init__(self, seconds=None, clock=time.monotonic):
+        self.seconds, self.clock = seconds, clock
+        self.deadline = None if seconds is None else clock() + float(seconds)
 
     def left(self):
-        return float("inf") if self.deadline is None else max(0.0, self.deadline - time.monotonic())
+        return float("inf") if self.deadline is None else max(0.0, self.deadline - self.clock())
 
     def expired(self, reserve=0.0):
         """True once less than `reserve` seconds remain."""

@@ -98,12 +98,12 @@ def get_net_profit(row):
     return max(0.0, payout - stake)
 
 
-def prepare_market(m):
+def prepare_market(m, data_dir="data"):
     """Load one market's clean CSV and compute everything the timeline and the
     ranking fields share: the whale threshold, the
     winner mask, the whale set (after the IQR time-outlier filter, with the
     per-whale profit) and the crowd. Mirrors VisualizeBetTiming.py."""
-    df = pd.read_csv(f"data/{m['output']}_clean.csv")
+    df = pd.read_csv(os.path.join(data_dir, f"{m['output']}_clean.csv"))
     # Raw ISO strings: the join key back to _insiders.csv (target_trade_time).
     df["first_trade_raw"] = df["first_trade"].astype(str)
     for col in ("first_trade", "last_trade"):
@@ -299,13 +299,13 @@ def categorize(row):
     return "normal"
 
 
-def load_insiders(m):
+def load_insiders(m, data_dir="data"):
     """One row per whale position scored by scrape_insiders.py (a wallet can
     have several rows in one market). None when the file holds no whale
     rows (a small market scores nobody: the file is a header only, or, from
     older runs, a lone market_title column), so the market exports without
     a traders panel instead of failing the build."""
-    path = f"data/{m['output']}_insiders.csv"
+    path = os.path.join(data_dir, f"{m['output']}_insiders.csv")
     df = pd.read_csv(path)
     if "user_id" not in df.columns or df.empty:
         print(f"  ! {path}: no whale rows; exporting {m['name']} without traders")
@@ -458,6 +458,53 @@ def build_ranking(prep, insiders):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def export_one(m, data_dir="data"):
+    """One market's index.json entry and its markets/<name>.json payload, from
+    <data_dir>/<Output>_clean.csv and, when it is there, _insiders.csv. The
+    job's "Add to main page" (add_market.py) builds an added market's page
+    with it in a scratch folder."""
+    prep = prepare_market(m, data_dir)
+    insiders = None
+    if os.path.exists(os.path.join(data_dir, f"{m['output']}_insiders.csv")):
+        insiders = load_insiders(m, data_dir)
+
+    title, timeline = build_timeline(prep)
+    traders = None
+    if insiders is not None:
+        t_title, traders = build_traders(insiders)
+        title = title or t_title
+
+    payload = {
+        "name": m["name"],
+        "title": str(title),
+        "slug": m["slug"],
+        "correctOutcome": m.get("correct_outcome"),
+        "timeline": timeline,
+        "traders": traders,
+    }
+    entry = {
+        "name": m["name"],
+        "title": str(title),
+        "slug": m["slug"],
+        "correctOutcome": m.get("correct_outcome"),
+        "start": timeline["span"]["start"],
+        "end": timeline["span"]["end"],
+        "totalVolume": timeline["totalVolume"],
+        "positions": timeline["positions"],
+        # Timeline whales (after VisualizeBetTiming's IQR time-outlier filter).
+        "whaleCount": len(timeline["whales"]),
+        # Whales scored in VisualizeInsiders (no IQR filter): the set that
+        # flaggedAccounts and pctSuspicious are computed over.
+        "traderWhales": traders["totalWhales"] if traders else None,
+        "flaggedAccounts": traders["flaggedAccounts"] if traders else None,
+        "pctSuspicious": traders["pctSuspicious"] if traders else None,
+        "events": timeline["events"],
+        "preview": build_preview(timeline, traders),
+        **build_ranking(prep, insiders),
+    }
+    return entry, payload
+
+
 def main():
     t0 = time.perf_counter()
     with open(MARKETS_FILE) as f:
@@ -465,61 +512,18 @@ def main():
 
     os.makedirs(os.path.join(OUT_DIR, "markets"), exist_ok=True)
 
-    preps, insiders_by_market = {}, {}
+    index = []
     for m in markets:
         clean_csv = f"data/{m['output']}_clean.csv"
         if not os.path.exists(clean_csv):
             print(f"  skip {m['name']}: {clean_csv} missing")
             continue
-        preps[m["name"]] = prepare_market(m)
-        if os.path.exists(f"data/{m['output']}_insiders.csv"):
-            insiders = load_insiders(m)
-            if insiders is not None:
-                insiders_by_market[m["name"]] = insiders
-
-    index = []
-    for name, prep in preps.items():
-        m = prep.m
-        title, timeline = build_timeline(prep)
-        traders = None
-        insiders = insiders_by_market.get(name)
-        if insiders is not None:
-            t_title, traders = build_traders(insiders)
-            title = title or t_title
-
-        payload = {
-            "name": m["name"],
-            "title": str(title),
-            "slug": m["slug"],
-            "correctOutcome": m.get("correct_outcome"),
-            "timeline": timeline,
-            "traders": traders,
-        }
+        entry, payload = export_one(m)
         path = os.path.join(OUT_DIR, "markets", f"{m['name']}.json")
         with open(path, "w") as f:
             json.dump(payload, f, separators=(",", ":"), allow_nan=False)
-
-        index.append({
-            "name": m["name"],
-            "title": str(title),
-            "slug": m["slug"],
-            "correctOutcome": m.get("correct_outcome"),
-            "start": timeline["span"]["start"],
-            "end": timeline["span"]["end"],
-            "totalVolume": timeline["totalVolume"],
-            "positions": timeline["positions"],
-            # Timeline whales (after VisualizeBetTiming's IQR time-outlier filter).
-            "whaleCount": len(timeline["whales"]),
-            # Whales scored in VisualizeInsiders (no IQR filter): the set that
-            # flaggedAccounts and pctSuspicious are computed over.
-            "traderWhales": traders["totalWhales"] if traders else None,
-            "flaggedAccounts": traders["flaggedAccounts"] if traders else None,
-            "pctSuspicious": traders["pctSuspicious"] if traders else None,
-            "events": timeline["events"],
-            "preview": build_preview(timeline, traders),
-            **build_ranking(prep, insiders),
-        })
-        print(f"  ✓ {m['name']:<10} {os.path.getsize(path) / 1024:>7.0f} KB  {title}")
+        index.append(entry)
+        print(f"  ✓ {m['name']:<10} {os.path.getsize(path) / 1024:>7.0f} KB  {entry['title']}")
 
     with open(os.path.join(OUT_DIR, "index.json"), "w") as f:
         json.dump({"markets": index}, f, separators=(",", ":"), allow_nan=False)

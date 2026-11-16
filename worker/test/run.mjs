@@ -1,8 +1,10 @@
 // npm test: the smoke test on a throwaway local state, start to finish. It applies the migrations to a fresh
 // --persist-to directory, starts `wrangler dev` on 127.0.0.1:8788 (WRANGLER_TEST_PORT picks another, e.g. while
-// `npm run dev` holds 8788; it refuses if anything already listens there) and runs test/smoke.mjs; then it restarts the Worker three times: with Turnstile's always-failing test
-// secret, with production settings (DEV off, strict Turnstile), and with a dispatch token aimed at a stand-in
-// for GitHub on a local port; and it stops every process it started. Local only: nothing here talks to a
+// `npm run dev` holds 8788; it refuses if anything already listens there) and runs test/smoke.mjs, then the job's
+// own Python client against it (test/client.py); then it back-dates every saved part two days and checks the
+// run's report prunes only the abandoned ones (smoke.mjs --prune); then it restarts the Worker three times: with
+// Turnstile's always-failing test secret, with production settings (DEV off, strict Turnstile), and with a
+// dispatch token aimed at a stand-in for GitHub on a local port; and it stops every process it started. Local only: nothing here talks to a
 // Cloudflare or GitHub account. WRANGLER_TEST_DIR picks where the throwaway state and logs go (default: the
 // system temp dir); KEEP_STATE=1 keeps them afterwards.
 
@@ -117,7 +119,16 @@ try {
   }
   worker = await startWorker();
   code = await exec(process.execPath, [join(ROOT, "test", "smoke.mjs"), BASE], { stdio: ["ignore", "inherit", "inherit"] });
+  if (code === 0) code = await exec("python3", [join(ROOT, "test", "client.py"), BASE], { stdio: ["ignore", "inherit", "inherit"] });
   await stopWorker(worker);
+  if (code === 0) {
+    const sql = "UPDATE job_blob_parts SET created_at = created_at - 2 * 86400";
+    code = await exec(process.execPath, [WRANGLER, "d1", "execute", "rigged-outcomes", "--local", "--persist-to", state, "--command", sql]);
+    if (code !== 0) throw new Error(`the parts weren't back-dated (log: ${logPath})`);
+    worker = await startWorker();
+    code = await exec(process.execPath, [join(ROOT, "test", "smoke.mjs"), BASE, "--prune"], { stdio: ["ignore", "inherit", "inherit"] });
+    await stopWorker(worker);
+  }
   github = await fakeGitHub();
   const fake = `http://127.0.0.1:${github.address().port}`;
   const phases = [

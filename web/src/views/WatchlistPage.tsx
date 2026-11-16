@@ -529,7 +529,7 @@ export function WatchlistPage() {
   const data = useAsync(loadClosed, "closed");
   const open = useAsync(loadOpen, "open");
   const index = useAsync(loadIndex, "index");
-  // markets already on the main page, by slug (markets.json keeps the slug)
+  // markets already on the main page, by slug (index.json keeps the slug)
   const mainSlugs = useMemo(
     () => new Map((index.data?.markets ?? []).map((m) => [m.slug.split("/").pop()!.split("#")[0], m.name] as const)),
     [index.data],

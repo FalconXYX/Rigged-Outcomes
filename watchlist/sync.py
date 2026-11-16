@@ -13,18 +13,23 @@ job reads what they wrote, acts on it, and reports back:
            they were taken back); in "apply" mode the reviewed day is
            rebuilt at once (opennow.rebuild_reviewed), in "full" and "local"
            mode the day's run that follows reads them itself
-  add      each of those markets through add_market.add (markets.json, the
-           trades, clean, score; the page name made from its slug when it
-           has none); the workflow commits the files to main.
-           Before each one, add_results.json already says it failed ("stopped
-           part way"), so a step killed by its timeout still reports it
+  add      each of those markets through add_market.add (the trades, clean,
+           score and its page, built in a scratch folder; the page name made
+           from its slug when it has none), its result saved in the database
+           as the blob market:<name> (store_market; the site's deploy adds it
+           to the main page, watchlist.publish). Nothing goes to git. Before
+           each one, add_results.json already says it failed ("stopped part
+           way"), so a step killed by its timeout still reports it; one the
+           database did not answer for is left out, so it stays approved and
+           the next run tries again
   catalog  PUT /api/job/catalog: what visitors may write to (the main
-           page's markets, the closed list's picks, the cards of the open
-           list's two newest days)
+           page's markets, markets.json's and the added ones, the closed
+           list's picks, the cards of the open list's two newest days)
   push     PUT /api/job/queue (the latest day's queue, each candidate with
            its key), the catalog, then POST /api/job/done: the decisions
-           this run saved, only once the state holding them was pushed; the
-           requests added (only once main was pushed) or failed; the run
+           this run saved, only once the state holding them was saved; the
+           requests added (saved in the database, or there already) or
+           failed; the run
 
     python3 -m watchlist.sync pull [--out data/watchlist/work.json]
     python3 -m watchlist.sync decide --mode full|apply|local [--work PATH] [--open-out PATH]
@@ -59,9 +64,8 @@ The shapes (worker/src, web/src/lib/api.ts):
 
 Files under data/watchlist/ (WATCHLIST_JOB_DIR moves them) the steps leave
 for each other: work.json, decide_results.json, add_results.json, and
-state_pulled.json / state_pushed.json (watchlist.state) and markets_pushed.ok
-(the workflow, once main was pushed). A results file older than the run
-(--started-at) is never reported.
+state_pulled.json / state_pushed.json (watchlist.state). A results file
+older than the run (--started-at) is never reported.
 """
 import argparse
 import json
@@ -82,6 +86,8 @@ DECIDED_BY = "person (review page)"
 DECISIONS = ("step", "not a step", "card approved")
 WITHDRAWN = "withdrawn"           # a decision the owner took back: removed from the store, then reported
 STOPPED = "stopped part way while adding it (the step timed out or crashed)"
+FULL = "the main page holds as many added markets as it can"      # the Worker's 409 full
+ADDED_PREFIX = "market:"          # the added markets' blobs (watchlist.blobs)
 MARKETS_FILE = os.path.join(ROOT, "markets.json")
 CLOSED_JSON = os.path.join(SITE_DATA_DIR, "closed.json")
 OPEN_JSON = os.path.join(SITE_DATA_DIR, "open.json")
@@ -113,24 +119,24 @@ def _env(name):
 
 
 class Client:
-    """The job's API client: JSON in and out, the job token in one header, TIMEOUT a call, and RETRY_WAITS
-    retries of a 429, a 5xx or a network error. request() returns the parsed body (None for 204) or raises
-    ApiError."""
+    """The job's API client: JSON in and out, the job token in one header, TIMEOUT a call, and a retry of a 429,
+    a 5xx or a network error after each of retry_waits (default RETRY_WAITS). request() returns the parsed body
+    (None for 204) or raises ApiError."""
 
-    def __init__(self, base, token, session=None, sleep=time.sleep, timeout=TIMEOUT):
+    def __init__(self, base, token, session=None, sleep=time.sleep, timeout=TIMEOUT, retry_waits=RETRY_WAITS):
         self.base = str(base).rstrip("/")
         self._token = token
         self.session = session or requests.Session()
-        self.sleep, self.timeout = sleep, timeout
+        self.sleep, self.timeout, self.retry_waits = sleep, timeout, tuple(retry_waits)
 
     def __repr__(self):
         return f"Client({self.base!r})"
 
     def request(self, method, path, body=None):
         err = None
-        for attempt in range(len(RETRY_WAITS) + 1):
+        for attempt in range(len(self.retry_waits) + 1):
             if attempt:
-                self.sleep(RETRY_WAITS[attempt - 1])
+                self.sleep(self.retry_waits[attempt - 1])
             try:
                 r = self.session.request(method, self.base + path, json=body, timeout=self.timeout,
                                          headers={"Authorization": f"Bearer {self._token}",
@@ -157,10 +163,10 @@ class Client:
         raise err
 
 
-def client():
+def client(retry_waits=RETRY_WAITS):
     """The Client for WATCHLIST_API_URL and WATCHLIST_JOB_TOKEN, or None when either is unset."""
     url, token = _env("WATCHLIST_API_URL"), _env("WATCHLIST_JOB_TOKEN")
-    return Client(url, token) if url and token else None
+    return Client(url, token, retry_waits=retry_waits) if url and token else None
 
 
 def _warn(msg):
@@ -257,10 +263,33 @@ def decide(conn, work, mode, results_path, open_out=OPEN_JSON, rebuild=None, now
     return doc
 
 
-def add(work, results_path, dry_run=False, adder=None, now=None):
+def _added_entries(c):
+    """The entries ({name, slug, output, correct_outcome}) of the markets added before, from the database's
+    market:* heads. Raises ApiError."""
+    from watchlist import blobs
+    return [h["meta"]["entry"] for h in blobs.heads(c, ADDED_PREFIX)
+            if isinstance(h.get("meta"), dict) and isinstance(h["meta"].get("entry"), dict)]
+
+
+def store_market(c, got, condition_id, now=None):
+    """Save an added market's result (add_market.add's, changed) as the blob market:<name>: its entry, its
+    index.json entry and page, and its data files (the clean and insiders CSVs), which the deploy builds its page
+    from again with the day's export.py (watchlist.publish). It must not exist yet (expect None: a name taken
+    meanwhile is 409 moved). Returns the new head; raises ApiError or BlobError."""
+    from watchlist import blobs
+    now = int(now if now is not None else now_epoch())
+    entry = got["entry"]
+    meta = {"entry": entry, "condition_id": str(condition_id).lower(), "added_at": now,
+            "by": "github" if os.environ.get("GITHUB_ACTIONS") else "local"}
+    doc = {"entry": entry, "index": got["index"], "market": got["market"], "data": got.get("data") or {}}
+    return blobs.put_json(c, f"{ADDED_PREFIX}{entry['name']}", doc, meta, expect=None)
+
+
+def add(c, work, results_path, dry_run=False, adder=None, now=None):
     """Each market to add (status approved) through add_market.add, named from its slug there when it has no
-    name. Returns the results; sets markets=true when one was added and changed the files (the workflow then
-    commits them to main)."""
+    name, and its result saved in the database (store_market). Returns the results; sets markets=true when one
+    was saved (the workflow then deploys the site)."""
+    from watchlist import blobs
     now = int(now if now is not None else now_epoch())
     if adder is None:
         import add_market
@@ -271,34 +300,62 @@ def add(work, results_path, dry_run=False, adder=None, now=None):
         # the market being added is on record as failed until it finishes, so a step killed part way reports it
         if not dry_run:
             stopped = [{"condition_id": running["condition_id"], "status": "failed", "name": running.get("name"),
-                        "note": STOPPED, "changed": False}] if running else []
+                        "note": STOPPED, "changed": False, "saved": False}] if running else []
             _write(results_path, {"results": results + stopped, "at": now})
 
+    if c is None:
+        log(NO_API)
+        record()
+        _output(markets=False)
+        return results
+    try:
+        entries = _added_entries(c)
+    except ApiError as e:
+        _warn(f"the markets added before could not be read ({e}); the markets to add wait for the next run")
+        record()
+        _output(markets=False)
+        return results
     for r in work.get("requests") or []:
         if r.get("status") != "approved":
             continue
         record(r)
         try:
-            got = adder(r["condition_id"], r["slug"], r.get("name"), outcome=r["winner"], dry_run=dry_run)
+            got = adder(r["condition_id"], r["slug"], r.get("name"), outcome=r["winner"], dry_run=dry_run,
+                        added=list(entries))
         except Exception as e:                       # one market never stops the others
             got = {"status": "failed", "name": r.get("name"), "note": f"unexpected error ({type(e).__name__})",
                    "changed": False}
-        results.append({"condition_id": r["condition_id"], "status": got["status"], "name": got.get("name"),
-                        "note": got.get("note"), "changed": bool(got.get("changed"))})
-        log(f"add {got.get('name') or r.get('slug')}: {got['status']}" + (f" ({got.get('note')})" if got.get("note") else ""))
+        res = {"condition_id": r["condition_id"], "status": got["status"], "name": got.get("name"),
+               "note": got.get("note"), "changed": bool(got.get("changed")), "saved": False}
+        if res["status"] == "added" and res["changed"] and not dry_run:
+            try:
+                store_market(c, got, r["condition_id"], now)
+                res["saved"] = True
+                entries.append(got["entry"])
+            except ApiError as e:
+                if e.status is None or e.status == 429 or e.status >= 500:
+                    _warn(f"{got.get('name')} was built but the database did not take it ({e}); tried again next run")
+                    continue                         # not reported: it stays approved
+                res.update(status="failed", note=FULL if e.code == "full" else f"the database refused it ({e.code})")
+            except (blobs.BlobError, ValueError, KeyError, TypeError) as e:
+                res.update(status="failed", note=f"it could not be saved ({type(e).__name__}: {str(e)[:160]})")
+        results.append(res)
+        log(f"add {res['name'] or r.get('slug')}: {res['status']}" + (f" ({res['note']})" if res["note"] else ""))
     record()
-    _output(markets=any(x["status"] == "added" and x["changed"] for x in results) and not dry_run)
+    _output(markets=any(x["saved"] for x in results))
     return results
 
 
 # ── catalog, queue, done ─────────────────────────────────────────────────────
 
-def catalog_payload(markets_path=MARKETS_FILE, closed_path=CLOSED_JSON, open_path=OPEN_JSON):
-    """What visitors may write to; a section whose file is missing is left out (the API keeps the last one)."""
+def catalog_payload(markets_path=MARKETS_FILE, closed_path=CLOSED_JSON, open_path=OPEN_JSON, added=None):
+    """What visitors may write to; a section whose file is missing is left out (the API keeps the last one).
+    added: the entries of the markets added with "Add to main page" (the database's), after markets.json's."""
     out = {}
     markets = _read(markets_path)
     if isinstance(markets, list):
-        out["markets"] = [{"name": m["name"], "slug": m["slug"]} for m in markets if m.get("name") and m.get("slug")]
+        out["markets"] = [{"name": m["name"], "slug": m["slug"]} for m in markets + list(added or [])
+                          if m.get("name") and m.get("slug")]
     closed = _read(closed_path)
     if isinstance(closed, dict):
         seen, rows = set(), []
@@ -367,21 +424,19 @@ def run_summary(conn, closed_path=CLOSED_JSON, started_at=None, applied=0, added
 
 
 def done_payload(conn, job_dir, mode, status, started_at, run_url=None, now=None, closed_path=CLOSED_JSON):
-    """POST /api/job/done's body from this run's files: the decisions saved, only when this run pushed the
-    state (state_pushed.json); the requests added, only when main was pushed (markets_pushed.ok) or the market
-    was already there, and the failed ones; the run."""
+    """POST /api/job/done's body from this run's files: the decisions saved, only when this run saved the
+    state (state_pushed.json); the requests added (saved in the database, or there already) and failed; the
+    run."""
     now = int(now if now is not None else now_epoch())
     pushed = _read(os.path.join(job_dir, "state_pushed.json"))
     decided = _read(os.path.join(job_dir, "decide_results.json"))
     applied = list(decided["saved"]) if _fresh(decided, started_at) and _fresh(pushed, started_at) and \
         pushed.get("ok") else []
-    ok_path = os.path.join(job_dir, "markets_pushed.ok")
-    main_pushed = os.path.exists(ok_path) and os.path.getmtime(ok_path) >= int(started_at or 0)
     added = _read(os.path.join(job_dir, "add_results.json"))
     results = added.get("results") or [] if _fresh(added, started_at) else []
     reqs = []
     for r in results:
-        if r["status"] == "failed" or (r["status"] == "added" and (main_pushed or not r.get("changed"))):
+        if r["status"] in ("added", "failed"):
             reqs.append({"condition_id": r["condition_id"], "status": r["status"], "name": r.get("name"),
                          "note": r.get("note")})
     summary = run_summary(conn, closed_path, started_at, applied=sum(1 for a in applied if not a.get("withdrawn")),
@@ -397,7 +452,14 @@ def catalog(c, **paths):
     if c is None:
         log(NO_API)
         return None
-    body = catalog_payload(**paths)
+    try:
+        added = _added_entries(c)
+    except ApiError as e:
+        _warn(f"the markets added before could not be read ({e}); the catalog's markets stay as they were")
+        added = None
+    body = catalog_payload(added=added, **paths)
+    if added is None:
+        body.pop("markets", None)
     try:
         got = c.request("PUT", "/api/job/catalog", body)
         log(f"catalog: {got}")
@@ -473,7 +535,7 @@ def main(argv=None):
         decide(conn, work, args.mode, os.path.join(JOB_DIR, "decide_results.json"), open_out=args.open_out)
     elif args.cmd == "add":
         work = _read(args.work, {}) or {}
-        add(work, os.path.join(JOB_DIR, "add_results.json"), dry_run=args.dry_run)
+        add(client(), work, os.path.join(JOB_DIR, "add_results.json"), dry_run=args.dry_run)
     elif args.cmd == "catalog":
         catalog(client(), closed_path=args.closed, open_path=args.open)
     else:

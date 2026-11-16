@@ -4,9 +4,9 @@
 
 - **The site** stays on GitHub Pages.
 - **The API** is a Cloudflare Worker: a small program Cloudflare runs for free at an address like `https://rigged-outcomes-api.<your-name>.workers.dev`. The site calls it when a visitor adds a timeline marker, watches an open market or adds a closed one to the main page, and the review page (`#/review`) calls it for your decisions.
-- **The database** is Cloudflare D1, a small SQL database attached to the Worker. It stores the markers, the site's one watchlist, the markets added to the main page and your decisions.
+- **The database** is Cloudflare D1, a small SQL database attached to the Worker. It stores the markers, the site's one watchlist, the markets added to the main page, your decisions and everything the daily job keeps (its memory between runs, the published lists and the added markets' pages).
 - **The bot check** is Cloudflare Turnstile, the "are you a person" check (usually invisible) that runs before any visitor's write is accepted.
-- **The job** is a GitHub Action: at 04:17 UTC it makes both Watchlist lists, applies your decisions, adds the markets visitors sent to the main page and republishes the site.
+- **The job** is a GitHub Action: at 04:17 UTC it makes both Watchlist lists, applies your decisions, adds the markets visitors sent to the main page and republishes the site. It saves to the database only and never commits to the repository.
 
 Everything is on Cloudflare's and GitHub's free plans; Cloudflare doesn't ask for a card.
 
@@ -65,19 +65,29 @@ Then tell Claude "Cloudflare done".
 1. Created the D1 database `rigged-outcomes` (its id is in `worker/wrangler.toml`) and its tables.
 2. Deployed the Worker `rigged-outcomes-api` with its secrets: the Turnstile secret, `OWNER_TOKEN` (your review page password, kept in `.env`), `JOB_TOKEN` and `VISITOR_SALT`. Its address is `WATCHLIST_API_URL` in `.env`.
 3. Set the GitHub secrets `GEMINI_API_KEY` and `WATCHLIST_JOB_TOKEN` and the variables `API_URL` and `TURNSTILE_SITEKEY`.
-4. Seeded the `watchlist-data` branch (the job's memory) and sent the API the catalog of what visitors may write to.
+4. Sent the API the catalog of what visitors may write to, and wrote the move of the job's memory into the database (you run it: step 2 below).
 
-Going live: `cd worker && npx wrangler d1 migrations apply rigged-outcomes --remote && npx wrangler deploy` (the new migration, then the Worker that reads it), push `main`, and switch GitHub Pages to GitHub Actions with `main` allowed to deploy (this replaces the old D3 site; pointing Pages back at the `D3.js` branch restores it).
+**Going live** (yours, in this order, from the repository root unless it says otherwise):
+
+1. The new tables, then the Worker that reads them: `cd worker && npx wrangler d1 migrations apply rigged-outcomes --remote && npx wrangler deploy`. The job running today keeps working.
+2. Right after a Watchlist run has finished, with none running or waiting: `git fetch origin watchlist-data && python3 -m watchlist.state migrate`. It copies the branch's state and lists into the database (it reads the API from `.env`), prints the branch commit it copied, and changes nothing in git.
+3. Review and commit the code. Before pushing `main`, run `git fetch origin watchlist-data && git rev-parse origin/watchlist-data`. If that commit isn't the one step 2 printed, a Watchlist run (daily, or an apply run from the review page) saved to the branch in between: run `python3 -m watchlist.state migrate --force` again. Then push `main`.
+4. Start one run by hand (Actions → Watchlist → Run workflow, mode full) and check that it finishes and that the deploy after it shows both lists.
+5. Once a run has succeeded from the database, delete the branch: `git push origin --delete watchlist-data`.
 
 ## After
 
 - Open https://parthjain.ca/Rigged-Outcomes/#/review, unlock it with the owner token, and go through the Open now queue.
 - Add a marker on a market's Timeline, and press Watch on an Open now card.
+- GitHub turns a schedule off after 60 days with no activity in the repository (the daily bot commits used to count as activity; your own commits still do). When the review page warns that no daily run has reported, turn it back on under Actions → Watchlist → **Enable workflow**.
 
 ## If something breaks
 
-- **Back to the site without the API:** `gh variable delete API_URL --repo FalconXYX/Rigged-Outcomes && gh workflow run deploy.yml --ref main`
+- **Back to the site without the API:** `gh variable delete API_URL --repo FalconXYX/Rigged-Outcomes && gh workflow run deploy.yml --ref main`. The site then has no Watchlist lists or added markets, and the daily job stops until the variable is back.
 - **See the API's errors as they happen:** `cd worker && npx wrangler tail`
 - **Stop visitor writes:** the pause switch on `#/review`.
+- **Take an added market back off the main page:** `python3 -m watchlist.blobs rm market:<name> && gh workflow run deploy.yml --ref main`. Its request then shows "taken off the main page", and no one can send it again.
+- **Undo a bad save of the job's memory or a list:** `python3 -m watchlist.blobs versions state` lists the last 3 saves it replaced, and `python3 -m watchlist.blobs restore state <version>` makes one live again (the same for `list:closed` and `list:open`). Nothing else in the database changes.
+- **The database as it was at an earlier time (up to 7 days back, D1 Time Travel; everything since is replaced):** `cd worker && npx wrangler d1 time-travel restore rigged-outcomes --timestamp <ISO time>`
 - **The old D3 site back:** GitHub → Settings → Pages → Source: Deploy from a branch → `D3.js`.
 - **GitHub job not working:** `scripts/watchlist-mac.sh` runs the same daily job on this Mac.

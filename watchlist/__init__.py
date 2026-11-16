@@ -19,12 +19,16 @@ The daily job that runs them (.github/workflows/watchlist.yml, or
 scripts/watchlist-mac.sh; docs/DEPLOY.md):
 
   state    the job's memory between runs: the store tables the lists read
-           and write, kept on the repository's watchlist-data branch with
-           the published lists.
+           and write, saved in the site's database with the published lists
+           and the news cache. Nothing of the job's is kept in git.
+  blobs    how the job saves a document there: gzip-compressed, in parts,
+           through the API's job endpoints (worker/src/blobs.ts).
   sync     the job's side of the site's API (worker/): the owner's decisions
            on the open list's queue, approved "Add to main page" requests
-           (add_market.py at the repo root adds them), watch counts, and the
-           run's report.
+           (add_market.py at the repo root builds each one's page, saved in
+           the database), watch counts, and the run's report.
+  publish  the site deploy's step: the saved lists and added markets into
+           the data the site is built from.
 
 The earlier statistical scans (closed_scan, open_scan, track_record,
 backtest, parity; built on method) are not used by the site. Their demo

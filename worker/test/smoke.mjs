@@ -10,13 +10,16 @@
 //                                                              the dummy token fails the hostname check, test headers are ignored
 //   node test/smoke.mjs http://localhost:8788 --dispatch=URL   only: "Apply decisions now" against test/run.mjs's stand-in for
 //                                                              GitHub at URL (--var GITHUB_DISPATCH_TOKEN:… --var GITHUB_API:URL)
+//   node test/smoke.mjs http://localhost:8788 --prune          only: the run's report prunes the upload the whole suite left
+//                                                              unfinished, once test/run.mjs has back-dated every part 2 days
 // Exits 1 on any failed check, 2 when Cloudflare's siteverify could not be reached ("network": run again).
 
 const BASE = (process.argv[2] ?? "http://localhost:8788").replace(/\/$/, "");
 const BOT_FAIL = process.argv.includes("--bot-fail");
 const PRODUCTION = process.argv.includes("--production");
 const DISPATCH = process.argv.find((a) => a.startsWith("--dispatch="))?.slice("--dispatch=".length);
-const MODE = BOT_FAIL ? " (bot-check failure)" : PRODUCTION ? " (production settings)" : DISPATCH ? " (dispatch)" : "";
+const PRUNE = process.argv.includes("--prune");
+const MODE = BOT_FAIL ? " (bot-check failure)" : PRODUCTION ? " (production settings)" : DISPATCH ? " (dispatch)" : PRUNE ? " (prune)" : "";
 const RUN = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const DAY_KEY = `t-${RUN}`;
 const OWNER = "dev-owner-token";
@@ -64,6 +67,10 @@ const expect = (name, r, status, code) =>
   check(name, r.status === status && (code === undefined || r.body?.error === code), { status: r.status, body: r.body });
 
 const hex = (n, c) => c.repeat(n);
+/** A market the suite saves and --prune checks after test/run.mjs back-dates its parts: one live version, one orphan. */
+const PRUNE_MARKET = "market:prune-check";
+const PRUNE_LIVE_VERSION = "0".repeat(31) + "1";
+const PRUNE_ORPHAN = "0".repeat(31) + "2";
 const CID_PREFIX = crypto.randomUUID().replace(/-/g, "");
 /** A condition id unique to this run. */
 const cid = (i) => `0x${CID_PREFIX}${i.toString(16).padStart(32, "0")}`;
@@ -330,7 +337,7 @@ async function suite() {
     const un2 = await call("DELETE", `/api/watch?story=${s}`);
     check("watch: stopping twice changes nothing", un2.status === 200 && un2.body?.watching === false, un2.body);
     const back = await call("POST", "/api/watch", { body: { story: stories.a, token: TOKEN } });
-    check("watch: back on (job/work, the export and the overview read it below)", back.body?.watching === true, back.body);
+    check("watch: back on (job/work and the overview read it below)", back.body?.watching === true, back.body);
     expect("watch: unknown_story", await call("POST", "/api/watch", { body: { story: `gone ${RUN}`, token: TOKEN } }), 404, "unknown_story");
     expect("watch: an empty token is 403 bot_check", await call("POST", "/api/watch", { body: { story: stories.b, token: "" } }), 403, "bot_check");
     expect("watch: a 201-character story is 400", await call("GET", `/api/watch?story=${"s".repeat(201)}`), 400, "bad_request");
@@ -449,7 +456,7 @@ async function suite() {
     expect("auth: ...and a wrong one stays locked", await call("GET", "/api/admin/overview", { visitor: "lock", auth: "wrong" }), 429, "locked");
     expect("auth: the job token on an owner endpoint is 401", await call("GET", "/api/admin/overview", { visitor: "auth2", auth: JOB }), 401, "unauthorized");
     expect("auth: the owner token on a job endpoint is 401", await call("GET", "/api/job/work", { visitor: "auth2", auth: OWNER }), 401, "unauthorized");
-    expect("auth: no token is 401", await call("GET", "/api/job/export", { visitor: "auth2" }), 401, "unauthorized");
+    expect("auth: no token is 401", await call("GET", "/api/job/blobs", { visitor: "auth2" }), 401, "unauthorized");
     check("auth: the right token still works for others", (await call("GET", "/api/admin/overview", { visitor: "auth3", auth: OWNER })).status === 200);
   }
 
@@ -549,19 +556,10 @@ async function suite() {
     expect("done: an empty report is 204", await call("POST", "/api/job/done", { auth: JOB, body: {} }), 204);
   }
 
-  // ---------- export, apply, sizes ----------
-  {
-    const ex = await call("GET", "/api/job/export", { auth: JOB });
-    const keys = Object.keys(ex.body ?? {}).sort().join();
-    check("export: shape", keys === "decisions,exported_at,markers,requests,runs,settings,watches", keys);
-    const keysIn = (v) => (v && typeof v === "object" ? Object.entries(v).flatMap(([k, x]) => [k, ...keysIn(x)]) : []);
-    const found = new Set(keysIn(ex.body));
-    check("export: no visitor or undo hashes", !found.has("visitor") && !found.has("undo_sha") && !JSON.stringify(ex.body).includes(`v-${RUN}`), [...found]);
-    const ids = new Set((ex.body?.markers ?? []).map((m) => m.id));
-    check("export: no deleted marker, and none under 2 days old (all of this run's)", first?.marker?.id && !ids.has(first.marker.id) && !(ex.body?.markers ?? []).some((m) => m.deleted_at !== null || m.created_at > now() - 2 * 86_400), ex.body?.markers?.slice(0, 3));
-    check("export: settings as an object", ex.body?.settings?.writes === "on");
-    check("export: the watchlist", ex.body?.watches?.some((w) => w.story === stories.a && w.created_at > 0 && Object.keys(w).sort().join() === "created_at,story"), ex.body?.watches);
+  await blobs();
 
+  // ---------- apply, sizes ----------
+  {
     expect("apply: no dispatch token is 501", await call("POST", "/api/admin/apply", { auth: OWNER }), 501, "no_dispatch");
     const ov = await call("GET", "/api/admin/overview", { auth: OWNER });
     check("overview: dispatch is false", ov.body?.dispatch === false);
@@ -577,6 +575,245 @@ async function suite() {
   }
 }
 
+/** The job's data (watchlist/blobs.py): parts, commits, the pointer, and every refusal. Only market:<name> blobs this run names. */
+async function blobs() {
+  const ver = () => crypto.randomUUID().replace(/-/g, "");
+  const b64 = (n, seed) => Buffer.from(Array.from({ length: n }, (_, i) => (i * 31 + seed) % 256)).toString("base64");
+  const name = `market:t${RUN}`;
+  const path = (...p) => `/api/job/blobs/${[encodeURIComponent(name).replace("%3A", ":"), ...p].join("/")}`;
+  const put = (v, part, data, n = name) => call("PUT", `/api/job/blobs/${n}/${v}/${part}`, { auth: JOB, body: { data } });
+  const commit = (v, body, n = name) => call("POST", `/api/job/blobs/${n}/${v}`, { auth: JOB, body: { bytes: 1234, sha256: hex(64, "a"), meta: { by: "smoke" }, ...body } });
+  const get = (p) => call("GET", p, { auth: JOB });
+
+  // sign-in: every route is the job's
+  const v0 = ver();
+  const routes = [
+    ["GET", "/api/job/blobs"],
+    ["GET", path()],
+    ["GET", path("versions")],
+    ["DELETE", path()],
+    ["PUT", path(v0, 0)],
+    ["GET", path(v0, 0)],
+    ["POST", path(v0)],
+  ];
+  for (const [i, [method, p]] of routes.entries()) {
+    const body = method === "PUT" ? { data: "AAAA" } : method === "POST" ? { parts: 1, bytes: 0, sha256: hex(64, "a"), meta: {} } : undefined;
+    expect(`blobs: ${method} ${p.replace(name, "<name>")} with no token is 401`, await call(method, p, { visitor: `blob${i}`, body }), 401, "unauthorized");
+    expect(`blobs: ${method} ${p.replace(name, "<name>")} with the owner token is 401`, await call(method, p, { visitor: `blob${i}`, auth: OWNER, body }), 401, "unauthorized");
+  }
+
+  // three parts, then the first commit (expect: null, the blob must not exist yet)
+  const v1 = ver();
+  const p1 = [b64(300, 1), b64(300, 2), `${b64(100, 3)}`];
+  for (const [i, data] of p1.entries()) expect(`blobs: part ${i} is 204`, await put(v1, i, data), 204);
+  expect("blobs: no head before the commit is 404 no_blob", await get(path()), 404, "no_blob");
+  const c1 = await commit(v1, { parts: 3, expect: null, meta: { entry: { name: `t${RUN}` }, added_at: 1 } });
+  const headKeys = "bytes,meta,name,parts,sha256,updated_at,version";
+  check(
+    "blobs: the first commit is 200 with its head",
+    c1.status === 200 && Object.keys(c1.body ?? {}).sort().join() === headKeys && c1.body.name === name && c1.body.version === v1 && c1.body.parts === 3 && c1.body.bytes === 1234 && c1.body.sha256 === hex(64, "a") && c1.body.meta?.entry?.name === `t${RUN}` && c1.body.updated_at > 0,
+    c1,
+  );
+  const h1 = await get(path());
+  check("blobs: GET head", h1.status === 200 && JSON.stringify(h1.body) === JSON.stringify(c1.body), h1);
+  for (const [i, data] of p1.entries()) {
+    const g = await get(path(v1, i));
+    check(`blobs: part ${i} reads back as sent`, g.status === 200 && g.body?.data === data, { status: g.status, length: g.body?.data?.length });
+  }
+  expect("blobs: a part that isn't there is 404 no_part", await get(path(v1, 3)), 404, "no_part");
+  const listed = await get("/api/job/blobs?prefix=market:");
+  check("blobs: listed under prefix market:", listed.status === 200 && listed.body?.blobs?.some((b) => b.name === name && b.version === v1 && b.meta?.added_at === 1), listed.body);
+  check("blobs: the list holds markets only, by name", listed.body?.blobs?.every((b, i, a) => b.name.startsWith("market:") && (i === 0 || a[i - 1].name < b.name)), listed.body?.blobs?.map((b) => b.name));
+  const all = await get("/api/job/blobs?prefix=");
+  check("blobs: an empty prefix lists them all", all.status === 200 && all.body?.blobs?.some((b) => b.name === name), all.body);
+  check("blobs: no prefix lists them all too", (await get("/api/job/blobs")).body?.blobs?.length === all.body?.blobs?.length);
+  expect("blobs: a prefix with capitals is 400", await get("/api/job/blobs?prefix=Market"), 400, "bad_request");
+  expect("blobs: a prefix with a slash is 400", await get("/api/job/blobs?prefix=market%2F"), 400, "bad_request");
+  expect("blobs: a prefix over 40 characters is 400", await get(`/api/job/blobs?prefix=${"a".repeat(41)}`), 400, "bad_request");
+  expect("blobs: an unknown blob is 404 no_blob", await get(`/api/job/blobs/market:none-${RUN}`), 404, "no_blob");
+  const known = await get("/api/job/blobs/cache:news");
+  check("blobs: state, cache:news and the lists are names", [200, 404].includes(known.status) && [200, 404].includes((await get("/api/job/blobs/list:open")).status), known);
+
+  // commit refusals
+  const v2 = ver();
+  expect("blobs: v2 part 0", await put(v2, 0, b64(30, 4)), 204);
+  expect("blobs: v2 part 2", await put(v2, 2, b64(30, 6)), 204);
+  expect("blobs: a missing part is 409 incomplete", await commit(v2, { parts: 3, expect: v1 }), 409, "incomplete");
+  expect("blobs: the wrong parts count is 409 incomplete", await commit(v2, { parts: 2, expect: v1 }), 409, "incomplete");
+  expect("blobs: v2 part 1", await put(v2, 1, b64(30, 5)), 204);
+  expect("blobs: v2 part 1 again (a retry) is 204", await put(v2, 1, b64(30, 5)), 204);
+  expect("blobs: expect null when it exists is 409 moved", await commit(v2, { parts: 3, expect: null }), 409, "moved");
+  expect("blobs: the wrong expect is 409 moved", await commit(v2, { parts: 3, expect: ver() }), 409, "moved");
+  const again = await commit(v1, { parts: 3, expect: null });
+  check("blobs: committing the live version again (a lost answer) is 200, before the expect check", again.status === 200 && again.body?.version === v1 && again.body.updated_at === c1.body.updated_at, again);
+  expect("blobs: ...with another sha256 is 409 live", await commit(v1, { parts: 3, sha256: hex(64, "b") }), 409, "live");
+  expect("blobs: a part of the live version is 409 live", await put(v1, 0, b64(30, 9)), 409, "live");
+  expect("blobs: ...even a new part number", await put(v1, 5, b64(30, 9)), 409, "live");
+  check("blobs: the live version is unchanged", (await get(path(v1, 0))).body?.data === p1[0] && (await get(path())).body?.version === v1);
+
+  // replacing it: the pointer moves and the old parts go
+  const c2 = await commit(v2, { parts: 3, expect: v1, sha256: hex(64, "c"), bytes: 90, meta: { by: "smoke", n: 2 } });
+  check("blobs: replacing with expect = the live version is 200", c2.status === 200 && c2.body?.version === v2 && c2.body.parts === 3 && c2.body.sha256 === hex(64, "c") && c2.body.bytes === 90 && c2.body.meta?.n === 2, c2);
+  check("blobs: the head is the new version", (await get(path())).body?.version === v2);
+  for (let i = 0; i < 3; i++) expect(`blobs: the old version's part ${i} is gone (404 no_part)`, await get(path(v1, i)), 404, "no_part");
+  check("blobs: the new parts read back", (await get(path(v2, 1))).body?.data === b64(30, 5));
+  expect("blobs: committing the old version again is 409 incomplete (its parts are gone)", await commit(v1, { parts: 3 }), 409, "incomplete");
+  const v3 = ver();
+  await put(v3, 0, b64(10, 7));
+  const c3 = await commit(v3, { parts: 1 });
+  check("blobs: a commit with no expect replaces whatever is live", c3.status === 200 && c3.body?.version === v3, c3);
+  expect("blobs: ...and the one before's parts are gone", await get(path(v2, 0)), 404, "no_part");
+
+  // validation
+  for (const [why, bad] of [["capitals", "market:A"], ["unknown kind", "foo"], ["a path", encodeURIComponent("market:../x")], ["one character", "market:a"], ["list:other", "list:other"]]) {
+    expect(`blobs: a bad name (${why}) on GET is 400`, await get(`/api/job/blobs/${bad}`), 400, "bad_request");
+    expect(`blobs: a bad name (${why}) on PUT is 400`, await put(ver(), 0, "AAAA", bad), 400, "bad_request");
+  }
+  expect("blobs: a version that isn't 32 hex is 400", await put("abc", 0, "AAAA"), 400, "bad_request");
+  expect("blobs: an uppercase version is 400", await put(ver().toUpperCase(), 0, "AAAA"), 400, "bad_request");
+  expect("blobs: part -1 is 400", await put(ver(), -1, "AAAA"), 400, "bad_request");
+  expect("blobs: part 400 is 400", await put(ver(), 400, "AAAA"), 400, "bad_request");
+  expect("blobs: part 01 is 400", await put(ver(), "01", "AAAA"), 400, "bad_request");
+  expect("blobs: part 399 is fine", await put(ver(), 399, "AAAA"), 204);
+  expect("blobs: data that isn't base64 is 400", await put(ver(), 0, "not base64!"), 400, "bad_request");
+  expect("blobs: empty data is 400", await put(ver(), 0, ""), 400, "bad_request");
+  expect("blobs: data that isn't text is 400", await put(ver(), 0, 5), 400, "bad_request");
+  expect("blobs: a GET part with a bad version is 400", await get(path("xyz", 0)), 400, "bad_request");
+  const vc = ver();
+  await put(vc, 0, "AAAA");
+  for (const [why, body] of [
+    ["parts 0", { parts: 0 }],
+    ["parts 401", { parts: 401 }],
+    ["parts not a number", { parts: "1" }],
+    ["bytes -1", { parts: 1, bytes: -1 }],
+    ["a short sha256", { parts: 1, sha256: "abc" }],
+    ["an uppercase sha256", { parts: 1, sha256: hex(64, "A") }],
+    ["meta a list", { parts: 1, meta: [] }],
+    ["meta over 16,384 characters", { parts: 1, meta: { x: "m".repeat(16_400) } }],
+    ["expect not a version", { parts: 1, expect: "v1" }],
+  ]) {
+    expect(`blobs: commit with ${why} is 400`, await commit(vc, body), 400, "bad_request");
+  }
+
+  // a big part: 1,000,000 characters fit (a body just under 1 MiB), one more doesn't, and over 1 MiB is 413
+  const big = `market:b${RUN}`;
+  const vb = ver();
+  const million = "A".repeat(1_000_000);
+  expect("blobs: a part of 1,000,000 characters is 204", await put(vb, 0, million, big), 204);
+  const cb = await commit(vb, { parts: 1, expect: null }, big);
+  check("blobs: ...commits", cb.status === 200 && cb.body?.version === vb, cb);
+  const gb = await get(`/api/job/blobs/${big}/${vb}/0`);
+  check("blobs: ...and reads back whole", gb.status === 200 && gb.body?.data === million, { status: gb.status, length: gb.body?.data?.length });
+  expect("blobs: 1,000,001 characters is 400", await put(ver(), 0, `${million}A`, big), 400, "bad_request");
+  expect("blobs: a body over 1 MiB is 413", await put(ver(), 0, "A".repeat(1_100_000), big), 413, "too_large");
+
+  // deleting: the pointer and its parts go
+  expect("blobs: DELETE is 204", await call("DELETE", `/api/job/blobs/${big}`, { auth: JOB }), 204);
+  expect("blobs: ...then its head is 404 no_blob", await get(`/api/job/blobs/${big}`), 404, "no_blob");
+  expect("blobs: ...and its part is 404 no_part", await get(`/api/job/blobs/${big}/${vb}/0`), 404, "no_part");
+  expect("blobs: DELETE again is 404 no_blob", await call("DELETE", `/api/job/blobs/${big}`, { auth: JOB }), 404, "no_blob");
+  check("blobs: the other blob is untouched", (await get(path())).body?.version === v3 && (await get(path(v3, 0))).body?.data === b64(10, 7));
+  const fresh = await commit(ver(), { parts: 1, expect: null }, big);
+  expect("blobs: a deleted name has no parts to commit (409 incomplete)", fresh, 409, "incomplete");
+
+  // the run's report prunes uploads never committed, but only once a day old
+  const vo = ver();
+  await put(vo, 0, "QUJD");
+  expect("blobs: done is 204", await call("POST", "/api/job/done", { auth: JOB, body: {} }), 204);
+  check("blobs: an upload from today survives the prune", (await get(path(vo, 0))).body?.data === "QUJD");
+  check("blobs: the live version survives it", (await get(path(v3, 0))).body?.data === b64(10, 7));
+  // ...and what --prune checks once test/run.mjs has back-dated every part: a live market and an orphan beside it
+  await put(PRUNE_LIVE_VERSION, 0, "TElWRQ==", PRUNE_MARKET);
+  await commit(PRUNE_LIVE_VERSION, { parts: 1 }, PRUNE_MARKET);
+  expect("blobs: the orphan --prune looks for", await put(PRUNE_ORPHAN, 0, "T1JQSEFO", PRUNE_MARKET), 204);
+
+  // six saves at once over the same version: one goes live, the others are 409 moved and delete nothing
+  const race = `market:r${RUN}`;
+  const vr = ver();
+  await put(vr, 0, b64(10, 1), race);
+  await commit(vr, { parts: 1, expect: null }, race);
+  const rivals = Array.from({ length: 6 }, () => ver());
+  for (const [i, v] of rivals.entries()) await put(v, 0, b64(10, 20 + i), race);
+  const answers = await Promise.all(rivals.map((v) => commit(v, { parts: 1, expect: vr }, race)));
+  const won = answers.filter((a) => a.status === 200);
+  check("race: of six saves at once, exactly one goes live", won.length === 1 && answers.every((a) => a.status === 200 || (a.status === 409 && a.body?.error === "moved")), answers.map((a) => [a.status, a.body?.error]));
+  const winner = won[0]?.body?.version;
+  check("race: the head is the winner", (await get(`/api/job/blobs/${race}`)).body?.version === winner);
+  for (const [i, v] of rivals.entries()) {
+    check(`race: rival ${i}'s part is still there (the winner's, or one left for the prune)`, (await get(`/api/job/blobs/${race}/${v}/0`)).body?.data === b64(10, 20 + i));
+  }
+  expect("race: the replaced version's part is gone", await get(`/api/job/blobs/${race}/${vr}/0`), 404, "no_part");
+
+  // the state's and the lists' replaced versions: the last 3 kept, restorable, never rewritten or deleted. Only on a
+  // fresh database (npm test), so a run against the dev Worker never touches its lists
+  const L = "list:open";
+  if ((await get(`/api/job/blobs/${L}`)).status === 404) {
+    const lp = (...p) => `/api/job/blobs/${L}/${p.join("/")}`;
+    const vs = [];
+    for (let i = 0; i < 5; i++) {
+      const v = ver();
+      await put(v, 0, b64(20, 40 + i), L);
+      expect(`history: save ${i}`, await commit(v, { parts: 1, sha256: hex(64, String(i)), meta: { n: i } }, L), 200);
+      vs.push(v);
+    }
+    const kept = await get(lp("versions"));
+    check("history: the last 3 replaced are kept, newest first", kept.status === 200 && JSON.stringify(kept.body?.versions?.map((x) => x.version)) === JSON.stringify([vs[3], vs[2], vs[1]]), kept.body);
+    const k0 = kept.body?.versions?.[0];
+    check("history: each a head with when it was replaced", k0?.meta?.n === 3 && k0.sha256 === hex(64, "3") && k0.parts === 1 && k0.replaced_at >= k0.updated_at && k0.updated_at > 0, k0);
+    check("history: a kept version's part reads back", (await get(lp(vs[2], 0))).body?.data === b64(20, 42));
+    expect("history: the 4th one back is gone with its parts", await get(lp(vs[0], 0)), 404, "no_part");
+    expect("history: a kept version's part can't be rewritten", await put(vs[1], 0, b64(20, 9), L), 409, "live");
+    expect("history: restoring over a version that isn't live is 409 moved", await commit(vs[2], { parts: 1, sha256: hex(64, "2"), expect: vs[3] }, L), 409, "moved");
+    const r = await commit(vs[2], { parts: 1, sha256: hex(64, "2"), meta: { n: 2 }, expect: vs[4] }, L);
+    check("history: committing a kept version again restores it", r.status === 200 && r.body?.version === vs[2] && r.body.meta?.n === 2, r);
+    const after = await get(lp("versions"));
+    check("history: ...and the one it replaced is kept in its place", JSON.stringify(after.body?.versions?.map((x) => x.version)) === JSON.stringify([vs[4], vs[3], vs[1]]), after.body);
+    check("history: the restored version reads back", (await get(lp(vs[2], 0))).body?.data === b64(20, 42) && (await get(lp(vs[4], 0))).body?.data === b64(20, 44));
+    expect("history: the lists can't be deleted", await call("DELETE", `/api/job/blobs/${L}`, { auth: JOB }), 400, "bad_request");
+    expect("history: nor the state", await call("DELETE", "/api/job/blobs/state", { auth: JOB }), 400, "bad_request");
+    check("history: the list is still there", (await get(`/api/job/blobs/${L}`)).body?.version === vs[2]);
+  }
+  check("history: a market keeps none", (await get(path("versions"))).body?.versions?.length === 0);
+
+  // taking a market off the main page marks the request that added it failed, so the site stops linking to it
+  const cOff = CLOSED[3].condition_id;
+  const page = `market:page-${RUN}`;
+  const vp = ver();
+  await put(vp, 0, "UEFHRQ==", page);
+  expect("off: the added market's blob", await commit(vp, { parts: 1, expect: null, meta: { condition_id: cOff } }, page), 200);
+  check("off: its request is added", (await call("GET", `/api/request?cid=${cOff}`)).body?.request?.status === "added");
+  expect("off: DELETE is 204", await call("DELETE", `/api/job/blobs/${page}`, { auth: JOB }), 204);
+  const off = await call("GET", `/api/request?cid=${cOff}`);
+  check("off: the request is failed now, under the same name", off.body?.request?.status === "failed" && off.body.request.name === `page-${RUN}`, off.body);
+  check("off: ...with why, for the review page", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.requests?.find((x) => x.condition_id === cOff)?.note === "taken off the main page");
+  check("off: sending it again changes nothing", (await call("POST", "/api/request", { visitor: "off", body: { condition_id: cOff, token: TOKEN } })).body?.request?.status === "failed");
+
+  // added markets have a cap, so the database keeps room for the rest: 300 parts in all
+  const huge = `market:h${RUN}`;
+  const vh = ver();
+  for (let i = 0; i < 301; i++) await put(vh, i, "AAAA", huge);
+  expect("full: a new market past 300 parts in all is 409 full", await commit(vh, { parts: 301, expect: null }, huge), 409, "full");
+  expect("full: ...and nothing is saved", await get(`/api/job/blobs/${huge}`), 404, "no_blob");
+  const vs1 = ver();
+  await put(vs1, 0, "AAAA", huge);
+  expect("full: a small one still fits", await commit(vs1, { parts: 1, expect: null }, huge), 200);
+
+  // this run's markets go, so the cap never fills on a database the suite runs on again
+  for (const n of [name, race, huge]) expect(`blobs: ${n.replace(RUN, "<run>")} removed`, await call("DELETE", `/api/job/blobs/${n}`, { auth: JOB }), 204);
+}
+
+/** The run's report prunes a part left uncommitted for over a day, and never a live or a kept version's. */
+async function pruneOnly() {
+  const get = (p) => call("GET", p, { auth: JOB });
+  const at = `/api/job/blobs/${PRUNE_MARKET}`;
+  check("prune: the orphan is there before the report", (await get(`${at}/${PRUNE_ORPHAN}/0`)).body?.data === "T1JQSEFO");
+  const kept = (await get("/api/job/blobs/list:open/versions")).body?.versions ?? [];
+  expect("prune: done is 204", await call("POST", "/api/job/done", { auth: JOB, body: {} }), 204);
+  expect("prune: a two-day-old part of no version is gone", await get(`${at}/${PRUNE_ORPHAN}/0`), 404, "no_part");
+  check("prune: a two-day-old live part stays", (await get(`${at}/${PRUNE_LIVE_VERSION}/0`)).body?.data === "TElWRQ==");
+  check("prune: the kept versions' parts stay", kept.length === 3 && (await Promise.all(kept.map((k) => get(`/api/job/blobs/list:open/${k.version}/0`)))).every((r) => r.status === 200), kept.map((k) => k.version));
+}
+
 try {
   const h = await fetch(`${BASE}/api/health`).catch(() => null);
   if (!h) {
@@ -586,6 +823,7 @@ try {
   if (BOT_FAIL) await botFailOnly();
   else if (PRODUCTION) await productionOnly();
   else if (DISPATCH) await dispatchOnly();
+  else if (PRUNE) await pruneOnly();
   else await suite();
 } catch (e) {
   failed.push(`threw: ${e?.stack ?? e}`);

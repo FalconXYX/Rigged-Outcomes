@@ -1,10 +1,11 @@
 // Rigged Outcomes API: one Cloudflare Worker in front of one D1 database (migrations/0001_init.sql).
-// This file routes /api/* to the visitor (public.ts), owner (owner.ts) and job (job.ts) endpoints,
+// This file routes /api/* to the visitor (public.ts), owner (owner.ts) and job (job.ts, blobs.ts) endpoints,
 // answers CORS for the site's own origins only, and turns every failure into
 // {"error": code, "message": plain English}: any unexpected throw is 500 "server", with no stack.
 
 import { type Ctx, type Env, HttpError, authorize, json, log, writesOn } from "./lib";
-import { done, exportAll, putCatalog, putQueue, work } from "./job";
+import { commitBlob, deleteBlob, getBlob, getPart, listBlobs, listVersions, putPart } from "./blobs";
+import { done, putCatalog, putQueue, work } from "./job";
 import { apply, deleteDecision, deleteMarker, overview, putDecision, putSettings } from "./owner";
 import { addMarker, addRequest, getMarkers, getRequest, getWatch, undoMarker, unwatch, watch } from "./public";
 
@@ -33,7 +34,13 @@ const ROUTES: [string, RegExp, "visitor" | "owner" | "job", Handler][] = [
   ["PUT", /^\/api\/job\/queue$/, "job", putQueue],
   ["PUT", /^\/api\/job\/catalog$/, "job", putCatalog],
   ["POST", /^\/api\/job\/done$/, "job", done],
-  ["GET", /^\/api\/job\/export$/, "job", exportAll],
+  ["GET", /^\/api\/job\/blobs$/, "job", listBlobs],
+  ["GET", /^\/api\/job\/blobs\/([^/]+)$/, "job", getBlob],
+  ["DELETE", /^\/api\/job\/blobs\/([^/]+)$/, "job", deleteBlob],
+  ["GET", /^\/api\/job\/blobs\/([^/]+)\/versions$/, "job", listVersions],
+  ["POST", /^\/api\/job\/blobs\/([^/]+)\/([^/]+)$/, "job", commitBlob],
+  ["PUT", /^\/api\/job\/blobs\/([^/]+)\/([^/]+)\/([^/]+)$/, "job", putPart],
+  ["GET", /^\/api\/job\/blobs\/([^/]+)\/([^/]+)\/([^/]+)$/, "job", getPart],
 ];
 
 const METHODS = "GET, POST, PUT, DELETE, OPTIONS";

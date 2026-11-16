@@ -50,7 +50,7 @@ export type Decision = {
   decided_at: number;
   applied_at: number | null;
 };
-/** approved: the next run of the job adds it; added: it is in markets.json; failed: the job couldn't add it (the review page says why) */
+/** approved: the next run of the job adds it; added: it is on the main page; failed: the job couldn't add it (the review page says why) */
 export type RequestStatus = "approved" | "added" | "failed";
 export type PublicRequest = { status: RequestStatus; name: string | null; decided_at: number | null; done_at: number | null };
 export type AddRequest = PublicRequest & {

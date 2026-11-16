@@ -48,7 +48,7 @@ Output CSVs go to the `data/` folder. Only `_clean.csv` and `_insiders.csv` are 
 ```bash
 python3 tests/test_offline.py        # pipeline unit tests, seconds
 for f in tests/test_watchlist_*.py; do python3 "$f" || break; done   # the watchlist modules, about a second each
-python3 tests/test_add_market.py     # adding a market sent to the main page to markets.json (fake pipeline steps)
+python3 tests/test_add_market.py     # adding a market sent to the main page: built in a scratch folder, markets.json untouched (fake pipeline steps)
 python3 tests/test_v2_parity.py      # network, 2-3 minutes: re-fetches two markets and compares them with the committed CSVs
 npm --prefix web run typecheck
 ```
@@ -179,7 +179,7 @@ python3 export.py                 # data/*.csv → web/public/data/*.json (~1 s)
 cd web && npm install && npm run dev
 ```
 
-Re-run `python3 export.py` (or `npm run data` from `web/`) whenever the CSVs or `markets.json` change. `web/public/data/` is generated and gitignored; don't edit it by hand. Its `closed.json` and `open.json` come from the two watchlist lists ([Recently closed](#recently-closed-list-watchlistupsetspy), [Open now](#open-now-list-watchlistopennowpy)), not from `export.py`.
+Re-run `python3 export.py` (or `npm run data` from `web/`) whenever the CSVs or `markets.json` change. `web/public/data/` is generated and gitignored; don't edit it by hand. Its `closed.json` and `open.json` come from the two watchlist lists ([Recently closed](#recently-closed-list-watchlistupsetspy), [Open now](#open-now-list-watchlistopennowpy)), not from `export.py`; the deploy fetches them, with the markets added with "Add to main page", from the database (`python3 -m watchlist.publish`, after `export.py`).
 
 **Other scripts (in `web/`):**
 
@@ -187,11 +187,11 @@ Re-run `python3 export.py` (or `npm run data` from `web/`) whenever the CSVs or 
 - `npm run preview`: serve the production build locally.
 - `npm run typecheck`: type-check only.
 
-**How deploy works:** every push to `main` (or a manual run from the Actions tab, or the daily Watchlist job when it finishes) triggers `.github/workflows/deploy.yml`. The workflow runs `pip install --require-hashes -r requirements.lock` (the same packages as `requirements.txt`, at the tested versions with their hashes) and `python export.py`, copies the Watchlist's `closed.json` and `open.json` from the `watchlist-data` branch (where the daily job publishes them; before that branch exists the Watchlist shows its placeholders), then `npm ci && npm run build` in `web/` with the repository variables `API_URL` and `TURNSTILE_SITEKEY` as `VITE_API_URL` and `VITE_TURNSTILE_SITEKEY` (unset, the build is the site without the visitor controls), uploads `web/dist/` as a Pages artifact and deploys it with `actions/deploy-pages`. The build uses a relative base (`./`) and hash routes (`#/m/usiran/traders`), so it works under any sub-path and survives page refreshes on GitHub Pages without extra config. First-time setup is in [One-time production setup](#one-time-production-setup).
+**How deploy works:** every push to `main` (or a manual run from the Actions tab, or the daily Watchlist job when it finishes) triggers `.github/workflows/deploy.yml`. The workflow runs `pip install --require-hashes -r requirements.lock` (the same packages as `requirements.txt`, at the tested versions with their hashes) and `python export.py`, then `python3 -m watchlist.publish`, which fetches the Watchlist's `closed.json` and `open.json` and the markets added with "Add to main page" from the database through the API and builds each added market's page again with this `export.py` (with no API configured the Watchlist shows its placeholders; while the API is down the live site's copies stand in; a wrong token fails the build, so Pages keeps the last site), then `npm ci && npm run build` in `web/` with the repository variables `API_URL` and `TURNSTILE_SITEKEY` as `VITE_API_URL` and `VITE_TURNSTILE_SITEKEY` (unset, the build is the site without the visitor controls), uploads `web/dist/` as a Pages artifact and deploys it with `actions/deploy-pages`. The build uses a relative base (`./`) and hash routes (`#/m/usiran/traders`), so it works under any sub-path and survives page refreshes on GitHub Pages without extra config. First-time setup is in [One-time production setup](#one-time-production-setup).
 
 ### Home page
 
-Markets appear in `markets.json` order. A **Sort & filter** button above the grid opens a bar to sort (*Most suspicious* — the Flagged capital figure the cards show, flagged accounts' share of whale capital — *Flagged winnings*, *Flagged accounts*, *Volume*, *Newest*) and filter (resolved Yes/No, only markets with flagged wallets). Nothing is applied by default; the choice lives in the URL (`#/?sort=volume&resolved=yes&flagged=1`) so a sorted view is a shareable link. Ranking logic is in `web/src/views/home/ranking.ts`.
+Markets appear in `markets.json` order, then the ones added with "Add to main page", oldest first. A **Sort & filter** button above the grid opens a bar to sort (*Most suspicious* — the Flagged capital figure the cards show, flagged accounts' share of whale capital — *Flagged winnings*, *Flagged accounts*, *Volume*, *Newest*) and filter (resolved Yes/No, only markets with flagged wallets). Nothing is applied by default; the choice lives in the URL (`#/?sort=volume&resolved=yes&flagged=1`) so a sorted view is a shareable link. Ranking logic is in `web/src/views/home/ranking.ts`.
 
 ### Market replay and shareable links (timeline view)
 
@@ -272,21 +272,29 @@ The static site gets a small backend for what visitors do, and the two Watchlist
 
 | Piece | Where | What it does |
 |---|---|---|
-| API | `worker/` (a Cloudflare Worker with one D1 database) | Timeline markers visitors add, the site's one watchlist ("Watch" puts a market on it for everyone), the markets sent with "Add to main page" (added by the job's next run, no review), the owner's decisions and the job's reports; a Turnstile bot check and daily limits on every visitor write. See `worker/README.md` |
+| API | `worker/` (a Cloudflare Worker with one D1 database) | Timeline markers visitors add, the site's one watchlist ("Watch" puts a market on it for everyone), the markets sent with "Add to main page" (added by the job's next run, no review), the owner's decisions, the job's reports and the job's own data; a Turnstile bot check and daily limits on every visitor write. See `worker/README.md` |
 | Review page | `#/review` (linked from nowhere) | The owner's page: the Open now queue, the markets sent to the main page, markers, the watchlist, the last runs, a pause switch |
-| Job | `.github/workflows/watchlist.yml` | At about 04:17 UTC: the owner's decisions, both lists, the markets sent to the main page, then the deploy. |
-| Job state | the `watchlist-data` branch (`watchlist/state.py`) | The job's memory between runs (the store tables the lists use, as JSONL), the published lists, a backup of the API's database |
+| Job | `.github/workflows/watchlist.yml` | At about 04:17 UTC: the owner's decisions, both lists, the markets sent to the main page, then the deploy. It never writes to git |
+| Job data | the D1 database via the API's job endpoints (`watchlist/state.py`, `watchlist/blobs.py`) | The job's memory between runs (the store tables the lists use), the published lists, the news cache and the added markets; nothing in git |
 | API client | `watchlist/sync.py` | The job's side of the API: fetch the work, save decisions, send the review queue and the catalog of what visitors may write to, report the run |
-| Adding a market | `add_market.py` | A market sent with "Add to main page": names its page from the slug, checks it on Polymarket, adds it to `markets.json`, downloads, cleans and scores it |
-| Mac fallback | `scripts/watchlist-mac.sh` | The same daily job on this Mac (it never adds markets) |
+| Adding a market | `add_market.py` | A market sent with "Add to main page": names its page from the slug, checks it on Polymarket, downloads, cleans, scores and exports it on the runner and stores its page and its clean and insiders CSVs in the database; `markets.json` is never changed |
+| Mac fallback | `scripts/watchlist-mac.sh` | The same daily job on this Mac, same database |
+
+The commands that use the API read `WATCHLIST_API_URL` and `WATCHLIST_JOB_TOKEN` from the environment, else from the `.env` file next to the repository:
 
 ```bash
-python3 -m watchlist.state pull                     # the branch's state into data/watchlist/watchlist.db (refuses to replace newer local data)
-python3 -m watchlist.state push                     # prune, then commit the state and the lists to the branch (refused if it moved since the pull)
-python3 -m watchlist.state dump DIR                 # the state as files, no git (load DIR reads them back)
-python3 -m watchlist.sync catalog                   # tell the API what visitors may write to (needs WATCHLIST_API_URL and WATCHLIST_JOB_TOKEN)
+python3 -m watchlist.state pull                     # the saved state into data/watchlist/watchlist.db, and the lists (refuses to replace newer local data)
+python3 -m watchlist.state push                     # prune, then save the state and the lists (refused if the saved state changed since the pull)
+python3 -m watchlist.state migrate                  # one-off: the old git branch's state and lists into the database
+python3 -m watchlist.state dump DIR                 # the state as files (load DIR reads them back)
+python3 -m watchlist.blobs ls                       # what the job keeps in the database: state, lists, news cache, added markets
+python3 -m watchlist.blobs rm market:NAME           # take an added market back off the main page (the next deploy drops it; its request shows "taken off the main page")
+python3 -m watchlist.blobs versions state           # the last 3 saves of the job's memory it replaced (also list:closed, list:open)
+python3 -m watchlist.blobs restore state VERSION    # undo a bad save: make a kept one live again
+python3 -m watchlist.publish --out web/public/data  # the deploy's step after export.py: the lists and the added markets
+python3 -m watchlist.sync catalog                   # tell the API what visitors may write to
 python3 add_market.py --condition-id 0x... --slug SLUG --outcome Yes --dry-run   # check one on Polymarket (--name NAME, else from the slug)
-python3 tests/test_watchlist_state.py               # offline tests, git work in a throwaway repository
+python3 tests/test_watchlist_state.py               # offline tests against a stand-in API (tests/fake_api.py), no git
 ```
 
 ---

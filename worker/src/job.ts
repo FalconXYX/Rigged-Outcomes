@@ -1,11 +1,8 @@
 // The daily job's endpoints, behind JOB_TOKEN (watchlist/sync.py): what to apply, the open list's review
-// queue, the catalog of what visitors may write to, the run's report (which also prunes old rows), and an
-// export for the backup on the public watchlist-data branch: no visitor or undo hashes, and only markers that
-// are live and at least 2 days old, so the owner has two days to delete an abusive one before it reaches git.
+// queue, the catalog of what visitors may write to, and the run's report (which also prunes old rows). The
+// job's own data (its memory, the lists, added markets) is in blobs.ts.
 
-/** A marker reaches the public backup only once it has been up this long without being deleted. */
-const BACKUP_MARKER_AGE = 2 * DAY;
-
+import { pruneParts } from "./blobs";
 import {
   BODY,
   CONDITION_ID,
@@ -28,7 +25,7 @@ import {
   readBody,
   text,
 } from "./lib";
-import { MARKER_COLUMNS, decision } from "./owner";
+import { decision } from "./owner";
 import { forgetMarkers } from "./public";
 
 /** opennow offers at most QUEUE_MAX (15) stories a day; twice that leaves room. */
@@ -192,7 +189,8 @@ export async function putCatalog({ req, env }: Ctx): Promise<Response> {
  * `requests`: what adding the markets did (the page name the job gave one is kept), recorded only while it is
  * still approved. `run`: one job_runs row. Then the old rows go: limits after 3 days, runs beyond 200, deleted
  * markers after 30 days, visitor hashes on markers after 30 days, watchlist stories over 30 days old that are no
- * longer listed, withdrawals no run reported within 30 days, queue days beyond 7.
+ * longer listed, withdrawals no run reported within 30 days, queue days beyond 7, and blob parts a save left
+ * uncommitted after a day.
  */
 export async function done({ req, env }: Ctx): Promise<Response> {
   // Only what identifies a row is strict here; a long note or summary is cut and a link that isn't https:// is
@@ -278,34 +276,8 @@ export async function done({ req, env }: Ctx): Promise<Response> {
     ),
     env.DB.prepare("DELETE FROM open_decisions WHERE decision = 'withdrawn' AND decided_at < ?").bind(at - 30 * DAY),
     pruneQueue(env),
+    pruneParts(env, at),
   );
   await env.DB.batch(statements);
   return noContent();
-}
-
-/**
- * The backup the job commits to the public watchlist-data branch: everything but visitor and undo hashes, and of
- * the markers only the live ones at least BACKUP_MARKER_AGE old (a deleted or brand-new label never reaches git;
- * D1's Time Travel covers the rest for 7 days).
- */
-export async function exportAll({ env }: Ctx): Promise<Response> {
-  const [settings, markers, watches, requests, decisions, runs] = await env.DB.batch([
-    env.DB.prepare("SELECT key, value FROM settings ORDER BY key"),
-    env.DB.prepare(`SELECT ${MARKER_COLUMNS} FROM markers WHERE deleted_at IS NULL AND created_at < ? ORDER BY created_at, id`).bind(
-      now() - BACKUP_MARKER_AGE,
-    ),
-    env.DB.prepare("SELECT story, created_at FROM watches ORDER BY story"),
-    env.DB.prepare("SELECT * FROM requests ORDER BY requested_at, condition_id"),
-    env.DB.prepare("SELECT * FROM open_decisions ORDER BY story, headline_key"),
-    env.DB.prepare("SELECT * FROM job_runs ORDER BY id"),
-  ]);
-  return json({
-    exported_at: now(),
-    settings: Object.fromEntries((settings.results as { key: string; value: string }[]).map((r) => [r.key, r.value])),
-    markers: markers.results,
-    watches: watches.results,
-    requests: requests.results,
-    decisions: decisions.results.map(decision),
-    runs: runs.results,
-  });
 }

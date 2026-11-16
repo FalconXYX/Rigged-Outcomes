@@ -7,11 +7,13 @@ markets.json. No network.
     python3 tests/test_add_market.py
 
 Covers the page name (given, or made from the slug when the job has none)
-and its PascalCase output, Polymarket's market having
-to match (condition id, closed, winner), a slug already on the main page
-reported as added with no work, a name or output already taken, the size
-caps (markets.json put back byte for byte, the new CSVs removed), a dry run
-changing nothing, and markets.json written exactly the way it is today.
+and its PascalCase output, avoiding the names and outputs of committed and
+added markets, Polymarket's market having to match (condition id, closed,
+winner), a slug already on the main page (committed, or added before)
+reported as added with no work, a name or output already taken, the caps
+(fills, the page's size), a step that fails, and a dry run. Whatever
+happens, markets.json stays byte for byte as it was and the scratch folder
+the market was built in is gone.
 """
 import json
 import os
@@ -30,10 +32,10 @@ MARKET = {"conditionId": CID, "closed": True, "umaResolutionStatus": "resolved",
 
 
 class Fake:
-    """The pipeline's steps, writing small files; records what ran."""
+    """The pipeline's steps, writing small files into the scratch folder; records what ran."""
 
-    def __init__(self, market=MARKET, fills=3, clean_bytes=10):
-        self.market, self.fills, self.clean_bytes, self.ran = market, fills, clean_bytes, []
+    def __init__(self, market=MARKET, fills=3, page_bytes=10):
+        self.market, self.fills, self.page_bytes, self.ran = market, fills, page_bytes, []
 
     def steps(self):
         def gamma(slug):
@@ -41,7 +43,7 @@ class Fake:
             return dict(self.market)
 
         def download(slug, raw, max_rows):
-            self.ran.append(("download", slug, max_rows))
+            self.ran.append(("download", slug, max_rows, raw))
             n = min(self.fills, max_rows)
             with open(raw, "w") as f:
                 f.write("h\n" + "r\n" * n)
@@ -50,25 +52,44 @@ class Fake:
         def clean(raw, out):
             self.ran.append(("clean", os.path.basename(raw), os.path.basename(out)))
             with open(out, "w") as f:
-                f.write("x" * self.clean_bytes)
+                f.write("clean\n")
 
         def score(entry, clean, out):
             self.ran.append(("score", entry["output"]))
             with open(out, "w") as f:
                 f.write("insiders\n")
 
-        def export():
-            self.ran.append(("export", os.getcwd()))
+        def export(entry, data_dir):
+            self.ran.append(("export", entry, sorted(os.listdir(data_dir))))
+            return ({"name": entry["name"], "slug": entry["slug"], "title": "T?"},
+                    {"name": entry["name"], "slug": entry["slug"], "pad": "x" * self.page_bytes})
 
         return {"gamma": gamma, "download": download, "clean": clean, "score": score, "export": export}
 
 
-def repo():
-    """A temporary root holding today's markets.json and an empty data/."""
-    tmp = tempfile.mkdtemp()
-    shutil.copy(os.path.join(ROOT, "markets.json"), os.path.join(tmp, "markets.json"))
-    os.makedirs(os.path.join(tmp, "data"))
-    return tmp
+class repo:
+    """A temporary root holding today's markets.json and an empty data/; yields it, then checks markets.json is
+    byte for byte as it was and no scratch folder is left."""
+
+    def __enter__(self):
+        self.tmp = tempfile.mkdtemp()
+        shutil.copy(os.path.join(ROOT, "markets.json"), os.path.join(self.tmp, "markets.json"))
+        os.makedirs(os.path.join(self.tmp, "data"))
+        self.before = read(os.path.join(self.tmp, "markets.json"))
+        return self.tmp
+
+    def __exit__(self, *exc):
+        try:
+            if exc[0] is None:
+                assert read(os.path.join(self.tmp, "markets.json")) == self.before, "markets.json changed"
+                work = os.path.join(self.tmp, A.WORK_DIR)
+                assert not os.path.exists(work) or os.listdir(work) == [], os.listdir(work)
+                assert set(os.listdir(os.path.join(self.tmp, "data"))) <= {"watchlist"} | set(self.kept), \
+                    os.listdir(os.path.join(self.tmp, "data"))
+        finally:
+            shutil.rmtree(self.tmp)
+
+    kept = ()
 
 
 def read(path, mode="rb"):
@@ -97,70 +118,79 @@ def test_page_name_from_the_slug():
     assert A.page_name("gemini-carbon", markets + [{"name": "o", "output": "GeminiCarbon"}]) == "gemini-carbon-2"
     long = A.page_name("a" * 40, markets + [{"name": "a" * 32, "output": "A"}])
     assert long == "a" * 30 + "-2" and A.NAME.match(long)
-    tmp = repo()
+    tmp = tempfile.mkdtemp()
     try:
+        os.makedirs(os.path.join(tmp, "data"))
         open(os.path.join(tmp, "data", "GeminiCarbon_clean.csv"), "w").close()     # files of that output name
         assert A.page_name("gemini-carbon", markets, root=tmp) == "gemini-carbon-2"
     finally:
         shutil.rmtree(tmp)
 
 
-def test_markets_json_is_written_the_way_it_is():
-    raw = read(os.path.join(ROOT, "markets.json")).decode("utf-8")
-    assert A.render(json.loads(raw)) == raw                   # re-dumping today's file gives it byte for byte
-    entry = {"name": "gemini-carbon", "slug": "s", "output": "GeminiCarbon", "correct_outcome": "Yes"}
-    assert A.render(json.loads(raw) + [entry], raw).startswith(raw.rstrip()[:-1].rstrip())
-    # a file in another layout keeps its text; the entry goes in before the final "]"
-    odd = '[\n    {"name": "a", "slug": "b", "output": "A"}\n]\n'
-    out = A.render(json.loads(odd) + [entry], odd)
-    assert out.startswith('[\n    {"name": "a", "slug": "b", "output": "A"},\n') and json.loads(out)[1] == entry
-    assert json.loads(A.render([entry], "[]\n")) == [entry]
-
-
 def test_adds_a_market():
-    tmp = repo()
-    try:
-        before = read(os.path.join(tmp, "markets.json")).decode()
+    with repo() as tmp:
         f = Fake()
         got = A.add(CID.upper().replace("0X", "0x"), "event/gemini-carbon-ship#9", "gemini-carbon", "yes",
                     root=tmp, steps=f.steps())
-        assert got == {"status": "added", "name": "gemini-carbon", "note": None, "changed": True}, got
-        markets = json.loads(read(os.path.join(tmp, "markets.json")))
-        assert markets[-1] == {"name": "gemini-carbon", "slug": "gemini-carbon-ship", "output": "GeminiCarbon",
-                               "correct_outcome": "Yes"}
-        assert read(os.path.join(tmp, "markets.json")).decode() == A.render(json.loads(before) + [markets[-1]])
-        for s in ("", "_clean", "_insiders"):
-            assert os.path.exists(os.path.join(tmp, "data", f"GeminiCarbon{s}.csv"))
+        entry = {"name": "gemini-carbon", "slug": "gemini-carbon-ship", "output": "GeminiCarbon",
+                 "correct_outcome": "Yes"}
+        assert got == {"status": "added", "name": "gemini-carbon", "note": None, "changed": True, "entry": entry,
+                       "index": {"name": "gemini-carbon", "slug": "gemini-carbon-ship", "title": "T?"},
+                       "market": {"name": "gemini-carbon", "slug": "gemini-carbon-ship", "pad": "x" * 10},
+                       "data": {"GeminiCarbon_clean.csv": "clean\n", "GeminiCarbon_insiders.csv": "insiders\n"}}, got
         assert [r[0] for r in f.ran] == ["gamma", "download", "clean", "score", "export"]
-        assert f.ran[1] == ("download", "gemini-carbon-ship", A.MAX_FILLS + 1)
-        assert os.path.realpath(f.ran[-1][1]) == os.path.realpath(tmp)          # the export runs in the repo
-        # again: already on the main page, nothing runs
+        assert f.ran[1][:3] == ("download", "gemini-carbon-ship", A.MAX_FILLS + 1)
+        scratch = os.path.dirname(f.ran[1][3])                                  # built in data/watchlist/add/<...>
+        assert os.path.dirname(scratch) == os.path.join(tmp, A.WORK_DIR) and not os.path.exists(scratch)
+        assert f.ran[-1] == ("export", entry, ["GeminiCarbon.csv", "GeminiCarbon_clean.csv",
+                                               "GeminiCarbon_insiders.csv"])
+        # added before (the database's entries): already on the main page, nothing runs
         f2 = Fake()
-        got = A.add(CID, "gemini-carbon-ship", "other-name", "Yes", root=tmp, steps=f2.steps())
-        assert got["status"] == "added" and got["name"] == "gemini-carbon" and not got["changed"]
+        got = A.add(CID, "gemini-carbon-ship", "other-name", "Yes", root=tmp, steps=f2.steps(), added=[entry])
+        assert got == {"status": "added", "name": "gemini-carbon", "note": "already on the main page",
+                       "changed": False}
         assert [r[0] for r in f2.ran] == ["gamma"]
-    finally:
-        shutil.rmtree(tmp)
+
+
+def test_already_on_the_main_page_through_markets_json():
+    with repo() as tmp:
+        usiran = next(m for m in json.loads(read(os.path.join(tmp, "markets.json"))) if m["name"] == "usiran")
+        repo.kept = tuple(f"{usiran['output']}{s}.csv" for s in ("_clean", "_insiders"))
+        try:
+            for name in repo.kept:
+                open(os.path.join(tmp, "data", name), "w").close()
+            f = Fake()
+            got = A.add(CID, usiran["slug"], None, "Yes", root=tmp, steps=f.steps())
+            assert got == {"status": "added", "name": "usiran", "note": "already on the main page", "changed": False}
+            assert [r[0] for r in f.ran] == ["gamma"]
+        finally:
+            for name in repo.kept:
+                os.remove(os.path.join(tmp, "data", name))
+            repo.kept = ()
 
 
 def test_adds_a_market_named_from_its_slug():
-    tmp = repo()
-    try:
+    with repo() as tmp:
         got = A.add(CID, "event/gemini-carbon-ship#9", None, "Yes", root=tmp, steps=Fake().steps())
-        assert got == {"status": "added", "name": "gemini-carbon-ship", "note": None, "changed": True}, got
-        entry = json.loads(read(os.path.join(tmp, "markets.json")))[-1]
-        assert entry["name"] == "gemini-carbon-ship" and entry["output"] == "GeminiCarbonShip"
+        assert got["status"] == "added" and got["name"] == "gemini-carbon-ship" and got["changed"]
+        assert got["entry"]["output"] == "GeminiCarbonShip"
+        # the names and outputs of markets added before are taken too
+        before = [got["entry"], {"name": "x9", "slug": "s9", "output": "OtherShip2"}]
+        got = A.add(CID, "event2/gemini-carbon-ship", None, "Yes", root=tmp, steps=Fake().steps(),
+                    added=[dict(before[0], slug="elsewhere"), {"name": "gemini-carbon-ship-2", "slug": "s2",
+                                                               "output": "Q"}])
+        assert got["name"] == "gemini-carbon-ship-3" and got["entry"]["output"] == "GeminiCarbonShip3"
+        got = A.add(CID, "new-slug", "x9", "Yes", root=tmp, steps=Fake().steps(), added=before)
+        assert got["status"] == "failed" and "page name 'x9' is taken" in got["note"]
+        got = A.add(CID, "new-slug", "other-ship2", "Yes", root=tmp, steps=Fake().steps(), added=before)
+        assert got["status"] == "failed" and "output name 'OtherShip2' is taken" in got["note"]
         # a failure before the name is made reports none
         got = A.add(CID, "other-slug", None, "Yes", root=tmp, steps=Fake(market=dict(MARKET, closed=False)).steps())
         assert got["status"] == "failed" and got["name"] is None and "not closed" in got["note"]
-    finally:
-        shutil.rmtree(tmp)
 
 
 def test_polymarket_must_match():
-    tmp = repo()
-    try:
-        before = read(os.path.join(tmp, "markets.json"))
+    with repo() as tmp:
         cases = [(dict(MARKET, conditionId="0x" + "cd" * 32), "different condition id"),
                  (dict(MARKET, closed=False), "not closed"),
                  (dict(MARKET, outcomePrices='["0.5", "0.5"]'), "one winner"),
@@ -169,46 +199,41 @@ def test_polymarket_must_match():
             f = Fake(market=market)
             got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=f.steps())
             assert got["status"] == "failed" and words in got["note"], (words, got)
-            assert [r[0] for r in f.ran] == ["gamma"] and read(os.path.join(tmp, "markets.json")) == before
-        assert os.listdir(os.path.join(tmp, "data")) == []
-    finally:
-        shutil.rmtree(tmp)
+            assert [r[0] for r in f.ran] == ["gamma"]
 
 
 def test_taken_names_and_files():
-    tmp = repo()
-    try:
-        before = read(os.path.join(tmp, "markets.json"))
+    with repo() as tmp:
         got = A.add(CID, "new-slug", "usiran", "Yes", root=tmp, steps=Fake().steps())
         assert got["status"] == "failed" and "taken" in got["note"]
         got = A.add(CID, "new-slug", "Bad_Name", "Yes", root=tmp, steps=Fake().steps())
         assert got["status"] == "failed" and "page name" in got["note"]
-        open(os.path.join(tmp, "data", "GeminiCarbon_clean.csv"), "w").close()        # a stray file is never overwritten
+        stray = os.path.join(tmp, "data", "GeminiCarbon_clean.csv")
+        open(stray, "w").close()                                        # files of that output name in data/
         got = A.add(CID, "new-slug", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps())
-        assert got["status"] == "failed" and "nothing was overwritten" in got["note"]
-        assert os.path.exists(os.path.join(tmp, "data", "GeminiCarbon_clean.csv"))
+        assert got["status"] == "failed" and "in data/ already" in got["note"]
+        os.remove(stray)
         # the slug is listed but its data files are missing
-        superbowl = next(m for m in json.loads(before) if m["name"] == "superbowl")
+        superbowl = next(m for m in json.loads(read(os.path.join(tmp, "markets.json"))) if m["name"] == "superbowl")
         got = A.add(CID, superbowl["slug"], "another", "Yes", root=tmp, steps=Fake().steps())
         assert got["status"] == "failed" and "without its data files" in got["note"]
-        assert read(os.path.join(tmp, "markets.json")) == before
-    finally:
-        shutil.rmtree(tmp)
 
 
-def test_size_caps_put_everything_back():
-    tmp = repo()
-    try:
-        before = read(os.path.join(tmp, "markets.json"))
+def test_caps_and_failures_leave_nothing_behind():
+    with repo() as tmp:
         got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(fills=6).steps(), max_fills=5)
         assert got["status"] == "failed" and "over 5 fills" in got["note"], got
-        assert read(os.path.join(tmp, "markets.json")) == before and os.listdir(os.path.join(tmp, "data")) == []
-        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(clean_bytes=100).steps(),
-                    max_clean_bytes=50)
-        assert got["status"] == "failed" and "MB" in got["note"], got
-        assert read(os.path.join(tmp, "markets.json")) == before and os.listdir(os.path.join(tmp, "data")) == []
+        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(page_bytes=2_000_000).steps(),
+                    max_page_bytes=1_000_000)
+        assert got["status"] == "failed" and "its page is 2 MB, over the 1 MB" in got["note"], got
+        assert A.MAX_PAGE_BYTES == 10_000_000
+        # its data files, saved with it so the deploy can build its page again, have a cap too
+        got = A.add(CID, "event/gemini-carbon-ship#9", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps(),
+                    max_data_bytes=10)
+        assert got["status"] == "failed" and "its data files are 0 MB, over the 0 MB" in got["note"], got
+        assert A.MAX_DATA_BYTES == 40_000_000
 
-        # a step that raises (the trade feed down, a whale's history refused) puts everything back too
+        # a step that raises (the trade feed down, a whale's history refused)
         f = Fake()
         steps = f.steps()
 
@@ -219,26 +244,44 @@ def test_size_caps_put_everything_back():
         steps["score"] = refused
         got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=steps)
         assert got["status"] == "failed" and got["note"].startswith("RuntimeError: prior history")
-        assert read(os.path.join(tmp, "markets.json")) == before and os.listdir(os.path.join(tmp, "data")) == []
         # no trades at all
         got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(fills=0).steps())
         assert got["status"] == "failed" and "no trades" in got["note"]
-        assert read(os.path.join(tmp, "markets.json")) == before and os.listdir(os.path.join(tmp, "data")) == []
-    finally:
-        shutil.rmtree(tmp)
+        # a page the site could not read (NaN) fails here, not at the deploy
+        steps = Fake().steps()
+        steps["export"] = lambda entry, d: ({"name": entry["name"]}, {"name": entry["name"], "x": float("nan")})
+        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=steps)
+        assert got["status"] == "failed" and got["note"].startswith("ValueError")
+    # a scratch folder elsewhere (work_dir) is removed too
+    with repo() as tmp, tempfile.TemporaryDirectory() as work:
+        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps(), work_dir=work)
+        assert got["changed"] and os.listdir(work) == []
 
 
 def test_dry_run_changes_nothing():
-    tmp = repo()
-    try:
-        before = read(os.path.join(tmp, "markets.json"))
+    with repo() as tmp:
         f = Fake()
         got = A.add(CID, "s", "gemini-carbon", "Yes", dry_run=True, root=tmp, steps=f.steps())
         assert got["status"] == "added" and not got["changed"] and "GeminiCarbon" in got["note"]
-        assert [r[0] for r in f.ran] == ["gamma"] and read(os.path.join(tmp, "markets.json")) == before
-        assert os.listdir(os.path.join(tmp, "data")) == []
+        assert set(got) == {"status", "name", "note", "changed"}
+        assert [r[0] for r in f.ran] == ["gamma"] and os.listdir(os.path.join(tmp, "data")) == []
+
+
+def test_the_command_needs_the_api():
+    from watchlist import ai
+    old = (os.environ.pop("WATCHLIST_API_URL", None), os.environ.pop("WATCHLIST_JOB_TOKEN", None), ai.ENV_FILE)
+    ai.ENV_FILE = os.path.join(tempfile.gettempdir(), "no-such-dir-rigged", ".env")
+    try:
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            assert A.main(["--condition-id", CID, "--slug", "s", "--outcome", "Yes"]) == 2
+        assert "No API configured" in err.getvalue()
     finally:
-        shutil.rmtree(tmp)
+        ai.ENV_FILE = old[2]
+        for k, v in zip(("WATCHLIST_API_URL", "WATCHLIST_JOB_TOKEN"), old[:2]):
+            if v is not None:
+                os.environ[k] = v
 
 
 if __name__ == "__main__":

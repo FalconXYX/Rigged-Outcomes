@@ -12,9 +12,11 @@
 # The site is served at https://parthjain.ca/Rigged-Outcomes/ (Vite base "./" + hash
 # routing, so no path configuration is needed here).
 #
-# The Watchlist's two lists (closed.json, open.json) come from the `watchlist-data` branch, which the daily
-# Watchlist job (.github/workflows/watchlist.yml) writes; that job also calls this workflow after each run.
-# Before the branch exists, the build goes ahead without them (the Watchlist shows its placeholders).
+# The Watchlist's two lists (closed.json, open.json) and the markets added with "Add to main page" come from
+# the database, through the API (watchlist/publish.py), where the daily Watchlist job
+# (.github/workflows/watchlist.yml) saves them; that job also calls this workflow after each run. With no API
+# configured, the build goes ahead without them (the Watchlist shows its placeholders); while the API is down,
+# the live site's own copies stand in.
 
 name: Deploy dashboard to GitHub Pages
 
@@ -25,9 +27,12 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: "the commit to build (the Watchlist job passes main, which it may just have pushed to)"
+        description: "the commit to build (the Watchlist job passes main)"
         type: string
         default: main
+    secrets:
+      WATCHLIST_JOB_TOKEN:
+        required: false
 
 # The build (which installs packages from npm and PyPI) reads the repository only; the Pages permissions belong
 # to the deploy job alone.
@@ -43,6 +48,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -56,15 +62,15 @@ jobs:
       - name: Export dashboard data
         run: python export.py
 
-      # The Watchlist's lists, as the daily job last published them
-      - name: Add the Watchlist lists
-        run: |
-          if git fetch --depth=1 origin watchlist-data 2>/dev/null; then
-            git show FETCH_HEAD:site/closed.json > web/public/data/closed.json || rm -f web/public/data/closed.json
-            git show FETCH_HEAD:site/open.json > web/public/data/open.json || rm -f web/public/data/open.json
-          else
-            echo "::notice::No watchlist-data branch yet: the Watchlist shows its placeholders"
-          fi
+      # The Watchlist's lists and the markets added with "Add to main page", as the daily job saved them in the
+      # database (each added market's page built again with this export.py). With no API configured the site is
+      # built without them; while the API is down the live site's copies stand in; a refusal (a wrong token), or
+      # the API and the live site both down, fails the build, so Pages keeps the last site.
+      - name: Add the Watchlist lists and the added markets
+        env:
+          WATCHLIST_API_URL: ${{ vars.API_URL }}
+          WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
+        run: python3 -m watchlist.publish --out web/public/data
 
       - name: Set up Node
         uses: actions/setup-node@v7

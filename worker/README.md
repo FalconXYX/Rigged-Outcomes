@@ -1,6 +1,6 @@
 # Rigged Outcomes API (`worker/`)
 
-A small Cloudflare Worker (`rigged-outcomes-api`) with one D1 database (`rigged-outcomes`), both on Cloudflare's free plan with no card. It keeps what the static site can't: timeline markers that visitors add, the site's one watchlist ("Watch" puts an open market on it and "Stop watching" takes it off, for everyone), the markets sent with "Add to main page" (recorded as approved at once; the job's next run, daily, adds each under a page name made from its slug), the owner's decisions on the open list's review queue, and the job's reports. The site works exactly as before when no API is configured or the API is down.
+A small Cloudflare Worker (`rigged-outcomes-api`) with one D1 database (`rigged-outcomes`), both on Cloudflare's free plan with no card. It keeps what the static site can't: timeline markers that visitors add, the site's one watchlist ("Watch" puts an open market on it and "Stop watching" takes it off, for everyone), the markets sent with "Add to main page" (recorded as approved at once; the job's next run, daily, adds each under a page name made from its slug), the owner's decisions on the open list's review queue, the job's reports, and everything the daily job keeps (its memory between runs, the two lists, the news cache and the added markets' pages; nothing of it is in git). When the API is down the site still works: the lists and added markets are built into it at deploy time, and only the visitor controls wait.
 
 Setting it up on the real account (creating the database, secrets, Turnstile, deploying) is in [`docs/DEPLOY.md`](../docs/DEPLOY.md). Nothing in this folder deploys anything by itself.
 
@@ -9,14 +9,16 @@ Setting it up on the real account (creating the database, secrets, Turnstile, de
 | File | What it is |
 |---|---|
 | `wrangler.toml` | The Worker, its D1 binding (the live database's `database_id`) and the production vars |
-| `migrations/` | The D1 schema: `0001_init.sql`, then `0002_site_watchlist.sql` (one watchlist for the site; adds need no review) |
+| `migrations/` | The D1 schema: `0001_init.sql`, then `0002_site_watchlist.sql` (one watchlist for the site; adds need no review), then `0003_job_blobs.sql` (the daily job's data) |
 | `src/index.ts` | Routes, CORS (only the origins in `ALLOWED_ORIGINS`) and the error wrapper |
 | `src/lib.ts` | Shared pieces: bodies, the visitor hash, token checks, daily limits, Turnstile, the label rules |
 | `src/public.ts` | Visitor endpoints: markers, the watchlist, Add to main page |
 | `src/owner.ts` | Owner endpoints for the review page (`#/review`), behind `OWNER_TOKEN` |
 | `src/job.ts` | Daily job endpoints (`watchlist/sync.py`), behind `JOB_TOKEN` |
+| `src/blobs.ts` | The job's data endpoints (`watchlist/blobs.py`), behind `JOB_TOKEN`: save, read, list, restore and delete blobs |
 | `test/smoke.mjs` | Checks every endpoint against a running local Worker |
-| `test/run.mjs` | `npm test`: the smoke test on a throwaway local database, start to finish |
+| `test/client.py` | The job's own Python client (`watchlist/blobs.py`, `watchlist/state.py`) against the Worker `npm test` starts |
+| `test/run.mjs` | `npm test`: the smoke test, the client check and the prune check on a throwaway local database, start to finish |
 | `.dev.vars.example` | Local values (test Turnstile secret, dev tokens); copy it to `.dev.vars` |
 
 ## Running it locally
@@ -61,7 +63,7 @@ npm run smoke       # only the smoke test, against a Worker you already started 
 - **Pause:** the review page's switch (`settings.writes`) stops visitors' markers, watches and adds to the main page at once; undo and unwatch keep working.
 - **Sign-in:** the owner and the job each have one bearer token. The right token always gets in; after 10 wrong ones from one address in a UTC day, its wrong tokens are answered `locked` until the next.
 - **Bodies** must be sent as `application/json` (415 otherwise), so another site's page can't post one without the CORS preflight the Worker refuses.
-- **The public backup** (`GET /api/job/export`, committed daily to the `watchlist-data` branch) has no visitor or undo hashes, and of the markers only the live ones at least 2 days old.
+- **The job's data** is kept as blobs (`/api/job/blobs`): each one a gzip-compressed JSON document as base64 text, in parts of 500,000 characters (`job_blob_parts`), with `job_blobs` naming the live version. A save writes the new parts beside the old ones and moves the pointer last, in one statement, so a reader never sees half a save; the parts of a save left unfinished go after a day. The state's and the lists' last 3 replaced versions are kept (`job_blob_versions`), so one bad save can be undone on its own (`python3 -m watchlist.blobs restore`); they can't be deleted. Added markets stop at 200, or 300 parts in all (409 `full`), so the database keeps room for the rest. Deleting a market's blob marks its request failed, "taken off the main page". The whole database's backup is D1 Time Travel (7 days on the free plan).
 - **Taking back a decision** on the review page marks it `withdrawn`; the next run removes it from the job's store too (a run may already have saved it) and reports it, and then the row goes.
 - **Errors** are `{"error": code, "message": text}`. The site shows its own words for each code and never the message.
 - **Test-only headers:** with `DEV=on` (never in production), `X-Test-Visitor`, `X-Test-IP` and `X-Test-Day` stand in for the visitor hash, the visitor's address and the day the limits count under, and `GITHUB_API` can point the dispatch elsewhere.

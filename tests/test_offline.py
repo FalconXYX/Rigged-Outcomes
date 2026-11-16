@@ -8,7 +8,8 @@ Offline unit tests for the v2 pipeline: no network, a few seconds.
 polymarket_api.get_json is replaced by a fake that serves scripted pages, so
 these cover the client's guards (what a stalled or malformed feed does), the
 whale scorer's address fallback, the empty-market _insiders.csv and
-export.py's handling of it, the correct_outcome guard, and that importing
+export.py's handling of it, export_one matching what export.py writes, the
+correct_outcome guard, and that importing
 run.py does not run the pipeline. The live-endpoint checks are in
 tests/test_v2_parity.py.
 """
@@ -255,6 +256,43 @@ def test_zero_whale_market_writes_full_header_and_exports():
             export.OUT_DIR = orig_out
     assert len(idx) == 1 and idx[0]["traderWhales"] is None and idx[0]["flaggedAccounts"] is None
     assert market["traders"] is None and market["timeline"]["positions"] == 2
+
+
+def test_export_one_is_what_main_writes():
+    """export.export_one (add_market builds an added market's page with it, in a scratch folder) gives exactly the
+    index.json entry and markets/<name>.json that export.main() writes for the same market."""
+    markets = [{"name": "tiny", "slug": "tiny-market", "output": "Tiny", "correct_outcome": "Yes"},
+               {"name": "bare", "slug": "bare-market", "output": "Bare", "correct_outcome": "Yes"}]
+    with scratch_repo(markets, [_clean_rows("Yes"), _clean_rows("Yes")]) as tmp:
+        pd.DataFrame([{"user_id": WALLET, "market_position": 1500.0, "lifetime_portfolio": 3000.0,
+                       "prior_bet_count": 2, "portfolio_concentration": 50.0, "is_first_x": True, "Is_percent": False,
+                       "is_suspicious": True, "target_trade_time": "2026-01-01T00:00:00+00:00", "market_title": "T?"}],
+                     columns=scrape_insiders.INSIDER_COLS).to_csv(os.path.join(tmp, "data", "Tiny_insiders.csv"),
+                                                                  index=False)
+        orig_out = export.OUT_DIR
+        export.OUT_DIR = os.path.join(tmp, "out")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                export.main()
+            with open(os.path.join(export.OUT_DIR, "index.json")) as f:
+                idx = json.load(f)["markets"]
+            texts = {}
+            for m in markets:
+                with open(os.path.join(export.OUT_DIR, "markets", f"{m['name']}.json")) as f:
+                    texts[m["name"]] = f.read()
+        finally:
+            export.OUT_DIR = orig_out
+        other = os.path.join(tmp, "elsewhere")
+        os.makedirs(other)
+        for name in ("Tiny_clean.csv", "Tiny_insiders.csv", "Bare_clean.csv"):
+            shutil.copy(os.path.join(tmp, "data", name), other)
+        os.chdir(other)                                      # the data folder is the one given, never the cwd's
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = [export.export_one(m, data_dir=other) for m in markets]
+    assert idx[0]["traderWhales"] == 1 and idx[1]["traderWhales"] is None
+    for (entry, payload), want, m in zip(got, idx, markets):
+        assert json.loads(json.dumps(entry, separators=(",", ":"), allow_nan=False)) == want
+        assert json.dumps(payload, separators=(",", ":"), allow_nan=False) == texts[m["name"]]
 
 
 def test_scoring_a_wrong_sided_market_is_refused():

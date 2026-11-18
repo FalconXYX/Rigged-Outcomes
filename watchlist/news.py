@@ -10,7 +10,8 @@ it was called a surprise.
 A headline is {"title", "source", "published" (ISO UTC), "url"}, in Google's
 relevance order. after / before (epoch seconds or ISO) become Google's own
 after:YYYY-MM-DD / before:YYYY-MM-DD operators. Requests are spaced
-MIN_INTERVAL apart across threads; errors raise NewsError, and so does an
+MIN_INTERVAL apart across threads; errors raise NewsError (transient for a
+network error, a 429 or a 5xx: the caller may ask again), and so does an
 answer that is not a news feed at all (a consent or captcha page, an empty
 body: what a refusing Google sends with status 200), so it is never read as
 "no news".
@@ -37,7 +38,12 @@ _last = [0.0]
 
 
 class NewsError(Exception):
-    pass
+    """A failed search. transient: a network error, a 429 or a 5xx, which a moment later may not repeat (a
+    refusal page or another status is not)."""
+
+    def __init__(self, message, transient=False):
+        super().__init__(message)
+        self.transient = transient
 
 
 def _tag(block, name):
@@ -91,9 +97,10 @@ def search(query, after=None, before=None, limit=LIMIT, session=requests):
     try:
         resp = session.get(URL, params={"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=TIMEOUT)
     except requests.RequestException as e:
-        raise NewsError(f"news search failed: {type(e).__name__}") from e
+        raise NewsError(f"news search failed: {type(e).__name__}", transient=True) from e
     if resp.status_code != 200:
-        raise NewsError(f"news search: HTTP {resp.status_code}")
+        raise NewsError(f"news search: HTTP {resp.status_code}",
+                        transient=resp.status_code == 429 or resp.status_code >= 500)
     head = (resp.text or "")[:2048].lower()
     if "<rss" not in head and "<channel" not in head:
         raise NewsError("news search: the answer was not a news feed")

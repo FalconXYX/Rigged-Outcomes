@@ -29,7 +29,13 @@ budget on a fake clock (no step reading starts in the time kept for
 stored and kept, the list is made from it and the day is "updated"; the
 next run reads only what was left; a killed run keeps its readings; news
 past the budget keeps the last list; the workflow's step timeout leaves
-the budget room).
+the budget room), a busy model's long pause (after three busy answers,
+from a request's second try, reset by an answer, cut at the budget), step
+readers stopping once the model is down, and the catch-up run (nothing to
+read: nothing done; only what the day's run left is read, with no search,
+naming or new pool entry; searches not stored: it stops first; a reading
+that changes nothing, or Polymarket alone, leaves the list byte for byte; a
+person's rebuild keeps what was left; its wiring in the workflow).
 """
 import contextlib
 import csv
@@ -1318,6 +1324,105 @@ def test_ask_stops_once_the_time_is_spent():
     assert b.expired(20 * 60) and not b.expired() and b.seconds == 3600
 
 
+class BusyFor(FakeClient):
+    """FakeClient whose next `busy` requests answer 503 (high demand)."""
+
+    def __init__(self, busy, **kw):
+        super().__init__(**kw)
+        self.busy_left = busy
+
+    def generate(self, prompt, schema=None):
+        if self.busy_left:
+            self.busy_left -= 1
+            self.prompts.append(prompt)
+            raise ai.GeminiError("fake-lite: HTTP 503: high demand", status=503, model="fake-lite")
+        return super().generate(prompt, schema)
+
+
+def test_a_busy_model_gets_a_long_pause_and_an_answer_resets_it():
+    # three busy answers in a row (30-45 s apart), then the wait before the next try is a pause of 5-10 minutes;
+    # the answer starts the count again
+    c, slept = BusyFor(3), []
+    assert O.ask(c, O.OUT_PROMPT, None, sleep=slept.append) == ({"answers": []}, "fake-lite")
+    assert len(slept) == 3 and all(30 <= s <= 45 for s in slept[:2]) and 300 <= slept[2] <= 600, slept
+    assert c.busy.streak == 0
+    c.busy_left, slept = 1, []
+    O.ask(c, O.OUT_PROMPT, None, sleep=slept.append)
+    assert len(slept) == 1 and 30 <= slept[0] <= 45, slept
+    # the count is the client's, over its requests: two busy answers here, two more in the next request, whose
+    # first wait stays short (one 503 to three readers at once is no rush) and whose second is the long pause
+    c.busy_left, slept = 4, []
+    try:
+        O.ask(c, O.OUT_PROMPT, None, sleep=slept.append, tries=2)
+        raise AssertionError("a busy model answered")
+    except O.ModelDown:
+        pass
+    O.ask(c, O.OUT_PROMPT, None, sleep=slept.append)
+    assert len(slept) == 3 and all(30 <= s <= 45 for s in slept[:2]) and 300 <= slept[2] <= 600, slept
+
+
+def test_step_readers_stop_once_the_model_is_down():
+    # two readers at once (Roe's and Acme's): Acme's reading is busy at once, and Roe's key is refused a moment
+    # later. Once the step model is called down, Acme's reader asks no more (it does not wait out its other tries)
+    # and is not left for the next run: no new cards today
+    import time
+
+    class AcmeBusy(FakeClient):
+        def generate(self, prompt, schema=None):
+            if "Market question:" in prompt:
+                self.prompts.append(prompt)
+                if ACME_Q in prompt:
+                    raise ai.GeminiError("fake-lite: HTTP 503: busy", status=503, model="fake-lite")
+                time.sleep(0.1)
+                raise ai.GeminiError("fake-lite: HTTP 401: key refused", status=401, model="fake-lite")
+            return super().generate(prompt, schema)
+
+    conn = store.connect(":memory:")
+    c = AcmeBusy()
+    with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+        s = O.daily(conn=conn, now=NOW, client=c, walk=lambda: EVENTS, search=fake_search,
+                    out_path=os.path.join(tmp, "open.json"), news_cache_path=None, sleep=lambda x: time.sleep(0.2),
+                    workers=2)
+    assert s["status"] == O.STATUS_STALE and s["model_down"].startswith("step reading: the key was refused")
+    assert len([p for p in c.steps_asked() if ACME_Q in p]) <= 1 and s["out_of_time"] is None, s["out_of_time"]
+
+
+def test_a_long_pause_never_runs_past_the_budget():
+    # on a fake clock with 4 minutes left: two short waits, then the long pause ends when the time is spent and
+    # the request is left for the next run (OutOfTime), not failed
+    clock = Clock()
+    b = Budget(4 * 60, clock=clock)
+    c = FakeClient(down=True)
+
+    def sleep(s):
+        clock.t += s
+    try:
+        O.ask(c, O.OUT_PROMPT, None, sleep=sleep, stop=b.expired, left=b.left)
+        raise AssertionError("the request was not left for the next run")
+    except O.OutOfTime:
+        pass
+    assert len(c.prompts) == 3 and abs(clock.t - 240) < 1e-6, clock.t
+    # in a run: a step model busy all along pauses only inside the time for step readings (the budget less the
+    # 20 minutes kept for "already out"); what it could not read waits for the next run, and the day is updated
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "open.json")
+        clock, ends = Clock(), []
+
+        def run_sleep(s):
+            clock.t += s
+            ends.append(clock.t)
+        busy = FakeClient(fail_steps="Market question:")
+        with contextlib.redirect_stdout(io.StringIO()):
+            s = O.daily(conn=conn, now=NOW, client=busy, walk=lambda: EVENTS, search=fake_search, out_path=out,
+                        news_cache_path=None, sleep=run_sleep, workers=1, budget=Budget(30 * 60, clock=clock))
+        window = (30 - O.OUT_RESERVE_MINUTES) * 60
+        assert max(ends) <= window + 1e-6 and abs(max(ends) - window) < 1e-6, ends       # one pause cut at its end
+        assert any(b - a > max(K.STEP_BUSY_WAIT) for a, b in zip([0.0] + ends, ends)), ends    # a long one
+        assert s["status"] == "updated" and not s["model_down"], s["model_down"]
+        assert s["out_of_time"]["left_for_next_run"]["steps 1"], s["out_of_time"]
+
+
 def test_the_budget_stops_new_step_readings():
     # a slow step model (20 minutes an answer) and a 60-minute budget: no step reading starts in its last 20
     # minutes, kept for "already out". Roe's and Acme's first readings are made and stored as they arrive;
@@ -1445,17 +1550,40 @@ def test_news_past_the_budget_keeps_the_last_list():
 
 def test_the_workflow_gives_the_budget_room():
     # the daily job passes a budget its Open now step's timeout leaves room for (the requests in flight when it
-    # runs out, then the list), and the job's own timeout fits every step's, under GitHub's 6 hours
+    # runs out, then the list), and the job's own timeout, under GitHub's 6 hours, is never reached: the budget is
+    # cut by the time the steps before it took (budget = min(cap, deadline - minutes since the job started)), and
+    # `timeout` stops the open list at the budget plus its slack whatever it is doing, so it ends by the deadline
+    # plus its slack and the steps after it still fit with their timeouts
     with open(os.path.join(ROOT, ".github", "workflows", "watchlist.yml")) as f:
         text = f.read()
-    step = text.split("- name: Open now list", 1)[1].split("- name:", 1)[0]
-    timeout = int(re.search(r"timeout-minutes: (\d+)", step).group(1))
-    budget = float(re.search(r"--budget-minutes (\d+(?:\.\d+)?)", step).group(1))
-    assert budget + O.OUT_RESERVE_MINUTES <= timeout and O.BUDGET_MINUTES + O.OUT_RESERVE_MINUTES <= timeout
     job = text.split("\n  lists:\n", 1)[1].split("\n  deploy:\n", 1)[0]
     job_timeout = int(re.search(r"^    timeout-minutes: (\d+)", job, re.M).group(1))
-    steps = [int(x) for x in re.findall(r"^        timeout-minutes: (\d+)", job, re.M)]
-    assert timeout in steps and sum(steps) + 10 <= job_timeout <= 360, (steps, job_timeout)
+    names = re.findall(r"^      - name: (.+)$", job, re.M)
+    blocks = dict(zip(names, re.split(r"^      - name: .+$", job, flags=re.M)[1:]))
+    timeouts = {n: int(m.group(1)) for n, b in blocks.items() if (m := re.search(r"timeout-minutes: (\d+)", b))}
+    step = blocks["Open now list"]
+    timeout = timeouts["Open now list"]
+    deadline = int(re.search(r"left=\$\(\( (\d+) - \(\$\(date \+%s\) - STARTED\) / 60 \)\)", step).group(1))
+    cap = int(re.search(r"budget=\$\(\( left < (\d+) \? left : \1 \)\)", step).group(1))
+    floor = int(re.search(r"-lt (\d+) \]; then budget=\1", step).group(1))
+    kill, slack = (int(x) for x in re.search(r'timeout -k (\d+) "\$\(\( budget \+ (\d+) \)\)m" \\\n\s+python3 -m '
+                                             r'watchlist\.opennow --budget-minutes "\$budget"', step).groups())
+    hard = slack + -(-kill // 60)                         # minutes past the budget it may run, at the most
+    assert cap == O.BUDGET_MINUTES and cap + O.OUT_RESERVE_MINUTES <= cap + slack
+    assert cap + hard <= timeout, (cap, hard, timeout)    # ours stops it before GitHub's step timeout would
+    order = list(blocks)
+    before = [timeouts[n] for n in order[:order.index("Open now list")] if n in timeouts]
+    after = [timeouts[n] for n in order[order.index("Open now list") + 1:] if n in timeouts]
+    assert len(before) >= 5 and len(after) >= 5, (before, after)
+    assert len(after) == len(order) - order.index("Open now list") - 1, "every step after it has a timeout"
+    # the steps before it never leave it under its floor; it ends by the deadline plus its slack; the rest fit,
+    # with 3 minutes to spare for the checkout before the job's clock (STARTED) starts
+    assert sum(before) + floor <= deadline, (before, deadline)
+    assert deadline + hard + sum(after) + 3 <= job_timeout <= 360, (deadline, hard, after, job_timeout)
+    # and the closed list and an apply-mode rebuild stop themselves before their own step's timeout
+    for name, flag in (("Recently closed list", "--budget-minutes"), ("Apply the owner's decisions", "--budget-minutes")):
+        minutes = int(re.search(flag + r" (\d+)", blocks[name]).group(1))
+        assert minutes + 10 <= timeouts[name], (name, minutes)
 
 
 # ── the daily job's entry points: the headline key, the rebuild, the news-down guard ──
@@ -1545,6 +1673,262 @@ def test_news_down_keeps_the_last_list():
             assert not s["news_down"] and s["status"] == "updated" and s["counts"]["news searches failed"] == 2
     finally:
         O.NEWS_DOWN_AFTER = old
+
+
+# ── the catch-up run (--catch-up, the job's second schedule) ────────────────
+
+LATER = NOW + 6 * 3600                   # the catch-up's schedule, 6 hours after the daily run
+NEW_EVENT = event(7, "Zed Corp IPO by...?", [market(71, "Will Zed Corp IPO by December 31?")])
+
+
+def _no_search(query, after=None, before=None, limit=None):
+    raise AssertionError(f"a catch-up searched the news: {query!r}")
+
+
+def _no_walk():
+    raise AssertionError("a catch-up with nothing to read walked the pool")
+
+
+def _catch_up(conn, now, client, out, cache, walk=lambda: EVENTS):
+    with contextlib.redirect_stdout(io.StringIO()):
+        return O.catch_up(conn=conn, now=now, client=client, walk=walk, search=_no_search, out_path=out,
+                          news_cache_path=cache, sleep=lambda s: None, workers=1)
+
+
+def _read(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def test_a_catch_up_with_nothing_to_read_does_nothing():
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out, cache = os.path.join(tmp, "open.json"), os.path.join(tmp, "news.json")
+        # the day's run has not made today's list yet (GitHub started it late): nothing is read or rebuilt
+        c = FakeClient()
+        assert _catch_up(conn, LATER, c, out, cache, walk=_no_walk) is None
+        assert c.prompts == [] and not os.path.exists(out) and store.open_days(conn) == []
+        # the day's run read everything: nothing to do, the list stays byte for byte (so nothing is deployed)
+        _run(conn, NOW, FakeClient(), out)
+        before = _read(out)
+        assert O.left_unread(store.get_open_day(conn, "2026-11-13")) == 0
+        assert _catch_up(conn, LATER, c, out, cache, walk=_no_walk) is None and c.prompts == []
+        assert _read(out) == before
+    # a day left stories unread, but the catch-up comes the next day, before that day's run: it rebuilds nothing
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out, cache = os.path.join(tmp, "open.json"), os.path.join(tmp, "news.json")
+        clock = Clock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            O.daily(conn=conn, now=NOW, client=SlowClient(clock, step_minutes=20), walk=lambda: EVENTS,
+                    search=fake_search, out_path=out, news_cache_path=cache, sleep=lambda s: None, workers=1,
+                    budget=Budget(60 * 60, clock=clock))
+        day, before = store.get_open_day(conn, "2026-11-13"), _read(out)
+        assert O.left_unread(day) == 3
+        c = FakeClient()
+        assert _catch_up(conn, NOW + DAY, c, out, cache, walk=_no_walk) is None and c.prompts == []
+        assert _read(out) == before and store.get_open_day(conn, "2026-11-13") == day
+    # a day the news was down for: no search is made again, so there is nothing a catch-up can read; nor does it
+    # count what fails the same way again (a refused request or key, no model left) or names (a story named
+    # later has no stored search)
+    assert O.left_unread({"info": {"model_down": O.NEWS_DOWN, "step_failed_busy": ["x"]}}) == 0
+    assert O.left_unread({"info": {"model_down": O.NEWS_LATE}}) == 0
+    assert O.left_unread({"status": O.STATUS_STALE, "info": {"model_down": "step reading: the model was busy or "
+                                                                           "down", "model_down_busy": True}}) == 1
+    assert O.left_unread({"status": O.STATUS_STALE, "info": {"model_down": "readings: the key was refused: 403",
+                                                             "model_down_busy": False}}) == 0
+    assert O.left_unread({"info": {"step_failed": ["a", "b"], "step_failed_busy": ["b"]}}) == 1
+    assert O.left_unread({"info": {"names_down": "busy", "left_for_next_run": {"names": 4}}}) == 0
+    assert O.left_unread(None) == 0
+
+
+def test_a_catch_up_reads_only_what_the_days_run_left():
+    # the day's run ran out of time (as in test_the_budget_stops_new_step_readings): Ruritania's first reading and
+    # Roe's and Acme's second were left, so only the dated card showed. Six hours later the catch-up asks only
+    # those, with no news search and no new event in the pool, and rebuilds the day's list at its own run time
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out, cache = os.path.join(tmp, "open.json"), os.path.join(tmp, "news.json")
+        clock = Clock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            O.daily(conn=conn, now=NOW, client=SlowClient(clock, step_minutes=20), walk=lambda: EVENTS,
+                    search=fake_search, out_path=out, news_cache_path=cache, sleep=lambda s: None, workers=1,
+                    budget=Budget(60 * 60, clock=clock))
+        before, day = _read(out), store.get_open_day(conn, "2026-11-13")
+        assert [c["id"] for c in json.loads(before)["days"][0]["cards"]] == [TURNER_K]
+        # the day's searches not stored (the cache was not saved or restored): it stops first, before the walk
+        os.rename(cache, cache + ".away")
+        c = FakeClient()
+        assert _catch_up(conn, LATER, c, out, cache, walk=_no_walk) is None and c.prompts == []
+        assert _read(out) == before and store.get_open_day(conn, "2026-11-13") == day
+        os.rename(cache + ".away", cache)
+        assert O.walk_pool(EVENTS + [NEW_EVENT], NOW, store.pool_entries(conn))[1]       # it would enter today
+        c = FakeClient()
+        s = _catch_up(conn, LATER, c, out, cache, walk=lambda: EVENTS + [NEW_EVENT])
+        assert _asked(c.steps_asked()) == [RUR_Q, ROE_Q, ACME_Q, RUR_Q], _asked(c.steps_asked())
+        assert s["requests"]["steps 1"] == 1 and s["requests"]["steps 2"] == 3 and "names" not in s["requests"]
+        assert "7" not in store.pool_entries(conn)                                     # it enters at the next run
+        day = json.loads(_read(out))["days"][0]
+        assert day["run_at"] == "2026-11-13T04:00:00Z" and day["status"] == "updated"
+        assert [x["id"] for x in day["cards"]] == [ROE_K, ACME_K, TURNER_K] and _read(out) != before
+        assert RUR_K in [h["id"] for h in s["held_back"]] and s["out_of_time"] is None
+        info = store.get_open_day(conn, "2026-11-13")["info"]
+        assert info["left_for_next_run"] == {} and info["step_failed"] == [] and O.left_unread({"info": info}) == 0
+        assert [x for x in info["seen_step_headlines"] if x.startswith(RUR_K + "\x1f")]   # read now
+        # a second catch-up finds nothing left
+        again = FakeClient()
+        assert _catch_up(conn, LATER + 3600, again, out, cache, walk=_no_walk) is None and again.prompts == []
+
+
+def test_a_catch_up_that_changes_nothing_leaves_the_list_as_it_was():
+    # Ruritania's step reading failed in the day's run (the model busy), and Polymarket changed since (Roe's rules
+    # edited, the Acme event gone). A catch-up whose reading finds no step, whose model is still busy, or that
+    # finds a listed story's searches not stored keeps the day's list and its stored day as they were: open.json
+    # is not sent and nothing is deployed
+    drift = json.loads(json.dumps([e for e in EVENTS if e["id"] != "2"]))
+    drift[0]["markets"][0]["description"] = "Edited: resolves Yes if Jane Roe leaves the post for any reason."
+    for client, cut, read in ((FakeClient(mark=lambda n, t: False), None, True),
+                              (FakeClient(fail_steps="Ruritania x Freedonia"), None, False),
+                              (FakeClient(), "Jane Roe", False)):
+        conn = store.connect(":memory:")
+        with tempfile.TemporaryDirectory() as tmp:
+            out, cache = os.path.join(tmp, "open.json"), os.path.join(tmp, "news.json")
+            with contextlib.redirect_stdout(io.StringIO()):
+                s = O.daily(conn=conn, now=NOW, client=FakeClient(fail_steps="Ruritania x Freedonia"),
+                            walk=lambda: EVENTS, search=fake_search, out_path=out, news_cache_path=cache,
+                            sleep=lambda s: None, workers=1)
+            assert s["status"] == "updated" and s["step_failed"] == [RUR_K]
+            before, day = _read(out), store.get_open_day(conn, "2026-11-13")
+            assert ACME_K in [c["id"] for c in day["cards"]] and O.left_unread(day) == 1
+            if cut:
+                with open(cache) as f:
+                    kept = {k: v for k, v in json.load(f).items() if not k.startswith(cut)}
+                with open(cache, "w") as f:
+                    json.dump(kept, f)
+            assert _catch_up(conn, LATER, client, out, cache, walk=lambda: drift) is None or not cut
+            assert _read(out) == before and store.get_open_day(conn, "2026-11-13") == day, cut
+            assert set(_asked(client.steps_asked())) == (set() if cut else {RUR_Q}) and not client.outs_asked()
+            # a reading that found no step is still stored: the next run does not ask it again
+            assert bool(store.open_answer_history(conn, RUR_K, O.PROMPT_VERSION)) == read
+
+
+def test_a_persons_rebuild_keeps_what_was_left_unread():
+    # an apply run's rebuild reads no step: the day's unread stories stay unread (for the catch-up, and for the
+    # next day's shortlist, which reads them as new), and a day the model was down for keeps why
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = os.path.join(tmp, "open.json")
+        clock = Clock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            O.daily(conn=conn, now=NOW, client=SlowClient(clock, step_minutes=20), walk=lambda: EVENTS,
+                    search=fake_search, out_path=out, news_cache_path=None, sleep=lambda s: None, workers=1,
+                    budget=Budget(60 * 60, clock=clock))
+            was = store.get_open_day(conn, "2026-11-13")["info"]
+            O.rebuild_reviewed(conn, out_path=out, news_cache_path=None, client=FakeClient(), walk=lambda: EVENTS,
+                               search=fake_search, sleep=lambda s: None, workers=1)
+        info = store.get_open_day(conn, "2026-11-13")["info"]
+        assert info["left_for_next_run"] == was["left_for_next_run"] == {"steps 1": 1, "steps 2": 2}
+        assert info["seen_step_headlines"] == was["seen_step_headlines"]
+        assert not [x for x in info["seen_step_headlines"] if x.startswith(RUR_K + "\x1f")]
+        assert O.left_unread(store.get_open_day(conn, "2026-11-13")) == 3
+    stale = {"day": "2026-11-13", "status": O.STATUS_STALE,
+             "info": {"model_down": "step reading: the model was busy or down", "model_down_busy": True,
+                      "step_failed": ["a", "c"], "step_failed_busy": ["a"],
+                      "left_for_next_run": {"steps 1": 2, "names": 1}, "seen_step_headlines": ["a\x1fx"]}}
+    info = {"model_down": O.REBUILT_DOWN, "model_down_busy": False, "left_for_next_run": {"already out": 1},
+            "step_failed": [], "step_failed_busy": [], "seen_step_headlines": ["a\x1fx", "b\x1fy"]}
+    O.carry_unread(info, stale)
+    assert info == {"model_down": "step reading: the model was busy or down", "model_down_busy": True,
+                    "step_failed": ["a", "c"], "step_failed_busy": ["a"],
+                    "left_for_next_run": {"already out": 1, "steps 1": 2}, "seen_step_headlines": ["a\x1fx"]}
+    assert O.left_unread({"info": info}) == 1 + 2 + 1 + 1
+
+
+def test_the_catch_up_run_in_the_workflow():
+    # a second schedule 6 hours after the daily one runs in catchup mode: its check (one request, no install)
+    # stands aside while another run is going or waiting and reads what today's list left from the saved state's
+    # head; the lists job (the same concurrency group as the daily run) skips the work, the decisions, the closed
+    # list and the markets to add, passes --catch-up with a budget of 120 minutes at most, and deploys only when
+    # the save sent a changed open.json
+    with open(os.path.join(ROOT, ".github", "workflows", "watchlist.yml")) as f:
+        text = f.read()
+    crons = re.findall(r'^    - cron: "(\d+) (\d+) \* \* \*"', text, re.M)
+    assert crons == [("17", "4"), ("17", "10")], crons
+    daily, catch = (" ".join([m, h, "*", "*", "*"]) for m, h in crons)
+    assert f"MODE: ${{{{ inputs.mode || (github.event.schedule == '{catch}' && 'catchup') || 'full' }}}}" in text
+    assert "options: [full, apply, catchup]" in text
+    check = text.split("\n  check:\n", 1)[1].split("\n  lists:\n", 1)[0]
+    assert f"inputs.mode == 'catchup' || github.event.schedule == '{catch}'" in check and "concurrency" not in check
+    assert check.index('select(.status != \\"completed\\"') < check.index('if [ "$MODE" = catchup ]')
+    assert "/api/job/blobs/state" in check and ".meta.open_left" in check and "date -u +%F" in check
+    job = text.split("\n  lists:\n", 1)[1].split("\n  deploy:\n", 1)[0]
+    assert "      group: watchlist" in job and "cancel-in-progress: false" in job
+    names = re.findall(r"^      - name: (.+)$", job, re.M)
+    blocks = dict(zip(names, re.split(r"^      - name: .+$", job, flags=re.M)[1:]))
+    assert "env.MODE != 'catchup'" in blocks["Fetch the owner's decisions, the markets to add and the watchlist"]
+    assert "env.MODE == 'full'" in blocks["Recently closed list"] and "catchup" not in blocks["Recently closed list"]
+    step = blocks["Open now list"]
+    assert "(env.MODE == 'full' || env.MODE == 'catchup')" in step
+    assert 'catch_up=(--catch-up); budget=$(( budget < 120 ? budget : 120 ))' in step
+    assert '--budget-minutes "$budget" "${catch_up[@]}"' in step
+    publish = blocks["Decide whether to publish"]
+    assert publish.index('if [ "$MODE" = catchup ]; then') < publish.index("steps.add.outputs.markets")
+    assert 'if [ "${{ steps.save.outputs.open_list }}" = true ]; then echo "publish=true"' in publish
+    assert '--mode "$MODE"' in blocks["Report to the API"]
+
+
+def test_the_catch_up_check_stands_aside_and_reads_what_is_left():
+    # the check job's own script, run with a fake gh, curl and date: another run going or waiting (the day's run,
+    # started late) ends it at once; else today's unread count from the saved state's head decides
+    import shutil
+    import subprocess
+    import textwrap
+    if not (shutil.which("bash") and shutil.which("jq")):
+        print("  (skipped: needs bash and jq, as GitHub's runners have)")
+        return
+    with open(os.path.join(ROOT, ".github", "workflows", "watchlist.yml")) as f:
+        check = f.read().split("\n  check:\n", 1)[1].split("\n  lists:\n", 1)[0]
+    script = textwrap.dedent(check.split("        run: |\n", 1)[1])
+    with tempfile.TemporaryDirectory() as tmp:
+        bin_dir, calls = os.path.join(tmp, "bin"), os.path.join(tmp, "calls")
+        os.makedirs(bin_dir)
+        fakes = {"gh": 'echo "$FAKE_BUSY"',
+                 "curl": f'cat > /dev/null; echo "$@" >> {calls}; [ -n "$FAKE_HEAD" ] || exit 22; echo "$FAKE_HEAD"',
+                 "date": 'echo "$FAKE_TODAY"'}
+        for name, body in fakes.items():
+            with open(os.path.join(bin_dir, name), "w") as f:
+                f.write("#!/bin/sh\n" + body + "\n")
+            os.chmod(os.path.join(bin_dir, name), 0o755)
+
+        def run(mode, busy="0", left=None, head=None):
+            out = os.path.join(tmp, "out")
+            open(out, "w").close()
+            if os.path.exists(calls):
+                os.remove(calls)
+            if head is None and left is not None:
+                head = json.dumps({"name": "state", "meta": {"open_left": left}})
+            env = dict(PATH=bin_dir + os.pathsep + os.environ["PATH"], MODE=mode, FAKE_BUSY=busy, FAKE_HEAD=head or "",
+                       FAKE_TODAY="2026-11-13", API_URL="http://api.test/", WATCHLIST_JOB_TOKEN="tok-secret",
+                       GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="7", GITHUB_OUTPUT=out)
+            p = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script], env=env,
+                               capture_output=True, text=True, timeout=60)
+            assert p.returncode == 0, p.stderr
+            asked = open(calls).read() if os.path.exists(calls) else ""
+            assert "tok-secret" not in asked
+            return [x for x in open(out).read().split() if x.startswith("work=")][-1], p.stdout, asked
+
+        work, said, asked = run("catchup", busy="1", left={"day": "2026-11-13", "unread": 3})
+        assert work == "work=false" and "Another Watchlist run is going or waiting" in said and asked == ""
+        work, _, asked = run("catchup", left={"day": "2026-11-13", "unread": 3})
+        assert work == "work=true" and "http://api.test/api/job/blobs/state" in asked
+        assert run("catchup", left={"day": "2026-11-13", "unread": 0})[0] == "work=false"
+        assert run("catchup", left={"day": "2026-11-12", "unread": 5})[0] == "work=false"   # no list today yet
+        assert run("catchup", left=None, head=json.dumps({"meta": {}}))[0] == "work=false"   # saved by older code
+        work, said, _ = run("catchup")                                                      # the API did not answer
+        assert work == "work=false" and "::warning::" in said
+        # apply mode still asks for the work
+        work, _, asked = run("apply", head=json.dumps({"decisions": [{"story": "x"}], "requests": []}))
+        assert work == "work=true" and "/api/job/work" in asked
 
 
 if __name__ == "__main__":

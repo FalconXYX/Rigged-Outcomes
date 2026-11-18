@@ -30,8 +30,13 @@ import "./review.css";
 // daily one (about 04:17 UTC), or at once with "Apply decisions now" when the Worker holds a
 // GitHub token. Plain on purpose, in the site's type and tokens.
 
-/** a daily run older than this has missed one (they run once a day) */
-const LATE_HOURS = 30;
+/** a daily run older than this has missed one (they run once a day, and GitHub often starts one hours late) */
+const LATE_HOURS = 40;
+/** daily runs in a row with a problem before the page says so (a problem that keeps coming back is worth a look) */
+const TROUBLED_RUNS = 3;
+
+/** the first problem a run's summary lists after "; problems: " (watchlist/problems.py summary_with) */
+const firstProblem = (summary: string | null) => summary?.split("; problems: ")[1]?.split("; ")[0] ?? null;
 
 const day = (iso: string) => fmtDay(new Date(iso.length === 10 ? `${iso}T00:00:00Z` : iso));
 const hhmm = (s: number) => new Date(s * 1000).toISOString().slice(11, 16);
@@ -187,8 +192,11 @@ function Status({ data, onForget }: { data: Overview; onForget: () => void }) {
 
   const runs = [...data.runs].sort((a, b) => b.finished_at - a.finished_at);
   const last = runs[0];
-  const daily = runs.find((r) => r.mode !== "apply");
+  const dailies = runs.filter((r) => r.mode !== "apply");
+  const daily = dailies[0];
   const late = daily ? Math.floor((data.now - daily.finished_at) / 3600) : null;
+  const troubled = dailies.length >= TROUBLED_RUNS && dailies.slice(0, TROUBLED_RUNS).every((r) => r.status !== "success");
+  const problem = troubled ? firstProblem(daily.summary) : null;
 
   const toggle = async () => {
     setBusy(true);
@@ -236,6 +244,12 @@ function Status({ data, onForget }: { data: Overview; onForget: () => void }) {
       {late != null && late > LATE_HOURS && (
         <p className="rv-warn">
           No daily run has reported for {fmtInt(late)} hours. Check the workflow in GitHub Actions.
+        </p>
+      )}
+      {troubled && (
+        <p className="rv-warn">
+          The last {TROUBLED_RUNS} daily runs each had a problem{problem ? ` (the newest: ${problem})` : ""}. Check the
+          newest run's log.
         </p>
       )}
       <p className="rv-line">

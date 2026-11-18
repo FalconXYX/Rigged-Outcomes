@@ -9,7 +9,9 @@ Covers the RSS parsing (CDATA, entities, the " - Source" cut, dates to UTC),
 an answer that is not a news feed (a consent page) being an error,
 the after: / before: operators, what the model sees of a market (no trading
 numbers), normalising its answer, the sort order, the cache, a market
-whose news search fails being left for the next run, and the prompt's
+whose news search fails being left for the next run, a busy model's long
+pause after three busy answers (one a run, within the budget; still busy
+after it, the model is down), and the prompt's
 approved factual changes (closed-check-5, 2026-11-13) with its judgement
 tests left as they were.
 """
@@ -180,6 +182,68 @@ def test_check_markets_and_cache(monkey=None):
         other = dict(MARKET, conditionId="0xdef000000000aaaa")
         assert judge.check_markets([other], conn, client) == {}             # tried again next run
         assert store.get_closed_check(conn, other["conditionId"], judge.PROMPT_VERSION) is None
+    finally:
+        news.search = orig
+
+
+class BusyJudge(FakeClient):
+    """FakeClient whose first `busy` judging requests answer 503 (writing the queries always works). clock: a
+    fake clock the run's sleeps move on (when given)."""
+
+    def __init__(self, busy, clock=None):
+        super().__init__()
+        self.busy_left, self.clock, self.slept = busy, clock, []
+
+    def generate(self, prompt, schema=None):
+        if "search query" not in prompt and self.busy_left:
+            self.busy_left -= 1
+            self.prompts.append(prompt)
+            raise judge.ai.GeminiError("fake: HTTP 503: high demand", status=503, model="fake")
+        return super().generate(prompt, schema)
+
+    def sleep(self, s):
+        self.slept.append(s)
+        if self.clock is not None:
+            self.clock[0] += s
+
+
+def _judges(c):
+    return len([p for p in c.prompts if "search query" not in p])
+
+
+def test_a_busy_judge_pauses_long_after_three_busy_answers():
+    # 11 markets, 3 batches: the first batch's 3 tries are busy (30 s, then 90 s between them); the second
+    # batch's first wait stays short (30 s) and its second, after the 5th busy answer in a row, is a long pause;
+    # its answer resets the count
+    from watchlist.common import Budget
+    markets = [dict(MARKET, conditionId=f"0x{i:02d}c123456789ffff") for i in range(11)]
+    orig = news.search
+    news.search = lambda q, after=None, before=None, limit=15: news.parse(RSS)
+
+    def fresh():
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        conn.executescript(store.SCHEMA)
+        return conn
+    try:
+        c = BusyJudge(5)
+        judge.check_markets(markets, fresh(), c, sleep=c.sleep)
+        assert c.slept[:3] == [30, 90, 30] and 300 <= c.slept[3] <= 600 and len(c.slept) == 4, c.slept
+        assert c.busy.streak == 0
+        # still busy after the long pause: the model is down for the run, and nothing more is asked
+        c = BusyJudge(100)
+        assert judge.check_markets(markets, fresh(), c, sleep=c.sleep) == {}
+        assert c.slept[:3] == [30, 90, 30] and 300 <= c.slept[3] <= 600 and len(c.slept) == 4, c.slept
+        assert _judges(c) == 6
+        # one long pause a run: the next day's judging, busy again, is down at the wait that would be the second
+        assert judge.check_markets(markets, fresh(), c, sleep=c.sleep) == {}
+        assert len(c.slept) == 5 and c.slept[4] == 30 and _judges(c) == 8, c.slept
+        # on a 200-second budget the long pause ends at the budget, and nothing is asked after it
+        clock = [0.0]
+        b = Budget(200, clock=lambda: clock[0])
+        c = BusyJudge(100, clock)
+        assert judge.check_markets(markets, fresh(), c, budget=b, sleep=c.sleep) == {}
+        assert c.slept == [30, 90, 30, 50] and clock[0] == 200, (c.slept, clock)
+        assert _judges(c) == 5
     finally:
         news.search = orig
 

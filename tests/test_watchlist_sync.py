@@ -17,7 +17,7 @@ and one it refused reported failed, a step killed part way through adding a
 market still reporting it as failed, the catalog from the published files
 and the added markets, and the run's report: decisions counted as applied
 only once this run saved the state, added and failed markets, results older
-than the run never.
+than the run never, and a catch-up run's report (no run sent).
 """
 import contextlib
 import io
@@ -378,15 +378,37 @@ def test_push_sends_the_queue_the_catalog_and_the_report():
     assert "closed list: updated" in body["run"]["summary"]
 
 
+def test_a_catch_up_run_sends_the_queue_and_the_catalog_but_no_run():
+    # the API keeps runs of the full, apply and local modes only: a catch-up run's report sends the day's queue
+    # (new readings may wait for a person) and the catalog, and the review page keeps the daily run's report
+    conn = store.connect(":memory:")
+    a_day(conn)
+    with tempfile.TemporaryDirectory() as tmp, captured():
+        c, _ = fake_client([(204, None), (200, {"blobs": []}), (200, {"market": 0, "closed": 0, "open": 0})])
+        body = sync.push(c, conn, tmp, "catchup", "success", NOW, now=NOW + 99,
+                         closed_path=os.path.join(tmp, "none.json"), open_path=os.path.join(tmp, "none.json"),
+                         markets_path=os.path.join(tmp, "none.json"))
+    assert [(x["method"], x["url"].split("example")[1]) for x in c.session.calls] == [
+        ("PUT", "/api/job/queue"), ("GET", "/api/job/blobs?prefix=market:"), ("PUT", "/api/job/catalog")]
+    assert body["run"]["mode"] == "catchup" and body["applied"] == [] and body["requests"] == []
+
+
 def test_the_catalog_leaves_the_markets_out_when_the_added_ones_cannot_be_read():
     with tempfile.TemporaryDirectory() as tmp, captured() as text:
         markets = os.path.join(tmp, "markets.json")
         json.dump([{"name": "usiran", "slug": "us-strikes-iran"}], open(markets, "w"))
         api = FakeApi()
+        # the API did not answer the read (after the client's waits): nothing is sent, its waits go to the report
         api.fail_next(503, "server", method="GET", path="prefix=market:")
         sync.catalog(api, markets_path=markets, closed_path=os.path.join(tmp, "x"), open_path=os.path.join(tmp, "y"))
-        assert api.other == [("PUT", "/api/job/catalog", {})]                  # no markets: the API keeps the last
-        assert "added before could not be read" in text.getvalue()
+        assert api.other == [] and "added before could not be read" in text.getvalue()
+        assert "the catalog was not sent (the API did not answer)" in text.getvalue()
+        # the read refused as a bad request (the job and the Worker disagree): the catalog goes without its markets
+        # (the API keeps the last), and the code's problem is said
+        api.fail_next(400, "bad_request", method="GET", path="prefix=market:")
+        sync.catalog(api, markets_path=markets, closed_path=os.path.join(tmp, "x"), open_path=os.path.join(tmp, "y"))
+        assert api.other == [("PUT", "/api/job/catalog", {})]
+        assert "X the markets added before could not be read (bad_request (HTTP 400))" in text.getvalue()
         blobs.put_json(api, "market:gemini-carbon", {}, {"entry": {"name": "gemini-carbon", "slug": "g-c"}})
         sync.catalog(api, markets_path=markets, closed_path=os.path.join(tmp, "x"), open_path=os.path.join(tmp, "y"))
         assert api.other[-1][2] == {"markets": [{"name": "usiran", "slug": "us-strikes-iran"},

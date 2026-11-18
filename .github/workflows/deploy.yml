@@ -14,9 +14,11 @@
 #
 # The Watchlist's two lists (closed.json, open.json) and the markets added with "Add to main page" come from
 # the database, through the API (watchlist/publish.py), where the daily Watchlist job
-# (.github/workflows/watchlist.yml) saves them; that job also calls this workflow after each run. With no API
-# configured, the build goes ahead without them (the Watchlist shows its placeholders); while the API is down,
-# the live site's own copies stand in.
+# (.github/workflows/watchlist.yml) saves them; that job also calls this workflow after each run, with soft:
+# true. With no API configured, the build goes ahead without them (the Watchlist shows its placeholders); while
+# the API is down, the live site's own copies stand in; with the live site down too, this deploy is left out
+# (Pages keeps the last site) rather than failing. With soft, PyPI or npm still not answering after 3 tries
+# leaves it out too. The Pages deploy is tried twice. Otherwise only a setup or code problem fails it.
 
 name: Deploy dashboard to GitHub Pages
 
@@ -30,6 +32,10 @@ on:
         description: "the commit to build (the Watchlist job passes main)"
         type: string
         default: main
+      soft:
+        description: "an install that fails 3 times leaves the deploy out (Pages keeps the last site) instead of failing"
+        type: boolean
+        default: false
     secrets:
       WATCHLIST_JOB_TOKEN:
         required: false
@@ -42,7 +48,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    outputs:
+      skip: ${{ steps.pyinstall.outputs.skip == 'true' || steps.npminstall.outputs.skip == 'true' || steps.watchlist.outputs.skip == 'true' }}
+    env:
+      SOFT: ${{ inputs.soft && 'true' || 'false' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -55,24 +65,40 @@ jobs:
         with:
           python-version: "3.12"
 
+      # With soft (the Watchlist job's deploy), PyPI still not answering after 3 tries leaves the deploy out
       - name: Install Python dependencies
-        run: pip install --require-hashes -r requirements.lock
+        id: pyinstall
+        run: |
+          for try in 1 2 3; do
+            pip install --require-hashes -r requirements.lock && exit 0
+            if [ "$try" -lt 3 ]; then echo "::warning::pip install failed (try $try of 3); trying again in 60 s"; sleep 60; fi
+          done
+          if [ "$SOFT" = true ]; then
+            echo "::warning::pip install failed 3 times: this deploy is left out and Pages keeps the last site"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit 1
 
       # Turns data/*.csv into web/public/data/*.json (gitignored, so built here).
       - name: Export dashboard data
+        if: steps.pyinstall.outputs.skip != 'true'
         run: python export.py
 
       # The Watchlist's lists and the markets added with "Add to main page", as the daily job saved them in the
       # database (each added market's page built again with this export.py). With no API configured the site is
-      # built without them; while the API is down the live site's copies stand in; a refusal (a wrong token), or
-      # the API and the live site both down, fails the build, so Pages keeps the last site.
+      # built without them; while the API is down the live site's copies stand in; with both down the deploy is
+      # left out (skip=true), so Pages keeps the last site. A refusal (a wrong token) fails the build.
       - name: Add the Watchlist lists and the added markets
+        id: watchlist
+        if: steps.pyinstall.outputs.skip != 'true'
         env:
           WATCHLIST_API_URL: ${{ vars.API_URL }}
           WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
         run: python3 -m watchlist.publish --out web/public/data
 
       - name: Set up Node
+        if: steps.pyinstall.outputs.skip != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -80,10 +106,23 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
+        id: npminstall
+        if: steps.pyinstall.outputs.skip != 'true'
         working-directory: web
-        run: npm ci
+        run: |
+          for try in 1 2 3; do
+            npm ci && exit 0
+            if [ "$try" -lt 3 ]; then echo "::warning::npm ci failed (try $try of 3); trying again in 60 s"; sleep 60; fi
+          done
+          if [ "$SOFT" = true ]; then
+            echo "::warning::npm ci failed 3 times: this deploy is left out and Pages keeps the last site"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          exit 1
 
       - name: Type-check and build
+        if: steps.pyinstall.outputs.skip != 'true' && steps.npminstall.outputs.skip != 'true'
         working-directory: web
         env:
           VITE_API_URL: ${{ vars.API_URL }}
@@ -91,14 +130,16 @@ jobs:
         run: npm run build
 
       - name: Upload Pages artifact
+        if: steps.pyinstall.outputs.skip != 'true' && steps.npminstall.outputs.skip != 'true' && steps.watchlist.outputs.skip != 'true'
         uses: actions/upload-pages-artifact@v5
         with:
           path: web/dist
 
   deploy:
     needs: build
+    if: needs.build.outputs.skip != 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     permissions:
       pages: write
       id-token: write
@@ -108,8 +149,20 @@ jobs:
       cancel-in-progress: false
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment2.outputs.page_url }}
+    # Tried twice, a minute apart: a Pages hiccup passes; a deploy refused twice (the environment's rules, say)
+    # fails the run
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Wait a minute before trying again
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 60
+
+      - name: Deploy to GitHub Pages (second try)
+        id: deployment2
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v5

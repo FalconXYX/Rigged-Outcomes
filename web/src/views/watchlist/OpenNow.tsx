@@ -33,8 +33,8 @@ export const isOpenKey = (v: string | undefined) => v?.startsWith("o-") ?? false
 
 const moreId = (k: string) => `op-more-${k}`;
 
-/** a list made longer ago than this missed a day's run (they run daily) */
-const STALE_MS = 28 * 36e5;
+/** a list made longer ago than this missed a day's run (they run daily, and GitHub often starts one hours late) */
+const STALE_MS = 40 * 36e5;
 
 const dayDate = (day: string) => new Date(`${day}T00:00:00Z`);
 /** "Dec 31", or "Mar 31, 2027" outside the list's own year */

@@ -19,9 +19,11 @@ job reads what they wrote, acts on it, and reports back:
            as the blob market:<name> (store_market; the site's deploy adds it
            to the main page, watchlist.publish). Nothing goes to git. Before
            each one, add_results.json already says it failed ("stopped part
-           way"), so a step killed by its timeout still reports it; one the
-           database did not answer for is left out, so it stays approved and
-           the next run tries again
+           way"), so a step killed by its timeout still reports it; one that
+           Polymarket or the database did not answer for is left out, so it
+           stays approved and the next run tries again; one the code crashed
+           on is reported failed, and the crash (its traceback in the log)
+           fails the run (watchlist.problems)
   catalog  PUT /api/job/catalog: what visitors may write to (the main
            page's markets, markets.json's and the added ones, the closed
            list's picks, the cards of the open list's two newest days)
@@ -29,21 +31,29 @@ job reads what they wrote, acts on it, and reports back:
            its key), the catalog, then POST /api/job/done: the decisions
            this run saved, only once the state holding them was saved; the
            requests added (saved in the database, or there already) or
-           failed; the run
+           failed; the run (a catch-up run sends no POST: the queue and
+           the catalog only)
 
     python3 -m watchlist.sync pull [--out data/watchlist/work.json]
     python3 -m watchlist.sync decide --mode full|apply|local [--work PATH] [--open-out PATH]
     python3 -m watchlist.sync add [--work PATH] [--dry-run]
     python3 -m watchlist.sync catalog [--closed PATH] [--open PATH]
-    python3 -m watchlist.sync push --mode full|apply|local --status success|partial|failure --started-at EPOCH
-                                   [--run-url URL]
+    python3 -m watchlist.sync push --mode full|apply|local|catchup --status success|partial|failure --started-at EPOCH
+                                   [--run-url URL] [--outcome STEP=OUTCOME ...]
 
 The API is WATCHLIST_API_URL with WATCHLIST_JOB_TOKEN (the environment
 first, then ../.env, like the Gemini key). With neither, every command says
-so and does nothing; an API that does not answer is warned about and never
-fails a step: the lists run without it, and decisions and requests wait for
-the next run. The token goes in one header and is never printed. Steps set
-key=value outputs in $GITHUB_OUTPUT when it is set.
+so and does nothing; an API that does not answer (after STEP_WAITS) is a
+recorded problem (watchlist.problems) and never fails a step: the lists run
+without it, and decisions and requests wait for the next run. A refused
+token stops the step (a setup problem); any other refusal (a 4xx: the job
+and the Worker disagree on a request) is recorded as the code's problem.
+When the API does not answer the report's first calls, the catalog is left
+out, so the report itself gets the step's time. The report's status is at least
+partial when the run recorded a problem or a step failed (--outcome: the
+workflow's step outcomes), and the problems follow its summary. The token
+goes in one header and is never printed. Steps set key=value outputs in
+$GITHUB_OUTPUT when it is set.
 
 The shapes (worker/src, web/src/lib/api.ts):
 
@@ -72,14 +82,16 @@ import json
 import os
 import sys
 import time
+import traceback
 
 import requests
 
-from watchlist import ai, store
+from watchlist import ai, problems, store
 from watchlist.common import JOB_DIR, ROOT, SITE_DATA_DIR, log, now_epoch, to_epoch
 
 TIMEOUT = 20
 RETRY_WAITS = (2, 8, 30)          # seconds before each retry of a 429, a 5xx or a network error
+STEP_WAITS = (5, 20, 60, 120)     # the job's steps here (the work, adding markets, the report): ~3.5 minutes
 QUEUE_LIMIT = 30                  # items PUT /api/job/queue takes at most
 OPEN_DAYS = 2                     # open-list days whose cards visitors may watch
 DECIDED_BY = "person (review page)"
@@ -100,6 +112,16 @@ class ApiError(Exception):
     def __init__(self, status, code, message=""):
         super().__init__(f"{code}" + (f" (HTTP {status})" if status else "") + (f": {message}" if message else ""))
         self.status, self.code = status, code
+
+    @property
+    def refused(self):
+        """The job token was not accepted (401, or 429 "locked": too many wrong tokens today)."""
+        return self.status == 401 or (self.status == 429 and self.code == "locked")
+
+    @property
+    def outage(self):
+        """The API is down or busy (a network error, a 429 or a 5xx), not refusing."""
+        return not self.refused and (self.status is None or self.status == 429 or self.status >= 500)
 
 
 def _env(name):
@@ -158,7 +180,7 @@ class Client:
             except (ValueError, AttributeError):
                 code, message = "error", ""
             err = ApiError(r.status_code, code, message)
-            if r.status_code != 429 and r.status_code < 500:
+            if not err.outage:                       # refused (a wrong token is locked out, not busy): no retry
                 raise err
         raise err
 
@@ -173,6 +195,15 @@ def _warn(msg):
     log(f"  ! {msg}")
     if os.environ.get("GITHUB_ACTIONS"):
         print(f"::warning::{msg}", flush=True)
+
+
+def _api_problem(e, what, keeps):
+    """Record a call of the report that failed (an ApiError): a refused token raises (a setup problem: the step
+    stops); an API that did not answer is an outside problem; any other refusal (a 4xx: the job and the Worker
+    disagree on the request) is the code's."""
+    if e.refused:
+        raise e
+    problems.note(f"{what} ({e}); {keeps}", problems.OUTSIDE if e.outage else problems.CRASH)
 
 
 def _output(**kv):
@@ -220,18 +251,21 @@ def pull(c, out_path, now=None):
             log(f"work: {len(doc['decisions'])} decision(s), {len(doc['requests'])} market(s) to add, "
                 f"{len(doc['watched'])} card(s) on the watchlist")
         except ApiError as e:
+            if not e.outage:
+                raise                                # a refused token, or a request the API cannot read
             doc["error"] = str(e)
-            _warn(f"the API did not give the job its work ({e}); decisions and markets to add wait for the next run")
+            problems.note(f"the API did not give the job its work ({e}); decisions and markets to add wait for the "
+                          f"next run")
     _write(out_path, doc)
     _output(decisions=bool(doc["decisions"]), requests=any(r.get("status") == "approved" for r in doc["requests"]))
     return doc
 
 
-def decide(conn, work, mode, results_path, open_out=OPEN_JSON, rebuild=None, now=None):
+def decide(conn, work, mode, results_path, open_out=OPEN_JSON, rebuild=None, now=None, budget=None):
     """Save the owner's decisions into the store (applying one twice is harmless: it replaces itself), and take
     the withdrawn ones out of it (only a decision the review page made); in "apply" mode rebuild the reviewed day
-    when anything changed. Writes decide_results.json before the rebuild, so decisions saved still count when
-    the rebuild fails."""
+    when anything changed, within budget (a common.Budget, or None). Writes decide_results.json before the
+    rebuild, so decisions saved still count when the rebuild fails."""
     now = int(now if now is not None else now_epoch())
     saved, changed, withdrawn = [], False, 0
     for d in work.get("decisions") or []:
@@ -257,7 +291,8 @@ def decide(conn, work, mode, results_path, open_out=OPEN_JSON, rebuild=None, now
     log(f"decisions: {len(saved) - withdrawn} saved to the store" + (f", {withdrawn} taken back" if withdrawn else ""))
     if mode == "apply" and changed:
         from watchlist import opennow
-        summary = (rebuild or opennow.rebuild_reviewed)(conn, out_path=open_out)
+        summary = (rebuild or opennow.rebuild_reviewed)(conn, out_path=open_out,
+                                                        **({"budget": budget} if budget is not None else {}))
         doc["rebuilt"] = summary is not None
         _write(results_path, doc)
     return doc
@@ -311,20 +346,35 @@ def add(c, work, results_path, dry_run=False, adder=None, now=None):
     try:
         entries = _added_entries(c)
     except ApiError as e:
-        _warn(f"the markets added before could not be read ({e}); the markets to add wait for the next run")
+        if not e.outage:
+            raise
+        problems.note(f"the markets added before could not be read ({e}); the markets to add wait for the next run")
         record()
         _output(markets=False)
         return results
     for r in work.get("requests") or []:
         if r.get("status") != "approved":
             continue
+        who = r.get("name") or r.get("slug")
         record(r)
         try:
             got = adder(r["condition_id"], r["slug"], r.get("name"), outcome=r["winner"], dry_run=dry_run,
                         added=list(entries))
         except Exception as e:                       # one market never stops the others
             got = {"status": "failed", "name": r.get("name"), "note": f"unexpected error ({type(e).__name__})",
-                   "changed": False}
+                   "changed": False, "error": e, "traceback": traceback.format_exc()}
+        err = got.get("error")                       # add_market.add's own failure, when an exception caused it
+        if isinstance(err, Exception):
+            kind = problems.classify(err)
+            if kind == problems.OUTSIDE:             # Polymarket did not answer: not reported, it stays approved
+                problems.note(f"{who} could not be added now ({problems.describe(err)}); it stays approved and is "
+                              f"tried again next run")
+                record()
+                continue
+            if got.get("traceback"):
+                print(got["traceback"], file=sys.stderr, flush=True)
+            problems.note(f"adding {who} crashed: {type(err).__name__}: {str(err)[:160]} (the traceback is in this "
+                          f"step's log); it is reported as failed", kind)
         res = {"condition_id": r["condition_id"], "status": got["status"], "name": got.get("name"),
                "note": got.get("note"), "changed": bool(got.get("changed")), "saved": False}
         if res["status"] == "added" and res["changed"] and not dry_run:
@@ -333,12 +383,24 @@ def add(c, work, results_path, dry_run=False, adder=None, now=None):
                 res["saved"] = True
                 entries.append(got["entry"])
             except ApiError as e:
-                if e.status is None or e.status == 429 or e.status >= 500:
-                    _warn(f"{got.get('name')} was built but the database did not take it ({e}); tried again next run")
+                if e.outage:
+                    problems.note(f"{got.get('name')} was built but the database did not take it ({e}); tried "
+                                  f"again next run")
+                    record()
                     continue                         # not reported: it stays approved
+                if e.refused:
+                    raise
                 res.update(status="failed", note=FULL if e.code == "full" else f"the database refused it ({e.code})")
-            except (blobs.BlobError, ValueError, KeyError, TypeError) as e:
+                if e.status == 400:                  # a request the Worker cannot read: the job and it disagree
+                    problems.note(f"the database refused {res['name']} as a bad request ({e}); the job's request "
+                                  f"must change", problems.CRASH)
+            except blobs.BlobError as e:             # too big to save
                 res.update(status="failed", note=f"it could not be saved ({type(e).__name__}: {str(e)[:160]})")
+            except (ValueError, KeyError, TypeError) as e:
+                traceback.print_exc()
+                res.update(status="failed", note=f"it could not be saved ({type(e).__name__}: {str(e)[:160]})")
+                problems.note(f"saving {res['name']} crashed: {type(e).__name__}: {str(e)[:160]} (the traceback is "
+                              f"in this step's log)", problems.CRASH)
         results.append(res)
         log(f"add {res['name'] or r.get('slug')}: {res['status']}" + (f" ({res['note']})" if res["note"] else ""))
     record()
@@ -392,7 +454,8 @@ def queue_payload(conn):
     items = []
     for it in (info.get("awaiting") or [])[:QUEUE_LIMIT]:
         if not it.get("story") or len(str(it["story"])) > 200:      # the API's limit; story keys run to about 90
-            _warn(f"a queue item the API cannot take was left out: {str(it.get('story'))[:80]!r}")
+            problems.note(f"a queue item the API cannot take was left out of the review page: "
+                          f"{str(it.get('story'))[:80]!r}")
             continue
         cands = [dict(h, key=opennow.headline_key(h)) for h in it.get("candidates") or []]
         items.append(dict(it, candidates=[h for h in cands if 0 < len(h["key"]) <= 500]))
@@ -423,11 +486,15 @@ def run_summary(conn, closed_path=CLOSED_JSON, started_at=None, applied=0, added
     return "; ".join(parts)
 
 
-def done_payload(conn, job_dir, mode, status, started_at, run_url=None, now=None, closed_path=CLOSED_JSON):
+def done_payload(conn, job_dir, mode, status, started_at, run_url=None, now=None, closed_path=CLOSED_JSON,
+                 outcomes=None):
     """POST /api/job/done's body from this run's files: the decisions saved, only when this run saved the
     state (state_pushed.json); the requests added (saved in the database, or there already) and failed; the
-    run."""
+    run, its status at least partial when the run had a problem (watchlist.problems: the steps' records in
+    job_dir and outcomes, {step id: the workflow's outcome}), and those problems after its summary."""
     now = int(now if now is not None else now_epoch())
+    found = problems.collect(started_at, outcomes, job_dir)
+    status = problems.status(status, outcomes, found)
     pushed = _read(os.path.join(job_dir, "state_pushed.json"))
     decided = _read(os.path.join(job_dir, "decide_results.json"))
     applied = list(decided["saved"]) if _fresh(decided, started_at) and _fresh(pushed, started_at) and \
@@ -445,17 +512,26 @@ def done_payload(conn, job_dir, mode, status, started_at, run_url=None, now=None
                           failed=sum(1 for r in reqs if r["status"] == "failed"))
     return {"applied": applied, "requests": reqs,
             "run": {"mode": mode, "status": status, "started_at": int(started_at or now), "finished_at": now,
-                    "summary": summary, "url": run_url}}
+                    "summary": problems.summary_with(summary, found), "url": run_url},
+            "problems": found}
+
+
+CATALOG_KEEPS = "visitors' controls keep the last one"
 
 
 def catalog(c, **paths):
+    """PUT /api/job/catalog; its markets left out (the API keeps the last ones) when the added ones cannot be
+    read. Nothing is sent when the API did not answer that read (its waits go to the report instead)."""
     if c is None:
         log(NO_API)
         return None
     try:
         added = _added_entries(c)
     except ApiError as e:
-        _warn(f"the markets added before could not be read ({e}); the catalog's markets stay as they were")
+        _api_problem(e, "the markets added before could not be read", "the catalog's markets stay as they were")
+        if e.outage:
+            problems.note(f"the catalog was not sent (the API did not answer); {CATALOG_KEEPS}")
+            return None
         added = None
     body = catalog_payload(added=added, **paths)
     if added is None:
@@ -465,37 +541,48 @@ def catalog(c, **paths):
         log(f"catalog: {got}")
         return got
     except ApiError as e:
-        _warn(f"the catalog was not sent ({e}); visitors' controls keep the last one")
+        _api_problem(e, "the catalog was not sent", CATALOG_KEEPS)
         return None
 
 
 def push(c, conn, job_dir, mode, status, started_at, run_url=None, now=None, closed_path=CLOSED_JSON,
-         open_path=OPEN_JSON, markets_path=MARKETS_FILE):
-    """The queue, the catalog, then the run's report. Each call that fails is warned about; none fails the step."""
+         open_path=OPEN_JSON, markets_path=MARKETS_FILE, outcomes=None):
+    """The queue, the catalog, then the run's report (its status and problems from this run's records and the
+    workflow's step outcomes, done_payload). Each call that fails is warned about and none fails the step, except
+    a refused token (a setup problem)."""
     if c is None:
         log(NO_API)
         return None
     q = queue_payload(conn)
+    down = False
     if q is not None:
         try:
             c.request("PUT", "/api/job/queue", q)
             log(f"queue: {len(q['items'])} item(s) of {q['day']} sent")
         except ApiError as e:
-            _warn(f"the queue was not sent ({e}); the review page keeps the last one")
-    catalog(c, markets_path=markets_path, closed_path=closed_path, open_path=open_path)
-    body = done_payload(conn, job_dir, mode, status, started_at, run_url, now, closed_path)
-    try:
-        c.request("POST", "/api/job/done", body)
-        log(f"reported: {len(body['applied'])} decision(s) applied, {len(body['requests'])} request(s); "
-            f"{body['run']['summary']}")
-    except ApiError as e:
-        _warn(f"the run's report was not sent ({e}); the decisions stay pending and are applied again next run "
-              f"(harmless)")
+            _api_problem(e, "the queue was not sent", "the review page keeps the last one")
+            down = e.outage
+    if down:                                         # the API is down: its waits go to the report, not the catalog
+        problems.note(f"the catalog was not sent (the API did not answer); {CATALOG_KEEPS}")
+    else:
+        catalog(c, markets_path=markets_path, closed_path=closed_path, open_path=open_path)
+    body = done_payload(conn, job_dir, mode, status, started_at, run_url, now, closed_path, outcomes=outcomes)
+    body.pop("problems")                             # in the summary; the job's verdict lists them on its page
+    if mode == "catchup":                            # the review page keeps the daily run's report
+        log(f"catch-up: the queue and the catalog sent, no run report; {body['run']['summary']}")
+    else:
+        try:
+            c.request("POST", "/api/job/done", body)
+            log(f"reported ({body['run']['status']}): {len(body['applied'])} decision(s) applied, "
+                f"{len(body['requests'])} request(s); {body['run']['summary']}")
+        except ApiError as e:
+            _api_problem(e, "the run's report was not sent", "the decisions stay pending and are applied again next "
+                                                             "run (harmless)")
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
         reported = ", ".join(f"{r['name'] or r['condition_id'][:10]} {r['status']}" for r in body["requests"]) or "none"
         with open(path, "a") as f:
-            f.write(f"### Watchlist job ({mode}, {status})\n\n{body['run']['summary']}.\n\n"
+            f.write(f"### Watchlist job ({mode}, {body['run']['status']})\n\n{body['run']['summary']}.\n\n"
                     f"Decisions applied: {len(body['applied'])}. Markets added or failed: {reported}.\n")
     return body
 
@@ -513,6 +600,9 @@ def main(argv=None):
     p.add_argument("--work", default=work_path)
     p.add_argument("--open-out", default=OPEN_JSON, help="where an apply-mode rebuild writes open.json")
     p.add_argument("--db", default=None)
+    p.add_argument("--budget-minutes", type=float, default=0,
+                   help="an apply-mode rebuild's time budget (0: none): no model request or news search starts "
+                        "once it is spent")
     p = sub.add_parser("add")
     p.add_argument("--work", default=work_path)
     p.add_argument("--dry-run", action="store_true", help="check each market on Polymarket only")
@@ -520,29 +610,39 @@ def main(argv=None):
     p.add_argument("--closed", default=CLOSED_JSON)
     p.add_argument("--open", default=OPEN_JSON)
     p = sub.add_parser("push")
-    p.add_argument("--mode", choices=("full", "apply", "local"), required=True)
+    p.add_argument("--mode", choices=("full", "apply", "local", "catchup"), required=True,
+                   help="catchup: the queue and the catalog only (the API keeps runs of the other three)")
     p.add_argument("--status", choices=("success", "partial", "failure"), required=True)
     p.add_argument("--started-at", type=int, required=True)
     p.add_argument("--run-url", default=None)
     p.add_argument("--db", default=None)
+    p.add_argument("--outcome", action="append", default=[], metavar="STEP=OUTCOME",
+                   help="a step's outcome in the workflow, by its step id (watchlist.problems)")
     args = ap.parse_args(argv)
 
     if args.cmd == "pull":
-        pull(client(), args.out)
+        pull(client(STEP_WAITS), args.out)
     elif args.cmd == "decide":
+        from watchlist.common import Budget
         work = _read(args.work, {}) or {}
         conn = store.connect(args.db) if args.db else store.default_conn()
-        decide(conn, work, args.mode, os.path.join(JOB_DIR, "decide_results.json"), open_out=args.open_out)
+        decide(conn, work, args.mode, os.path.join(JOB_DIR, "decide_results.json"), open_out=args.open_out,
+               budget=Budget(args.budget_minutes * 60) if args.budget_minutes > 0 else None)
     elif args.cmd == "add":
         work = _read(args.work, {}) or {}
-        add(client(), work, os.path.join(JOB_DIR, "add_results.json"), dry_run=args.dry_run)
+        add(client(STEP_WAITS), work, os.path.join(JOB_DIR, "add_results.json"), dry_run=args.dry_run)
     elif args.cmd == "catalog":
         catalog(client(), closed_path=args.closed, open_path=args.open)
     else:
         conn = store.connect(args.db) if args.db else store.default_conn()
-        push(client(), conn, JOB_DIR, args.mode, args.status, args.started_at, args.run_url)
+        push(client(STEP_WAITS), conn, JOB_DIR, args.mode, args.status, args.started_at, args.run_url,
+             outcomes=problems.parse_outcomes(args.outcome))
     return 0
 
 
+# the job's step ids (watchlist.problems): pull is the work, push the report
+STEP_NAMES = {"pull": "work", "push": "report"}
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _cmd = next((a for a in sys.argv[1:] if not a.startswith("-")), "")
+    sys.exit(problems.guard(STEP_NAMES.get(_cmd, _cmd), main))

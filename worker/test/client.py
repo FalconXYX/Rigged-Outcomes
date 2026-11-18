@@ -71,6 +71,20 @@ def main(base):
         return
     for name in S.SITE_FILES:                       # the smoke test leaves made-up lists, not gzip: real ones over them
         blobs.put(c, S._list_name(name), b'{"days": []}\n', {"by": "client"})
+    # lists but no state: a used database that lost its state, never a fresh start (the real
+    # Worker's listing of every blob and the state's kept versions, which it answers for a state never saved)
+    refusal = None
+    with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+        place = {k: os.path.join(tmp, k) for k in ("site_dir", "job_dir")}
+        for d in place.values():
+            os.makedirs(d)
+        try:
+            S.pull(store.connect(":memory:"), c, db_path=":memory:", now=NOW, **place)
+        except S.StateError as e:
+            refusal = e
+    check("state: lists without a state are refused as the setup's (exit 2)", refusal is not None and
+          refusal.code == 2 and refusal.kind == "config" and "but no saved state" in str(refusal), repr(refusal))
+    check("state: a state never saved keeps no versions", blobs.versions(c, S.STATE) == [], blobs.versions(c, S.STATE))
     with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
         place = {k: os.path.join(tmp, k) for k in ("site_dir", "job_dir")}
         for d in place.values():

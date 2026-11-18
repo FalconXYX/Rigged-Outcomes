@@ -42,6 +42,7 @@ import re
 import shutil
 import sys
 import tempfile
+import traceback
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 MAX_FILLS = 1_000_000
@@ -135,7 +136,9 @@ def add(condition_id, slug, name, outcome, dry_run=False, root=ROOT, steps=None,
     added before (the database's). Returns {"status": "added" | "failed", "name", "note", "changed"}, and when
     changed (built, not there already, not a dry run) also "entry" (its markets.json-style entry), "index" (its
     index.json entry), "market" (its markets/<name>.json) and "data" ({"<Output>_clean.csv": text,
-    "<Output>_insiders.csv": text}, what export.export_one builds them from). Writes nothing outside its scratch
+    "<Output>_insiders.csv": text}, what export.export_one builds them from). A failure an exception caused
+    (not a reason the market cannot be added) also carries "error" (the exception) and "traceback", so the daily
+    job tells Polymarket not answering from a crash (watchlist.sync.add). Writes nothing outside its scratch
     folder."""
     steps = steps or {}
     gamma = steps.get("gamma")
@@ -209,7 +212,7 @@ def add(condition_id, slug, name, outcome, dry_run=False, root=ROOT, steps=None,
     except AddError as e:
         return failed(str(e))
     except Exception as e:                                   # a network or pipeline error: say which step's kind
-        return failed(f"{type(e).__name__}: {str(e)[:200]}")
+        return dict(failed(f"{type(e).__name__}: {str(e)[:200]}"), error=e, traceback=traceback.format_exc())
     finally:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)

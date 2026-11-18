@@ -12,9 +12,10 @@ per-market validation (type list, quote in rules, reveal date rules, the
 year after a day, date source, a past reveal), the prompt (fallback
 clauses, valuation ladders, version), batching, the client's retry /
 fallback / key handling against a scripted HTTP session (which errors skip
-a model and which do not), and label_markets' cache (id + rules sha1,
-prompt version, refresh, save=False, an id the answer left out, a refused
-batch split in halves). The key is a fake set in the module; a test that
+a model and which do not), the busy streak's long pauses (from a request's
+second try), and label_markets' cache (id + rules sha1, prompt version,
+refresh, save=False, an id the answer left out, a refused batch split in
+halves). The key is a fake set in the module; a test that
 would reach the network fails instead. Dates are judged against a fixed
 TODAY so the checks do not age.
 """
@@ -513,6 +514,38 @@ def test_client_spaces_request_starts():
     for _ in range(3):
         c._space()
     assert len(waits) == 2 and all(3.5 < w <= 8.4 for w in waits)
+
+
+def test_busy_streak_turns_waits_into_long_pauses():
+    # BUSY_STREAK busy answers in a row (any request, any thread on the client): the next wait is a long pause,
+    # from a request's second try (its first stays short), never longer than the time left; an answer starts the
+    # count again; pauses counts the long pauses given
+    assert ai.BUSY_STREAK == 3 and ai.BUSY_PAUSE == (300, 600)
+    b = ai.Client(session=FakeSession([])).busy
+    assert ai.busy_of(ai.Client(session=FakeSession([]))) is not b
+    for n in range(1, 3):
+        b.note(True)
+        pause, long_ = b.wait((30, 45))
+        assert not long_ and 30 <= pause <= 45, (n, pause)
+    b.note(True)
+    pause, long_ = b.wait((30, 45), failed=1)
+    assert not long_ and 30 <= pause <= 45 and b.pauses == 0, pause
+    pauses = [b.wait((30, 45)) for _ in range(50)]
+    assert b.pauses == 50
+    assert all(long_ and 300 <= p <= 600 for p, long_ in pauses) and len({p for p, _ in pauses}) > 1  # jitter
+    assert b.wait(90)[1] and 300 <= b.wait(90)[0] <= 600
+    assert b.wait((30, 45), left=120) == (120, True) and b.wait((30, 45), left=-5) == (0.0, True)
+    b.note(False)
+    assert b.streak == 0 and b.wait(90) == (90, False) and b.wait(90, left=40) == (40, False)
+    # what counts as busy: no answer, a network error, a rate limit, a 5xx; not a refused request or key
+    assert ai.is_busy(ai.GeminiError("x: HTTP 503", status=503)) and ai.is_busy(ai.GeminiError("x: no answer"))
+    assert ai.is_busy(ai.GeminiError("x: HTTP 429", status=429))
+    assert not ai.is_busy(ai.GeminiError("x: HTTP 400", status=400, refused=True))
+    assert not ai.is_busy(ai.GeminiError("no key", config=True)) and not ai.is_busy(ValueError("not JSON"))
+
+    class Bare:
+        __slots__ = ()
+    assert isinstance(ai.busy_of(Bare()), ai.Busy)                     # a client that takes no attribute
 
 
 def test_client_unusable_200_is_retried():

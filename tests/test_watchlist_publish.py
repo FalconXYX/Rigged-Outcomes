@@ -71,7 +71,7 @@ class FakeSite:
         rel = url.split("/data/", 1)[1]
         self.asked.append(rel)
         if self.down:
-            raise P.PublishError(f"the live site did not answer for {url} (ConnectionError)")
+            raise P.LiveSiteDown(f"the live site did not answer for {url} (ConnectionError)")
         return self.files.get(rel)
 
     def live(self):
@@ -181,9 +181,11 @@ def test_exits():
             with env(tmp, **{k: "x"}), contextlib.redirect_stdout(io.StringIO()) as out:
                 assert P.main(["--out", data], live=FakeSite().live()) == 1
             assert out.getvalue().startswith(f"::error::Only {k} is set"), out.getvalue()
-        # a refusal (a wrong token), a down API with a down live site, no index.json: exit 1, nothing written
+        # a refusal (a wrong token) or no index.json: exit 1, nothing written. A down API with a down live site
+        # (or a damaged list the live site cannot replace) is an outage: exit 0, nothing written, and skip=true
+        # leaves the deploy out, so Pages keeps the last site
         before = read(os.path.join(data, "index.json"))
-        for case in ("refused", "both down", "no index"):
+        for case in ("refused", "no index", "both down", "damaged, live down"):
             api = FakeApi()
             save_market(api, "m-1", "s-1", 1)
             site_ = live_with(markets=["m-1"])
@@ -192,10 +194,24 @@ def test_exits():
             elif case == "both down":
                 api.fail_next(503, "server", method="GET", path="prefix=market:")
                 site_.down = True
+            elif case == "damaged, live down":
+                blobs.put(api, "list:closed", b"saved closed", {})
+                api.blobs["list:closed"]["sha256"] = "0" * 64
+                site_.down = True
+            gh = os.path.join(tmp, f"out-{case}")
             with api_is(api), contextlib.redirect_stdout(io.StringIO()) as out:
-                assert P.main(["--out", os.path.join(tmp, "none") if case == "no index" else data],
-                              live=site_.live()) == 1
-            assert "::error::" in out.getvalue(), out.getvalue()
+                os.environ["GITHUB_OUTPUT"] = gh
+                try:
+                    code = P.main(["--out", os.path.join(tmp, "none") if case == "no index" else data],
+                                  live=site_.live())
+                finally:
+                    del os.environ["GITHUB_OUTPUT"]
+            if case in ("refused", "no index"):
+                assert code == 1 and "::error::" in out.getvalue(), out.getvalue()
+                assert not os.path.exists(gh)
+            else:
+                assert code == 0 and "::warning::" in out.getvalue() and "::error::" not in out.getvalue()
+                assert read(gh) == b"skip=true\n" and "Pages keeps the last site" in out.getvalue()
             assert not os.path.exists(os.path.join(data, "markets", "m-1.json"))
             assert read(os.path.join(data, "index.json")) == before and not os.path.exists(os.path.join(data, "closed.json"))
         api = FakeApi()

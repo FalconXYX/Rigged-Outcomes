@@ -31,12 +31,20 @@ before close") are unchanged: changing them waits for a two-run test.
 A check is {"query", "headlines", "what_happened", "public_at", "surprise",
 "who_knew_first", "public_signals", "verdict", "reason", "model"}, cached in
 the store by (condition_id, PROMPT_VERSION). A market whose news or
-judgement failed is left out of the answer (and tried again next run).
+judgement failed is left out of the answer (and tried again next run). A
+news search that failed for a moment (a network error, a 429, a 5xx) is
+asked once more; a busy model up to JUDGE_TRIES times (not a refused
+request, nor a client with every model gone or its day spent), with one
+5-10 minute pause a run once it was busy ai.BUSY_STREAK times in a row:
+still busy after it, or busy again later, it is down. Once NEWS_DOWN_AFTER
+markets in a row found no news, or JUDGE_DOWN_AFTER batches in a row got no
+judgement, the rest are not asked this run, and once the run's time budget
+is spent no news search or model request starts.
 """
 import json
 import time
 
-from watchlist import ai, filters, kinds, news, store
+from watchlist import ai, filters, kinds, news, problems, store
 from watchlist.common import DAY, iso, log, to_epoch
 
 # closed-check-4 is skipped on purpose: it is the name of the untested draft with the judgement changes
@@ -47,7 +55,12 @@ PROMPT_VERSION = "closed-check-5"
 # is busy. Not gemini-3.8-flash: its free tier allows 20 requests a day and it is often "high demand" (503).
 JUDGE_MODELS = ("gemini-3-flash-preview", "gemini-3.5-flash-lite")
 JUDGE_RETRIES = 1       # a busy model hands over at once instead of backing off for minutes
-BUSY_WAIT = 30          # seconds before asking again when every model was busy
+BUSY_WAIT = 30          # seconds before asking again when every model was busy (then 3 times that)
+JUDGE_TRIES = 3         # tries of one batch while every model is busy
+JUDGE_DOWN_AFTER = 3    # batches in a row that got no judgement: the model is down for this run
+RUN_BUSY = ai.Busy()    # the default judge clients' busy count, over the run's days: one long pause a run
+NEWS_RETRY_WAIT = 5     # seconds before a news search that failed for a moment is asked again
+NEWS_DOWN_AFTER = 10    # markets in a row whose news search failed: the news is down for this run
 QUERY_BATCH = 25
 JUDGE_BATCH = 5
 NEWS_BEFORE_DAYS = 21
@@ -209,13 +222,26 @@ def _ask(client, prompt, items, schema, key):
     return {str(x.get("id")): x for x in (answer.get(key) or []) if isinstance(x, dict)}, model
 
 
-def write_queries(markets, client):
+def _spent(budget):
+    return budget is not None and budget.expired()
+
+
+def _all_spent(client):
+    """True when the client has given up on every model it has (each gone, or its daily quota spent)."""
+    models = set(getattr(client, "models", None) or ())
+    return bool(models) and models <= set(getattr(client, "skip", None) or ())
+
+
+def write_queries(markets, client, budget=None):
     """{short id: query}, one model call per QUERY_BATCH markets; the
-    question itself stands in when the model gives none."""
+    question itself stands in when the model gives none (or the run's time
+    budget is spent)."""
     out = {}
     for i in range(0, len(markets), QUERY_BATCH):
         batch = markets[i:i + QUERY_BATCH]
         try:
+            if _spent(budget):
+                raise ValueError("the run's time budget is spent")
             got, _ = _ask(client, QUERY_PROMPT, [card(m) for m in batch], QUERY_SCHEMA, "queries")
         except (ai.GeminiError, ValueError) as e:
             log(f"  ! news queries: {e}")
@@ -247,7 +273,22 @@ def headlines_for(market, query):
     return [h for h in found if not kinds.is_odds(h.get("title"), h.get("source"), percent=False)][:HEADLINES]
 
 
-def check_markets(markets, conn, client=None):
+def _headlines(m, q, sleep):
+    """headlines_for, asked once more after NEWS_RETRY_WAIT when the search failed for a moment."""
+    try:
+        return headlines_for(m, q)
+    except news.NewsError as e:
+        if not getattr(e, "transient", False):
+            raise
+        log(f"  ! {m.get('question')}: {e}; asking again in {NEWS_RETRY_WAIT} s")
+        sleep(NEWS_RETRY_WAIT)
+        return headlines_for(m, q)
+
+
+def check_markets(markets, conn, client=None, budget=None, sleep=time.sleep):
+    """{condition_id: check} for the markets (the module docstring). budget: the run's time (a common.Budget,
+    or None): once it is spent no news search or model request starts, and the markets not reached are left out
+    of the answer, as when their news or judgement fails."""
     conn = conn or store.default_conn()
     out, todo = {}, []
     for m in markets:
@@ -258,29 +299,77 @@ def check_markets(markets, conn, client=None):
             todo.append(m)
     if not todo:
         return out
-    queries = write_queries(todo, client or ai.Client())
+    queries = write_queries(todo, client or ai.Client(), budget)
     judge_client = client or ai.Client(models=JUDGE_MODELS, retries=JUDGE_RETRIES)
-    found = []
-    for m in todo:
+    if client is None:
+        judge_client.busy = RUN_BUSY
+    busy = ai.busy_of(judge_client)
+    found, failed = [], 0
+    for n, m in enumerate(todo):
+        if _spent(budget) or failed >= NEWS_DOWN_AFTER:
+            log(f"  ! news: {len(todo) - n} market(s) not searched this run ("
+                + ("the run's time budget is spent)" if _spent(budget) else
+                   f"{failed} searches in a row failed: the news is down)"))
+            break
         q = queries[short_id(m)]
         try:
-            found.append((m, q, headlines_for(m, q)))
+            found.append((m, q, _headlines(m, q, sleep)))
+            failed = 0
         except news.NewsError as e:
+            failed += 1
             log(f"  ! {m.get('question')}: {e}")
+    down, refused, rejected, still_busy = 0, False, False, False
     for i in range(0, len(found), JUDGE_BATCH):
+        if _spent(budget) or down >= JUDGE_DOWN_AFTER or still_busy:
+            log(f"  ! judging: {len(found) - i} market(s) not judged this run ("
+                + ("the run's time budget is spent)" if _spent(budget) else
+                   "still busy after a long pause: the model is down)" if still_busy else
+                   f"{down} batches in a row got no judgement: the model is down)"))
+            break
         batch = found[i:i + JUDGE_BATCH]
-        got = None
-        for attempt in range(2):                 # the free models are often busy for a moment
+        got, paused = None, False
+        for attempt in range(JUDGE_TRIES):       # the free models are often busy for a moment
+            if attempt and _spent(budget):
+                break
             try:
                 got, model = _ask(judge_client, JUDGE_PROMPT, [card(m, h) for m, _, h in batch], CHECK_SCHEMA,
                                   "checks")
+                busy.note(False)
                 break
             except (ai.GeminiError, ValueError) as e:
                 log(f"  ! judging {len(batch)} markets{' (again)' if attempt else ''}: {e}")
-                if attempt == 0:
-                    time.sleep(BUSY_WAIT)
+                if getattr(e, "status", None) in (401, 403) or getattr(e, "config", False):
+                    if not refused:
+                        problems.note(f"the closed list's judge: the Gemini key was refused ({e})", problems.CONFIG)
+                    refused = True
+                    break                        # the key itself: asking again will not help
+                if getattr(e, "refused", False):
+                    if not rejected:
+                        problems.note(f"the closed list's judge: the model refused the request ({e}); the code "
+                                      f"must change it", problems.CRASH)
+                    rejected = True
+                    break                        # the same request is refused the same way
+                if _all_spent(judge_client):
+                    break                        # every model gone or its day's quota spent: no wait brings one
+                busy.note(ai.is_busy(e))
+                if paused and ai.is_busy(e):
+                    still_busy = True            # still busy after the long pause: down for this run
+                    break
+                if attempt + 1 < JUDGE_TRIES:    # one long pause a run once busy BUSY_STREAK times in a row
+                    pause, long_ = busy.wait(BUSY_WAIT * (1 if attempt == 0 else 3),
+                                             budget.left() if budget is not None else None, attempt + 1)
+                    if long_ and busy.pauses > 1:
+                        still_busy = True        # busy again after the run's long pause: down for this run
+                        break
+                    if long_:
+                        log(f"  judging: the model was busy {busy.streak} times in a row; a pause of "
+                            f"{pause / 60:.0f} min")
+                    paused = long_
+                    sleep(pause)
         if got is None:
+            down += 1
             continue
+        down = 0
         for m, q, h in batch:
             c = normalise(got.get(short_id(m)) or {})
             if c is None:

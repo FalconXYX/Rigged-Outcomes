@@ -6,7 +6,7 @@
 - **The API** is a Cloudflare Worker: a small program Cloudflare runs for free at an address like `https://rigged-outcomes-api.<your-name>.workers.dev`. The site calls it when a visitor adds a timeline marker, watches an open market or adds a closed one to the main page, and the review page (`#/review`) calls it for your decisions.
 - **The database** is Cloudflare D1, a small SQL database attached to the Worker. It stores the markers, the site's one watchlist, the markets added to the main page, your decisions and everything the daily job keeps (its memory between runs, the published lists and the added markets' pages).
 - **The bot check** is Cloudflare Turnstile, the "are you a person" check (usually invisible) that runs before any visitor's write is accepted.
-- **The job** is a GitHub Action: at 04:17 UTC it makes both Watchlist lists, applies your decisions, adds the markets visitors sent to the main page and republishes the site. It saves to the database only and never commits to the repository.
+- **The job** is a GitHub Action: at about 04:17 UTC (GitHub often starts it hours late) it makes both Watchlist lists, applies your decisions, adds the markets visitors sent to the main page and republishes the site; a catch-up at about 10:17 UTC reads what Open now left unread. It saves to the database only and never commits to the repository.
 
 Everything is on Cloudflare's and GitHub's free plans; Cloudflare doesn't ask for a card.
 
@@ -83,7 +83,7 @@ Then tell Claude "Cloudflare done".
 
 ## If something breaks
 
-- **Back to the site without the API:** `gh variable delete API_URL --repo FalconXYX/Rigged-Outcomes && gh workflow run deploy.yml --ref main`. The site then has no Watchlist lists or added markets, and the daily job stops until the variable is back.
+- **Back to the site without the API:** `gh variable delete API_URL --repo FalconXYX/Rigged-Outcomes && gh workflow run deploy.yml --ref main`. The site then has no Watchlist lists or added markets, and the daily job fails at its setup check until the variable is back.
 - **See the API's errors as they happen:** `cd worker && npx wrangler tail`
 - **Stop visitor writes:** the pause switch on `#/review`.
 - **Take an added market back off the main page:** `python3 -m watchlist.blobs rm market:<name> && gh workflow run deploy.yml --ref main`. Its request then shows "taken off the main page", and no one can send it again.

@@ -54,11 +54,23 @@ last KEEP_DAYS days, after every day so a stalled run keeps what it did.
 Each day says when it was counted (counted_at, the run's time): a day
 counted before it was over is a partial count, and the site says where it
 stops ("by 04:17"). A run also counts again every kept day still partial,
-oldest first, so a day whose next run failed is finished by the one after.
+oldest first, so a day whose next run failed is finished by the one after,
+and every day of the last CATCH_UP_DAYS with markets that could not be
+checked, or that no run counted (the checks already made are cached, so
+only those markets cost requests).
 AI labels and checks are cached in data/watchlist/, so a re-run only asks
 about markets it has not checked.
 
+When Polymarket does not answer, the walk is asked again for about 7.5
+minutes (net.patiently); then the run stops and closed.json stays as it was.
+A run has an optional time budget (--budget-minutes): once it is spent no
+model request or news search starts, the day being counted is written with
+what was checked, and the days after it keep their last version (a partial
+one is counted again by the next run). What went wrong is recorded for the
+run's report (watchlist.problems).
+
     python3 -m watchlist.upsets [--days 7 | --since 2026-10-30] [--out PATH] [--watched work.json]
+                                [--budget-minutes N]
 """
 import argparse
 import json
@@ -68,8 +80,8 @@ import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
-from watchlist import ai, filters, judge, kinds, net, store
-from watchlist.common import DAY, day_str, iso, log, now_epoch, to_epoch
+from watchlist import ai, filters, judge, kinds, net, problems, store
+from watchlist.common import DAY, Budget, day_str, iso, log, now_epoch, to_epoch
 # The word rules both lists share live in watchlist.kinds (one vocabulary for the closed and the open
 # list, 2026-11-13): the embargo, public counts, mention markets, nature, the election keyword,
 # "continues through". candidates() applies them through kinds.closed_exclusion; the old names stay
@@ -83,6 +95,7 @@ MIN_VOLUME = 10_000
 PER_DAY = 5
 AT_LEAST = 3
 KEEP_DAYS = 14
+CATCH_UP_DAYS = 7         # a day of the last week with markets not checked, or never counted, is counted again
 EXCLUDED_TYPES = frozenset(ai.EXCLUDED_TYPES | {"election_vote"})
 TYPE_REASONS = {"game_sport": "game or sport", "price_level": "price market", "weather": "weather",
                 "election_vote": "election or vote"}
@@ -184,12 +197,12 @@ def choose(picks, per_day=PER_DAY, at_least=AT_LEAST):
 
 # ── one day ──────────────────────────────────────────────────────────────────
 
-def candidates(markets, conn):
+def candidates(markets, conn, budget=None):
     """(candidates [(market, label, folded markets)], dropped Counter) for
     one day's closed markets: resolved, not excluded, one per date ladder
     and per piece of news. A market that was on an "Open now" card is
     always checked unless it is a game, a price, weather or an embargoed
-    release."""
+    release. budget: the run's time (no label request starts once spent)."""
     dropped = Counter()
     kept = []
     for m in markets:
@@ -211,9 +224,17 @@ def candidates(markets, conn):
     labels = {}
     if kept:
         try:
-            labels = ai.label_markets(kept, conn=conn)
+            labels = ai.label_markets(kept, conn=conn, budget=budget)
         except ai.GeminiError as e:
-            log(f"  ! AI labels unavailable ({e}); the election keyword check still applies")
+            problems.note(f"the closed list's AI labels were unavailable ({e}); the election keyword check still "
+                          f"applied", problems.classify(e))
+        else:
+            # label_markets leaves out the markets it could not label (the model busy, or the time spent): they go
+            # on to the check unlabelled, and are labelled at the next run
+            missing = len({str(m.get("id")) for m in kept} - set(labels))
+            if missing:
+                problems.note(f"{missing} market(s) of the closed list got no AI label (the model did not answer, or "
+                              f"the time ran out); the election keyword check still applied")
     chosen_all = []
     for g in filters.group_by_event(kept):
         chosen, folded = ladder_choice(g["markets"])
@@ -326,11 +347,13 @@ def load_watched(path):
     return {str(r["story"]) for r in rows if isinstance(r, dict) and r.get("story")}
 
 
-def run_day(day_ts, markets, conn, client=None, watched=None):
+def run_day(day_ts, markets, conn, client=None, watched=None, budget=None):
     """The closed list of one UTC day from the markets that closed in it.
-    watched: the open card ids on the site's watchlist (load_watched)."""
-    cands, dropped = candidates(markets, conn)
-    checks = judge.check_markets([m for m, _, _ in cands], conn, client) if cands else {}
+    watched: the open card ids on the site's watchlist (load_watched).
+    budget: the run's time (a common.Budget, or None)."""
+    cands, dropped = candidates(markets, conn, budget)
+    within = {"budget": budget} if budget is not None else {}
+    checks = judge.check_markets([m for m, _, _ in cands], conn, client, **within) if cands else {}
     picks = []
     for m, lab, folded in cands:
         c = checks.get(m["conditionId"])
@@ -358,19 +381,37 @@ def partial(day, generated_at=None):
     return counted is not None and start is not None and counted < start + DAY
 
 
+def unchecked(day):
+    """How many of a day's markets could not be checked (the model or the news did not answer, or the time ran
+    out): the day is counted again, within CATCH_UP_DAYS."""
+    return int((day.get("dropped") or {}).get("could not be checked") or 0)
+
+
 def unfinished_since(old, generated_at, today, keep_days):
-    """The oldest kept day before today that is still a partial count (its next run failed or stalled), as
-    epoch seconds, or None."""
+    """The oldest day before today to count again, as epoch seconds, or None: a kept day still a partial count
+    (its next run failed or stalled); and, within the last CATCH_UP_DAYS, a day with markets that could not be
+    checked, or a day no run counted (a run stopped by its budget part way through a catch-up) after the oldest
+    kept one."""
     days = [to_epoch(f"{d}T00:00:00Z") for d, v in old.items() if partial(v, generated_at)]
     days = [t for t in days if t is not None and today - keep_days * DAY < t < today]
+    recent = today - CATCH_UP_DAYS * DAY
+    kept = {to_epoch(f"{d}T00:00:00Z"): v for d, v in old.items() if re.fullmatch(r"\d{4}-\d\d-\d\d", str(d))}
+    kept = {t: v for t, v in kept.items() if t is not None}
+    days += [t for t, v in kept.items() if recent <= t < today and unchecked(v)]
+    if kept:
+        days += [t for t in range(max(min(kept), recent), today, DAY) if t not in kept]
     return min(days) if days else None
 
 
-def build(days=1, now=None, conn=None, out_path=OUT_PATH, keep_days=KEEP_DAYS, client=None, watched=None):
+def build(days=1, now=None, conn=None, out_path=OUT_PATH, keep_days=KEEP_DAYS, client=None, watched=None,
+          budget=None, sleep=time.sleep):
     """Recompute the last `days` UTC days (today so far included), and any
     older kept day still counted only in part, and merge them into
     out_path, keeping the last keep_days days. watched: the open card ids
-    on the site's watchlist, for the recomputed days' picks."""
+    on the site's watchlist, for the recomputed days' picks. budget: the
+    run's time (a common.Budget, or None; the module docstring). Raises
+    PolymarketAPIError when Polymarket does not answer the walk (out_path
+    is then left as it was)."""
     now = now or now_epoch()
     conn = conn or store.default_conn()
     net.install()
@@ -383,23 +424,34 @@ def build(days=1, now=None, conn=None, out_path=OUT_PATH, keep_days=KEEP_DAYS, c
         old, generated = {d["day"]: d for d in prev.get("days", [])}, prev.get("generated_at")
     behind = unfinished_since(old, generated, today, keep_days)
     if behind is not None and behind < since:
-        log(f"closed list: {day_str(behind, is_day=False)} was counted before it was over; counting again from it")
+        log(f"closed list: {day_str(behind, is_day=False)} was counted before it was over, missed markets or was "
+            f"missed; counting again from it")
         since = behind
     t0 = time.time()
-    closed = net.closed_markets(since, now, min_volume=MIN_VOLUME)
+    closed = net.patiently(lambda: net.closed_markets(since, now, min_volume=MIN_VOLUME), "closed list", sleep=sleep)
     log(f"closed list: {len(closed)} markets of ${MIN_VOLUME:,}+ closed since {iso(since)}")
     by_day = defaultdict(list)
     for m in closed:
         ts = to_epoch(m.get("closedTime"))
         by_day[ts - ts % DAY].append(m)
-    doc = None
+    doc, missed = None, 0
     # oldest first, written after every day: a stalled run keeps the rest, and an older partial day is finished
     # before today's partial one is counted
     for day_ts in range(since, today + 1, DAY):
-        d = run_day(day_ts, by_day.get(day_ts, []), conn, client, watched)
+        if budget is not None and budget.expired():
+            problems.note(f"the closed list ran out of its {budget.seconds / 60:.0f}-minute budget: "
+                          f"{(today - day_ts) // DAY + 1} day(s) from {day_str(day_ts, is_day=False)} keep their last "
+                          f"version")
+            break
+        d = run_day(day_ts, by_day.get(day_ts, []), conn, client, watched,
+                    **({"budget": budget} if budget is not None else {}))
+        missed += unchecked(d)
         d["counted_at"] = iso(now)
         old[d["day"]] = d
         doc = _write(old, now, today, out_path, keep_days)
+    if missed:
+        problems.note(f"the closed list could not check {missed} market(s) (the model or Google News did not "
+                      f"answer, or its time ran out); their days were listed without them")
     log(f"closed list -> {out_path} ({time.time() - t0:.0f} s)")
     return doc
 
@@ -439,6 +491,9 @@ def main(argv=None):
     ap.add_argument("--keep-days", type=int, default=KEEP_DAYS, help=f"days kept in the file (default {KEEP_DAYS})")
     ap.add_argument("--watched", metavar="PATH", default=None,
                     help="the daily job's work.json: picks whose open card is on the site's watchlist are marked")
+    ap.add_argument("--budget-minutes", type=float, default=0,
+                    help="the run's time budget (default 0: none): no model request or news search starts once it "
+                         "is spent, and the days not reached keep their last version")
     args = ap.parse_args(argv)
     now, days, keep_days = now_epoch(), args.days, args.keep_days
     if args.since:
@@ -447,8 +502,9 @@ def main(argv=None):
             ap.error(f"--since {args.since!r}: not a YYYY-MM-DD day up to today")
         keep_days = max(keep_days, days)
     build(days=days, now=now, out_path=args.out, keep_days=keep_days,
-          watched=load_watched(args.watched) if args.watched else None)
+          watched=load_watched(args.watched) if args.watched else None,
+          budget=Budget(args.budget_minutes * 60) if args.budget_minutes > 0 else None)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(problems.guard("closed", main))

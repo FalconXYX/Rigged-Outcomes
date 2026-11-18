@@ -12,7 +12,8 @@ table, an empty state), unknown columns, pull and push (no API, no saved
 state, a push then a pull into a fresh store, a local store with newer data
 and --force with its backup, a state saved by another run since the pull,
 nothing changed and nothing sent, the lists sent only when they changed,
---seed and --onto-head, the news cache never failing a run), migrate (the
+--seed and --onto-head, the news cache never failing a run, the head's
+open_left and the open_list output the catch-up run reads), migrate (the
 branch's bytes kept, a saved state refused or replaced with --force, files
 that do not match their manifest), and prune (what it removes, and that the
 next day's cards are the same with or without it).
@@ -173,14 +174,12 @@ def saved_files(api):
     return {k: v.encode("utf-8") for k, v in doc["files"].items()}
 
 
-def test_no_api_and_no_saved_state():
+def test_no_api():
     with place() as (kw, tmp):
         refused(lambda: S.pull(store.connect(":memory:"), None, db_path=":memory:", **kw), 2, "No API configured")
         refused(lambda: S.push(filled(), None, seed=True, now=NOW, **kw), 3, "No API configured")
         refused(lambda: S.migrate(None, reader=lambda p: None), 3, "No API configured")
         api = FakeApi()
-        e = refused(lambda: S.pull(store.connect(":memory:"), api, db_path=":memory:", **kw), 2, "No saved state")
-        assert "migrate" in str(e) and "--seed" in str(e)
         refused(lambda: S.push(filled(), api, now=NOW, **kw), 3, "has not pulled")
         refused(lambda: S.push(filled(), api, onto_head=True, now=NOW, **kw), 3, "seed it")
         assert api.calls["PUT"] == 0 and not os.listdir(kw["job_dir"])
@@ -200,6 +199,84 @@ def test_no_api_and_no_saved_state():
             for k, v in zip(("WATCHLIST_API_URL", "WATCHLIST_JOB_TOKEN"), old[:2]):
                 if v is not None:
                     os.environ[k] = v
+
+
+def test_no_saved_state_starts_fresh_and_saves_the_first():
+    """A fresh database (no state at all) is no refusal: the run starts from the store as it is, with a warning,
+    and its push saves the first state; one saved by someone else meanwhile is never overwritten."""
+    api = FakeApi()
+    with place() as (kw, _), place() as (other, _):
+        # an added market alone does not make it a used database (a first run whose save failed may add one)
+        blobs.put_json(api, "market:gemini-carbon", {}, {"entry": {"name": "gemini-carbon", "slug": "g-c"}})
+        conn = store.connect(":memory:")
+        with quiet() as out:
+            got = S.pull(conn, api, db_path=":memory:", now=NOW, **kw)
+        assert got == {"fresh": True} and "No saved state in the database" in out.getvalue()
+        assert not os.path.exists(os.path.join(kw["site_dir"], "closed.json"))
+        pulled = json.loads(read(os.path.join(kw["job_dir"], "state_pulled.json")))
+        assert pulled["fresh"] and pulled["version"] is None
+        # nothing changed: nothing to save, and still a fresh start
+        with quiet():
+            same = S.push(conn, api, now=NOW + 5, **kw)
+        assert same["changed"] is False and same["version"] is None and blobs.head(api, S.STATE) is None
+        # the run's work: its push saves the first state
+        store.save_review(conn, "acme", "acme talks", "step", {"title": "Acme talks"}, at=NOW + 10)
+        with quiet():
+            first = S.push(conn, api, now=NOW + 20, **kw)
+        assert first["changed"] and blobs.head(api, S.STATE)["version"] == first["version"]
+        assert rows(conn, "open_reviews")[0]["story"] == "acme"
+        # another place started fresh too, but the first state was saved meanwhile: it is refused, not overwritten
+        conn2 = store.connect(":memory:")
+        with quiet():
+            S.pull(conn2, FakeApi(), db_path=":memory:", now=NOW, **other)          # its own empty database
+        store.save_review(conn2, "other", "k", "step", {"title": "k"}, at=NOW + 30)
+        e = refused(lambda: S.push(conn2, api, now=NOW + 40, **other), 3, "changed since this run's pull")
+        assert e.kind == "outside" and blobs.head(api, S.STATE)["version"] == first["version"]
+
+
+def test_a_used_database_without_its_state_is_refused():
+    """A list, the news cache or a replaced state version is saved only after a state: holding one without a
+    state means the state was lost or API_URL points at another database. Starting fresh there would record every
+    first-entry 99c check again, so the pull refuses, as the setup's problem, and loads nothing."""
+    for what, fill in (("list:closed", lambda api: blobs.put(api, "list:closed", b'{"days": []}', {"by": "mac"})),
+                       ("cache:news", lambda api: blobs.put(api, "cache:news", b"{}", {"by": "mac"})),
+                       ("replaced state version", lambda api: api.kept.setdefault("state", []).append(
+                           {"name": "state", "version": "a" * 32, "parts": 1, "bytes": 1, "sha256": "0" * 64,
+                            "meta": "{}", "updated_at": NOW, "replaced_at": NOW}))):
+        api = FakeApi()
+        fill(api)
+        with place() as (kw, _):
+            e = refused(lambda: S.pull(store.connect(":memory:"), api, db_path=":memory:", now=NOW, **kw), 2,
+                        "but no saved state")
+            assert e.kind == "config" and what in str(e) and "restore state VERSION" in str(e), (what, str(e))
+            assert not os.listdir(kw["job_dir"]) and not os.listdir(kw["site_dir"])
+    # the check itself waits out an API that does not answer like every pull does: an outside refusal then
+    api = FakeApi()
+    api.fail_next(503, "server", method="GET", path="prefix=")
+    with place() as (kw, _):
+        e = refused(lambda: S.pull(store.connect(":memory:"), api, db_path=":memory:", now=NOW, **kw), 2,
+                    "could not be downloaded")
+        assert e.kind == "outside"
+
+
+def test_refusals_say_whose_they_are():
+    """An API that does not answer is an outside refusal; a refused token or a damaged state is the setup's."""
+    with place() as (kw, _):
+        api = FakeApi()
+        with quiet():
+            S.push(filled(), api, seed=True, now=NOW, **kw)
+        for status, code, kind in ((503, "server", "outside"), (None, "network", "outside"),
+                                   (401, "unauthorized", "config"), (429, "locked", "config")):
+            api.fail_next(status, code, method="GET")
+            e = refused(lambda: S.pull(store.connect(":memory:"), api, db_path=":memory:", **kw), 2,
+                        "could not be downloaded")
+            assert e.kind == kind, (status, e.kind)
+            api.fail_next(status, code, method="GET")
+            e = refused(lambda: S.push(filled(), api, onto_head=True, now=NOW, **kw), 3, "nothing was saved")
+            assert e.kind == kind, (status, e.kind)
+        api.parts[("state", api.blobs["state"]["version"], 0)] = "AAAA"           # damaged
+        e = refused(lambda: S.pull(store.connect(":memory:"), api, db_path=":memory:", **kw), 2, "versions state")
+        assert e.kind == "config"
 
 
 def test_push_then_pull_into_a_fresh_store():
@@ -336,6 +413,51 @@ def test_lists_are_sent_only_when_they_changed():
         with quiet():
             S.pull(fresh, api, db_path=":memory:", now=NOW + 5, **a)
         assert rows(fresh, "open_reviews") == rows(conn, "open_reviews")
+
+
+def test_the_catch_up_run_reads_the_head_and_deploys_only_a_changed_open_list():
+    # the saved state's head carries what the latest open-list day left unread (the catch-up run's check reads
+    # .meta.open_left with one request), and the push tells the job whether it sent open.json (the deploy waits on it)
+    api = FakeApi()
+    with place() as (a, tmp):
+        _site(a)
+        db = os.path.join(tmp, "w.db")
+        conn = filled(store.connect(db))
+        store.save_open_day(conn, "2026-11-14", "updated", NOW, [], version="open-step-1",
+                            info={"left_for_next_run": {"steps 1": 2, "names": 4}, "step_failed": ["acme", "x"],
+                                  "step_failed_busy": ["acme"]})
+        assert S.open_left(conn) == {"day": "2026-11-14", "unread": 3}
+        assert S.open_left(store.connect(":memory:")) is None
+        with quiet():
+            S.push(conn, api, seed=True, now=NOW, **a)
+            S.pull(conn, api, db_path=db, now=NOW + 1, **a)
+        assert blobs.head(api, S.STATE)["meta"]["open_left"] == {"day": "2026-11-14", "unread": 3}
+        out = os.path.join(tmp, "github_output")
+        old = (S.sync.client, S.push, os.environ.get("GITHUB_OUTPUT"))
+        push = S.push
+        S.sync.client = lambda *x, **k: api
+        S.push = lambda *x, **k: push(*x, **dict(k, job_dir=a["job_dir"]))
+        os.environ["GITHUB_OUTPUT"] = out
+        args = ["push", "--db", db, "--site-dir", a["site_dir"], "--news-cache", os.path.join(tmp, "news.json")]
+        try:
+            # the catch-up read what was left, the list did not change: the state is saved, open.json is not sent
+            store.save_open_day(conn, "2026-11-14", "updated", NOW, [], version="open-step-1", info={})
+            with quiet():
+                assert S.main(args) == 0
+            assert read(out, "r").splitlines() == ["open_list=false"]
+            assert blobs.head(api, S.STATE)["meta"]["open_left"] == {"day": "2026-11-14", "unread": 0}
+            # it changed: sent, and the job deploys
+            with open(os.path.join(a["site_dir"], "open.json"), "w") as f:
+                json.dump({"days": [{"day": "2026-11-14", "run_at": "2026-11-14T04:17:00Z", "cards": [{}]}]}, f)
+            with quiet():
+                assert S.main(args) == 0
+            assert read(out, "r").splitlines() == ["open_list=false", "open_list=true"]
+        finally:
+            S.sync.client, S.push = old[0], old[1]
+            if old[2] is None:
+                os.environ.pop("GITHUB_OUTPUT", None)
+            else:
+                os.environ["GITHUB_OUTPUT"] = old[2]
 
 
 def test_the_news_cache_rides_along_and_never_fails_a_run():

@@ -74,10 +74,14 @@ Gemini (verified 2026-11-10, see ../memory note on the key):
   a timeout moves this request to the next model. A model is skipped for
   the rest of the process only when it is gone (404, or a 400 that says the
   model is not found / not supported) or its daily quota is spent (a 429
-  that says per day). Any other 4xx (a plain 400) is about the request, not
+  that says per day). A gone model is also reported once as a problem of
+  the code (watchlist.problems: the run fails until another model takes its
+  place). Any other 4xx (a plain 400) is about the request, not
   the model: generate() raises at once without skipping or falling back,
   and _run_batch() splits the batch in two and asks each half once. 401 /
-  403 (key refused) stops the run.
+  403 (key refused) stops the run. Client.busy (Busy) counts a client's busy
+  answers in a row: the callers that ask again (opennow.ask, the judge)
+  pause 5-10 minutes after BUSY_STREAK of them, from a request's second try.
 
 Cache: the store's ai_labels table, keyed by (market id, sha1 of the
 normalised rules). A changed rules text gets a new label; an unchanged one
@@ -132,6 +136,8 @@ RETRIES_PER_MODEL = 4       # attempts on one model for 429 / 5xx / network erro
 MAX_BACKOFF = 60.0
 MIN_INTERVAL = 4.2          # seconds between request starts, across threads: the free tier allows
                             # 15 requests a minute on gemini-3.5-flash-lite (its 429 says so)
+BUSY_STREAK = 3             # busy answers in a row on one client before the waits turn into long pauses
+BUSY_PAUSE = (300, 600)     # a long pause, in seconds: a rush on the free models passes in minutes
 TEMPERATURE = 0.0
 
 TYPES = ("military_gov_action", "person_leaves_role", "company_product", "predecided_reveal", "court_regulator",
@@ -182,13 +188,15 @@ class GeminiError(RuntimeError):
     """A Gemini call that failed (message never carries the key).
     refused: the request itself was rejected (a plain 400 or other 4xx that
     is not about the key, the model or a rate limit), so asking the same
-    request of another model would not help; _run_batch splits the batch."""
+    request of another model would not help; _run_batch splits the batch.
+    config: no key is set (a setup problem, watchlist.problems)."""
 
-    def __init__(self, message, status=None, model=None, refused=False):
+    def __init__(self, message, status=None, model=None, refused=False, config=False):
         super().__init__(_scrub(message))
         self.status = status
         self.model = model
         self.refused = refused
+        self.config = config
 
 
 # ── key ──────────────────────────────────────────────────────────────────────
@@ -211,7 +219,7 @@ def api_key():
                 if line.startswith("GEMINI_API_KEY="):
                     key = line.split("=", 1)[1].split(" #", 1)[0].strip().strip('"').strip("'")
     if not key:
-        raise GeminiError(f"GEMINI_API_KEY is not set (environment or {ENV_FILE})")
+        raise GeminiError(f"GEMINI_API_KEY is not set (environment or {ENV_FILE})", config=True)
     _KEY["key"] = key
     return key
 
@@ -302,6 +310,20 @@ _MODEL_GONE = re.compile(r"\bmodels?\b.{0,80}?\b(?:not found|not supported|unsup
                          r"is not available|no longer available)\b|\b(?:unknown|invalid|unsupported) model\b",
                          re.I | re.S)
 _DAILY_QUOTA = re.compile(r"per ?day|daily", re.I)
+_GONE = set()                   # models already reported gone in this process
+_GONE_LOCK = threading.Lock()
+
+
+def _report_gone(model, status, msg):
+    """A model the code names is gone (retired, renamed, or not one this key may use): a problem of the code for
+    the run's report and verdict (watchlist.problems), once per model. Its lists go on with the other models."""
+    with _GONE_LOCK:
+        if model in _GONE:
+            return
+        _GONE.add(model)
+    from watchlist import problems
+    problems.note(f"the model {model} is gone (HTTP {status}: {_scrub(msg)[:120]}); name another in its place "
+                  f"(watchlist/ai.py MODELS, watchlist/kinds.py, watchlist/judge.py JUDGE_MODELS)", problems.CRASH)
 
 
 def _error_text(resp):
@@ -313,6 +335,47 @@ def _error_text(resp):
     if isinstance(err, dict):
         return str(err.get("message") or err)[:300]
     return str(err or j)[:300]
+
+
+def is_busy(e):
+    """A failed request that waiting may cure: no answer in time, a network error, a rate limit or a 5xx."""
+    s = getattr(e, "status", None)
+    return isinstance(e, GeminiError) and not e.config and not e.refused and (s is None or s in (408, 429) or s >= 500)
+
+
+class Busy:
+    """One client's busy answers in a row, over all its requests and threads. From BUSY_STREAK on, the wait before
+    a request's second or later try is a long pause instead of the short one (its first stays short: one 503 to
+    three readers at once is no rush); an answer starts the count again. pauses: the long pauses given."""
+
+    def __init__(self):
+        self.streak = self.pauses = 0
+        self._lock = threading.Lock()
+
+    def note(self, busy):
+        with self._lock:
+            self.streak = self.streak + 1 if busy else 0
+
+    def wait(self, short, left=None, failed=2):
+        """(seconds, long): the wait before the next try of a request that failed `failed` times (short: seconds,
+        or a (low, high) range), never more than left (the seconds before the run must stop; None: no limit)."""
+        with self._lock:
+            long_ = self.streak >= BUSY_STREAK and failed >= 2
+            self.pauses += long_
+        pause = random.uniform(*BUSY_PAUSE) if long_ else random.uniform(*short) if isinstance(short, tuple) else short
+        return (pause if left is None else max(0.0, min(pause, left))), long_
+
+
+def busy_of(client):
+    """The client's Busy (a fake client in a test gets one too)."""
+    b = getattr(client, "busy", None)
+    if b is None:
+        b = Busy()
+        try:
+            client.busy = b
+        except AttributeError:
+            pass
+    return b
 
 
 class Client:
@@ -333,6 +396,7 @@ class Client:
         self.session = session or requests.Session()
         self.sleep = sleep
         self.skip = set()             # models given up on for this process
+        self.busy = Busy()            # its busy answers in a row (the callers' waits between tries)
         self._lock = threading.Lock()
         self._next_start = 0.0
         self.stats = {"requests": 0, "answered": Counter(), "retries": 0, "timeouts": 0, "fallbacks": 0,
@@ -417,6 +481,8 @@ class Client:
                         (status == 429 and _DAILY_QUOTA.search(msg)):
                     self.skip.add(model)                   # model gone, or today's quota for it spent
                     self._note("retries", str(last))
+                    if status != 429:
+                        _report_gone(model, status, msg)
                     break
                 if status in (408, 429) or status >= 500:
                     self._note("retries", str(last))

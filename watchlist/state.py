@@ -15,9 +15,10 @@ In the database, as blobs (watchlist.blobs):
 
   state        {"format": 1, "files": {"manifest.json": text, "<table>.jsonl": text, ...}}:
                the manifest says when and by whom it was made, the newest
-               stamps (what the pull guard compares) and each table's row
-               count and sha256; a table's file is one JSON object per row,
-               keys sorted, rows in primary key order
+               stamps (what the pull guard compares), what the latest
+               open-list day left unread (the catch-up run's check) and
+               each table's row count and sha256; a table's file is one
+               JSON object per row, keys sorted, rows in primary key order
   list:closed, list:open   closed.json and open.json, byte for byte (the
                site's deploy fetches them: watchlist.publish)
   cache:news   the news searches cache, which only saves a same-day rebuild
@@ -40,17 +41,26 @@ versions: python3 -m watchlist.blobs versions state / restore state VERSION
 undoes a bad save.
 
 pull downloads everything before it changes anything, and refuses (exit 2)
-with no API, no saved state (a fresh runner must never start from nothing:
-it would record every first-entry 99c check again at today's prices), files
-that do not match their manifest, and a local store holding anything newer
-than the saved state (an open-list day, a decision or a closed check made
-since): --force replaces the local copy, after backing it up. push refuses
-(exit 3) when the saved state changed since this run's pull, so two writers
-(the Mac and GitHub) never overwrite each other, and saves nothing when no
-table changed; a push that went through (or found nothing to change) counts
-as this place's new pull, so pushing again later from here works. --seed
-saves the first state (there must be none yet); --onto-head saves the local
-store over whatever is saved now. A list is sent only when it changed.
+with no API, an API that does not answer or refuses the token (a runner
+that could not read the saved state must never start from nothing: it would
+record every first-entry 99c check again at today's prices), files that do
+not match their manifest, and a local store holding anything newer than the
+saved state (an open-list day, a decision or a closed check made since):
+--force replaces the local copy, after backing it up. A fresh database (no
+blob at all but the added markets) is no refusal: the run starts from the
+local store as it is (empty on a runner), with a warning, and its push saves
+the first state. One that holds what is saved only after a state (a list,
+the news cache, a replaced state version) but no state is refused as the
+setup's problem: the state was lost, or API_URL points at another database.
+push refuses (exit 3) when the saved state changed since this
+run's pull, so two writers (the Mac and GitHub) never overwrite each other,
+and saves nothing when no table changed; a push that went through (or found
+nothing to change) counts as this place's new pull, so pushing again later
+from here works. --seed saves the first state (there must be none yet);
+--onto-head saves the local store over whatever is saved now. A list is sent
+only when it changed. Each refusal says whether it is the setup's (a person
+must fix it) or an outside one (the API down, another run saved first),
+for the run's report (watchlist.problems).
 
 migrate is the one-off move from the old watchlist-data git branch: it reads
 the branch's files with git show (it never fetches, commits or pushes), or a
@@ -75,7 +85,7 @@ import sqlite3
 import subprocess
 import sys
 
-from watchlist import blobs, kinds as K, store, sync
+from watchlist import blobs, kinds as K, problems, store, sync
 from watchlist.common import DAY, DB_PATH, JOB_DIR, ROOT, SITE_DATA_DIR, day_str, iso, log, now_epoch
 
 FORMAT = 1
@@ -111,11 +121,18 @@ MOVED = "the saved state changed since this run's pull (another run saved first)
 
 
 class StateError(Exception):
-    """A refusal with the exit code the CLI gives (2: nothing usable was pulled, 3: nothing was saved)."""
+    """A refusal with the exit code the CLI gives (2: nothing usable was pulled, 3: nothing was saved) and its
+    kind (watchlist.problems): CONFIG (a person must fix it) unless it is an outside one."""
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, kind=problems.CONFIG):
         super().__init__(message)
-        self.code = code
+        self.code, self.kind = code, kind
+
+
+def _api_kind(e):
+    """The kind of a refusal caused by an ApiError: outside when the API is down, else the setup's (a refused
+    token) or the code's (a request the API cannot read)."""
+    return problems.OUTSIDE if e.outage else problems.CONFIG if e.refused else problems.CRASH
 
 
 # ── files: dump, verify, load ───────────────────────────────────────────────
@@ -164,6 +181,14 @@ def _site_meta(site_dir):
     return out
 
 
+def open_left(conn):
+    """{"day", "unread"}: the latest open-list day and what its runs left unread (opennow.left_unread), or None.
+    The catch-up run's check reads it from the saved state's head, without downloading the state."""
+    from watchlist import opennow
+    day = opennow.latest_day(conn)
+    return {"day": day["day"], "unread": opennow.left_unread(day)} if day else None
+
+
 def dump_files(conn, by="local", run_url=None, made_at=None, site_dir=SITE_DATA_DIR):
     """{"manifest.json": bytes, "<table>.jsonl": bytes, ...}: the state as its files."""
     files, tables = {}, {}
@@ -174,6 +199,7 @@ def dump_files(conn, by="local", run_url=None, made_at=None, site_dir=SITE_DATA_
     manifest = dict({"format": FORMAT, "made_at": iso(made_at if made_at is not None else now_epoch()),
                      "by": by, "run_url": run_url}, **_site_meta(site_dir))
     manifest["latest"] = latest_stamps(conn)
+    manifest["open_left"] = open_left(conn)
     manifest["tables"] = tables
     files["manifest.json"] = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode("utf-8")
     return files
@@ -348,8 +374,12 @@ def _doc(files):
 
 
 def _pulled(job_dir, version, made_at, tables, now):
-    _write(os.path.join(job_dir, "state_pulled.json"),
-           json.dumps({"version": version, "made_at": made_at, "tables": tables, "at": now}).encode())
+    """This place's pull: the saved version it holds, or (version None) a fresh start, whose push saves the first
+    state."""
+    doc = {"version": version, "made_at": made_at, "tables": tables, "at": now}
+    if version is None:
+        doc["fresh"] = True
+    _write(os.path.join(job_dir, "state_pulled.json"), json.dumps(doc).encode())
 
 
 def _pull_news(c, path):
@@ -368,7 +398,7 @@ def _pull_news(c, path):
         log(f"  news cache pulled ({len(data) / 1e6:.1f} MB)")
         return True
     except (sync.ApiError, blobs.BlobError, OSError, KeyError, TypeError, ValueError) as e:
-        sync._warn(f"the news cache was not pulled ({e}); the open list searches the news again")
+        problems.note(f"the news cache was not pulled ({e}); the open list searches the news again")
         return False
 
 
@@ -381,16 +411,19 @@ def pull(conn, c, db_path=DB_PATH, force=False, site_dir=SITE_DATA_DIR, job_dir=
         raise StateError(2, NO_API)
     try:
         h, doc = blobs.get_json(c, STATE)
-        if h is None:
-            raise StateError(2, "No saved state in the database: move the branch's in with python3 -m watchlist.state "
-                                "migrate, or start one with push --seed (docs/DEPLOY.md)")
         lists = {}
         for name in SITE_FILES:
             got, data = blobs.get(c, _list_name(name))
             if got is not None:
                 lists[name] = data
-    except (sync.ApiError, blobs.BlobError) as e:
-        raise StateError(2, f"the saved state could not be downloaded ({e}); nothing was loaded")
+    except sync.ApiError as e:
+        raise StateError(2, f"the saved state could not be downloaded ({e}); nothing was loaded", _api_kind(e))
+    except blobs.BlobError as e:
+        raise StateError(2, f"the saved state could not be downloaded ({e}); nothing was loaded. An earlier save "
+                            f"can be made live again: python3 -m watchlist.blobs versions state")
+    if h is None:
+        _never_saved(c)
+        return _start_fresh(conn, c, lists, site_dir, job_dir, news_cache, now)
     files = _doc_files(doc)
     manifest = verify(files)
     mine, theirs = latest_stamps(conn), manifest.get("latest") or {}
@@ -413,6 +446,46 @@ def pull(conn, c, db_path=DB_PATH, force=False, site_dir=SITE_DATA_DIR, job_dir=
     return manifest
 
 
+def _never_saved(c):
+    """With no state in the database: raises StateError(2, CONFIG) unless the database is fresh. A list, the news
+    cache and a replaced state version are saved only after a state was (push, migrate), and the API never
+    deletes a state: holding one of them without a state means the state was lost or API_URL points at another
+    database, and starting from nothing would record every first-entry 99c check again at today's prices. The
+    added markets do not count: a first run whose save failed may still add one."""
+    try:
+        held = sorted(str(h.get("name")) for h in blobs.heads(c, "")
+                      if not str(h.get("name")).startswith(sync.ADDED_PREFIX))
+        try:
+            kept = blobs.versions(c, STATE)
+        except sync.ApiError as e:
+            if e.status != 404:
+                raise
+            kept = []                                       # a Worker without kept versions
+    except sync.ApiError as e:
+        raise StateError(2, f"the saved state could not be downloaded ({e}); nothing was loaded", _api_kind(e))
+    if held or kept:
+        what = ", ".join(held + ([f"{len(kept)} replaced state version(s)"] if kept else []))
+        raise StateError(2, f"the database holds {what} but no saved state: it was lost, or API_URL points at "
+                            f"another database. Nothing was loaded. Make a kept state live again (python3 -m "
+                            f"watchlist.blobs versions state, then restore state VERSION), or save the Mac's (python3 "
+                            f"-m watchlist.state push --seed)")
+
+
+def _start_fresh(conn, c, lists, site_dir, job_dir, news_cache, now):
+    """pull with no saved state in the database: the local store stays as it is (empty on a runner) and its push
+    saves the first state; the lists the database holds are written. Returns {"fresh": True}."""
+    problems.note("No saved state in the database: this run starts from "
+                  + ("this store as it is" if _non_empty(conn) else "an empty memory")
+                  + ", and its save becomes the first state")
+    for name, data in lists.items():
+        _write(os.path.join(site_dir, name), data)
+    if news_cache:
+        _pull_news(c, news_cache)
+    _pulled(job_dir, None, None, {t: _sha256(table_bytes(conn, t)[0]) for t in TABLES}, now)
+    log(f"state: a fresh start; lists: {', '.join(lists) or 'none saved'}")
+    return {"fresh": True}
+
+
 def _push_lists(c, by, run_url, site_dir, now):
     """Send each published list in site_dir that differs from the saved one; returns the file names sent."""
     present = {}
@@ -431,7 +504,9 @@ def _push_lists(c, by, run_url, site_dir, now):
                 continue
             blobs.put(c, _list_name(name), data, {"by": by, "made_at": iso(now), "run_url": run_url})
             sent.append(name)
-    except (sync.ApiError, blobs.BlobError) as e:
+    except sync.ApiError as e:
+        raise StateError(3, f"the state was saved but the lists were not: {e}", _api_kind(e))
+    except blobs.BlobError as e:
         raise StateError(3, f"the state was saved but the lists were not: {e}")
     log(f"lists: {', '.join(sent) + ' saved' if sent else 'unchanged'}")
     return sent
@@ -451,7 +526,7 @@ def _push_news(c, path, by, now):
         log(f"  news cache saved ({len(data) / 1e6:.1f} MB, {got['parts']} part(s))")
         return True
     except (sync.ApiError, blobs.BlobError, OSError, KeyError, TypeError) as e:
-        sync._warn(f"the news cache was not saved ({e}); the next run searches the news again")
+        problems.note(f"the news cache was not saved ({e}); the next run searches the news again")
         return False
 
 
@@ -472,7 +547,7 @@ def push(conn, c, seed=False, onto_head=False, by="github", run_url=None, site_d
     try:
         cur = blobs.head(c, STATE)
     except sync.ApiError as e:
-        raise StateError(3, f"the database did not answer ({e}); nothing was saved")
+        raise StateError(3, f"the database did not answer ({e}); nothing was saved", _api_kind(e))
     pulled = None
     if seed:
         if cur is not None:
@@ -487,24 +562,27 @@ def push(conn, c, seed=False, onto_head=False, by="github", run_url=None, site_d
         log(f"  over the saved state {expect[:8]} (--onto-head): this store replaces it")
     else:
         pulled = _read_json(os.path.join(job_dir, "state_pulled.json"))
-        if not pulled or not pulled.get("version"):
+        if not pulled or not (pulled.get("version") or pulled.get("fresh")):
             raise StateError(3, "this run has not pulled the state (state_pulled.json is missing); nothing was saved")
-        expect = pulled["version"]
-        if cur is None or cur.get("version") != expect:
-            raise StateError(3, MOVED)
+        expect = pulled.get("version")              # None after a fresh start: there must still be no state
+        if (cur or {}).get("version") != expect:
+            raise StateError(3, MOVED, problems.OUTSIDE)
     if pulled is not None and pulled.get("tables") == shas:
         version, changed, made_at = expect, False, pulled.get("made_at")
-        log(f"state unchanged since version {expect[:8]}: nothing to save")
+        log(f"state unchanged since {'the fresh start' if expect is None else 'version ' + expect[:8]}: nothing to "
+            f"save")
     else:
         try:
             got = blobs.put_json(c, STATE, _doc(files), manifest, expect=expect)
         except sync.ApiError as e:
-            raise StateError(3, MOVED if e.code == "moved" else f"the state was not saved ({e}); nothing was saved")
+            if e.code == "moved":
+                raise StateError(3, MOVED, problems.OUTSIDE)
+            raise StateError(3, f"the state was not saved ({e}); nothing was saved", _api_kind(e))
         except blobs.BlobError as e:
             raise StateError(3, f"{e}; nothing was saved")
         version, changed, made_at = got["version"], True, manifest["made_at"]
         log(f"state saved to the database as version {version[:8]} ({got['parts']} part(s), "
-            f"{got['bytes'] / 1e6:.1f} MB)" + (" (the first)" if seed else ""))
+            f"{got['bytes'] / 1e6:.1f} MB)" + (" (the first)" if seed or expect is None else ""))
     _write(os.path.join(job_dir, "state_pushed.json"),
            json.dumps({"ok": True, "version": version, "changed": changed, "at": now}).encode())
     _pulled(job_dir, version, made_at, shas, now)
@@ -654,15 +732,19 @@ def main(argv=None):
             pull(conn, sync.client(PATIENT_WAITS), db_path=args.db, force=args.force, site_dir=args.site_dir,
                  news_cache=_news_path(args.news_cache))
         else:
-            push(conn, sync.client(PATIENT_WAITS), seed=args.seed, onto_head=args.onto_head, by=args.by,
-                 run_url=args.run_url, site_dir=args.site_dir, news_cache=_news_path(args.news_cache))
+            got = push(conn, sync.client(PATIENT_WAITS), seed=args.seed, onto_head=args.onto_head, by=args.by,
+                       run_url=args.run_url, site_dir=args.site_dir, news_cache=_news_path(args.news_cache))
+            sync._output(open_list="open.json" in got["lists"])     # the catch-up run deploys only on this
     except StateError as e:
         print(f"state {args.cmd}: {e}", file=sys.stderr, flush=True)
-        if os.environ.get("GITHUB_ACTIONS"):
-            print(f"::error::state {args.cmd}: {e}", flush=True)
+        problems.note(f"state {args.cmd}: {e}", e.kind, echo=False)       # an annotation, and the run's record
         return e.code
     return 0
 
 
+# the job's step ids (watchlist.problems): pull restores the state, push saves it
+STEP_NAMES = {"pull": "pull", "push": "save"}
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _cmd = next((a for a in sys.argv[1:] if not a.startswith("-")), "")
+    sys.exit(problems.guard(STEP_NAMES.get(_cmd, _cmd), main))

@@ -79,7 +79,7 @@ from concurrent.futures import ThreadPoolExecutor
 import polymarket_api
 from polymarket_api import DATA_API_V2, GAMMA_API, OPERATORS, PAGE_SIZE, PolymarketAPIError
 
-from watchlist import store
+from watchlist import problems, store
 from watchlist.common import DAY, log, now_epoch, to_epoch, utc_day
 
 # Documented requests per 10 s per IP, by endpoint family.
@@ -197,6 +197,30 @@ def uninstall():
 def bucket_stats():
     """{family: {"requests", "waited_s"}} since import (for run summaries)."""
     return {k: {"requests": b.taken, "waited_s": round(b.waited, 1)} for k, b in BUCKETS.items() if b.taken}
+
+
+# A whole walk asked again after each of these waits when Polymarket still fails it once get_json's own retries
+# (about 30 s) are spent: about 7.5 minutes in all, so a short outage never costs a list its day.
+WALK_WAITS = (30, 120, 300)
+
+
+def patiently(fn, what="the walk", waits=None, sleep=time.sleep):
+    """fn() asked again after each of waits (default WALK_WAITS) while it raises PolymarketAPIError. An error
+    waiting will not cure raises at once: an endpoint retired, or a status that says the request is wrong (a
+    400 or a 404: problems.polymarket_kind). A feed that came back in a shape the code does not know is asked
+    again (a glitch passes; a change raises after the waits). The last error raises."""
+    waits = WALK_WAITS if waits is None else tuple(waits)
+    for attempt in range(len(waits) + 1):
+        try:
+            return fn()
+        except polymarket_api.RetiredEndpointError:
+            raise
+        except PolymarketAPIError as e:
+            wrong = getattr(e, "status", None) is not None and problems.polymarket_kind(e) == problems.CRASH
+            if attempt == len(waits) or wrong:
+                raise
+            log(f"  ! {what}: Polymarket did not answer ({str(e)[:160]}); asking again in {waits[attempt]} s")
+            sleep(waits[attempt])
 
 
 # ── Gamma keyset walks ───────────────────────────────────────────────────────

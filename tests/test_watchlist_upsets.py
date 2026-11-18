@@ -350,8 +350,53 @@ def test_partial_days_say_so_and_are_finished_later():
             seen.clear()
             up.build(days=2, now=to_epoch("2026-11-17T04:20:00Z"), conn=store.connect(":memory:"), out_path=out)
             assert seen == ["2026-11-16", "2026-11-17"], seen
+            # a partial day older than the kept days is left; the days no run counted since are counted, within
+            # the last week (CATCH_UP_DAYS)
             assert up.unfinished_since({"2026-10-01": day("2026-10-01")}, "2026-10-01T05:00:00+00:00",
-                                       to_epoch("2026-11-17T00:00:00Z"), 14) is None
+                                       to_epoch("2026-11-17T00:00:00Z"), 14) == to_epoch("2026-11-10T00:00:00Z")
+    finally:
+        up.net.install, up.net.closed_markets, up.run_day = saved
+
+
+def test_days_with_markets_not_checked_or_never_counted_are_counted_again():
+    # Nov 15 was counted in full, but 9 of its markets could not be checked (the model was down): the Nov 17 run
+    # counts it again, the checks already made coming from the cache; after a week such a day is left as it is
+    seen = []
+    saved = (up.net.install, up.net.closed_markets, up.run_day)
+
+    def run_day(day_ts, markets, conn, client=None, watched=None):
+        seen.append(up.iso(day_ts)[:10])
+        return {"day": up.iso(day_ts)[:10], "closed_markets": 0, "candidates": 0, "checked": 0, "verdicts": {},
+                "dropped": {}, "picks": []}
+    up.net.install, up.net.closed_markets, up.run_day = (lambda: None), (lambda since, now, min_volume=0: []), run_day
+
+    def day(d, counted, unchecked=0):
+        return {"day": d, "counted_at": counted, "closed_markets": 9, "candidates": 9, "checked": 9 - unchecked,
+                "verdicts": {}, "dropped": {"could not be checked": unchecked} if unchecked else {}, "picks": []}
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "closed.json")
+            with open(out, "w") as f:
+                json.dump({"generated_at": "2026-11-16T04:20:00+00:00",
+                           "days": [day("2026-11-16", "2026-11-16T04:20:00+00:00"),
+                                    day("2026-11-15", "2026-11-16T04:20:00+00:00", unchecked=9),
+                                    day("2026-11-14", "2026-11-15T04:20:00+00:00")]}, f)
+            assert up.unchecked(day("2026-11-15", "x", unchecked=9)) == 9 and up.unchecked(day("x", "x")) == 0
+            up.build(days=2, now=to_epoch("2026-11-17T04:20:00Z"), conn=store.connect(":memory:"), out_path=out)
+            assert seen == ["2026-11-15", "2026-11-16", "2026-11-17"], seen
+            # a week later it is left as it is
+            old = {"2026-11-01": day("2026-11-01", "2026-11-02T04:20:00+00:00", unchecked=3)}
+            old.update({f"2026-11-{n:02d}": day(f"2026-11-{n:02d}", f"2026-11-{n + 1:02d}T04:20:00+00:00")
+                        for n in range(2, 17)})
+            assert up.unfinished_since(old, None, to_epoch("2026-11-17T00:00:00Z"), 14) is None
+            # a catch-up its budget stopped part way: Nov 10 and 11 counted, Nov 12 to 15 never were (and Nov 16 a
+            # run counted later): the next run starts from Nov 12
+            gaps = {d: day(d, "2026-11-16T05:00:00+00:00") for d in ("2026-11-10", "2026-11-11", "2026-11-16")}
+            assert up.unfinished_since(gaps, None, to_epoch("2026-11-17T00:00:00Z"), 14) == \
+                to_epoch("2026-11-12T00:00:00Z")
+            # a first file (two days) has no gap before it
+            first = {d: day(d, "2026-11-17T04:20:00+00:00") for d in ("2026-11-16", "2026-11-17")}
+            assert up.unfinished_since(first, None, to_epoch("2026-11-17T00:00:00Z"), 14) is None
     finally:
         up.net.install, up.net.closed_markets, up.run_day = saved
 

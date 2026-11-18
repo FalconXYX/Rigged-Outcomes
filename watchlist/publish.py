@@ -23,9 +23,12 @@ deploy built: WATCHLIST_SITE_URL, default LIVE_SITE) stands in, with a
 after the client's retries), and a list or a market whose saved document is
 damaged (a market the live site lacks is left out). With no API configured
 (neither WATCHLIST_API_URL nor WATCHLIST_JOB_TOKEN) the site is built without
-the lists and the added markets (exit 0). Only one of the two set, the API
-refusing (a wrong token), no index.json to add to, or neither the API nor the
-live site answering exits 1: the deploy fails and Pages keeps the last site.
+the lists and the added markets (exit 0). When the live site is needed and
+does not answer either, nothing is written and skip=true goes to
+$GITHUB_OUTPUT (exit 0): the deploy is left out, so Pages keeps the last site
+(with its lists) and the next deploy publishes. Only a setup or code problem
+exits 1 and fails the deploy: one of the two settings set without the other,
+the API refusing (a wrong token), or no index.json to add to.
 """
 import argparse
 import json
@@ -52,6 +55,10 @@ class PublishError(Exception):
     pass
 
 
+class LiveSiteDown(PublishError):
+    """The live site did not answer (or served something that is not the site's data): an outage."""
+
+
 def _bare(slug):
     import add_market
     return add_market.bare_slug(slug)
@@ -67,11 +74,6 @@ def _write(path, data):
 def _dumps(doc):
     """JSON the way export.py writes index.json and a market's page."""
     return json.dumps(doc, separators=(",", ":"), allow_nan=False).encode("utf-8")
-
-
-def _outage(e):
-    """An ApiError that means the API is down, not that it refused."""
-    return e.status is None or e.status == 429 or e.status >= 500
 
 
 class LiveSite:
@@ -99,7 +101,7 @@ class LiveSite:
             if r.status_code == 200:
                 return r.content
             why = f"HTTP {r.status_code}"
-        raise PublishError(f"the live site did not answer for {url} ({why})")
+        raise LiveSiteDown(f"the live site did not answer for {url} ({why})")
 
     def get(self, rel):
         return self._fetch(self.base + rel)
@@ -111,7 +113,7 @@ class LiveSite:
             try:
                 self._index = json.loads(data)["markets"] if data is not None else []
             except (ValueError, KeyError, TypeError) as e:
-                raise PublishError(f"the live site's index.json is not the site's index ({type(e).__name__})")
+                raise LiveSiteDown(f"the live site's index.json is not the site's index ({type(e).__name__})")
         return self._index
 
     def market(self, name):
@@ -280,6 +282,14 @@ def publish_live(out=SITE_DATA_DIR, live=None):
     return _finish(out, index, files, lists, added, skipped)
 
 
+def _output(**kv):
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a") as f:
+            for k, v in kv.items():
+                f.write(f"{k}={v}\n")
+
+
 def main(argv=None, live=None):
     ap = argparse.ArgumentParser(description="Add the Watchlist's lists and the added markets to the site's data.")
     ap.add_argument("--out", default=SITE_DATA_DIR, help="the site's data folder, export.py's output")
@@ -300,13 +310,18 @@ def main(argv=None, live=None):
         try:
             got = publish(c, args.out, live)
         except sync.ApiError as e:
-            if not _outage(e):
+            if not e.outage:                     # a refused token (401, or 429 locked), or a request it cannot read
                 print(f"::error::The API refused the deploy's reads ({e}): check the WATCHLIST_JOB_TOKEN secret",
                       flush=True)
                 return 1
             print(f"::warning::The API did not answer ({e}): the Watchlist lists and the added markets are the live "
                   f"site's ({live.base})", flush=True)
             got = publish_live(args.out, live)
+    except LiveSiteDown as e:
+        print(f"::warning::Neither the API nor the live site could give the Watchlist's data ({e}): this deploy is "
+              f"left out and Pages keeps the last site; the next deploy publishes", flush=True)
+        _output(skip="true")
+        return 0
     except (PublishError, blobs.BlobError) as e:
         print(f"::error::The Watchlist's data could not be added to the site: {e}", flush=True)
         return 1

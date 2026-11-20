@@ -1,6 +1,5 @@
 # Python dependencies for the analysis pipeline and the backend's Vercel step function (api/step.py, Python
-# 3.12): Vercel installs this file, so the versions are the tested ones, the same as requirements.lock (each
-# package with its hash: pip install --require-hashes -r requirements.lock).
+# 3.12): Vercel installs this file, so the versions are the tested ones.
 # tzdata gives zoneinfo America/Toronto where the system has no time zone files.
 #
 #   pip install -r requirements.txt

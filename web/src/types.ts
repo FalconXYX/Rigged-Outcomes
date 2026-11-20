@@ -1,4 +1,4 @@
-// Data contract produced by ../export.py. Keep in sync with that script.
+// Data contract produced by ../pipeline/export.py. Keep in sync with that script.
 //
 // TIME CONVENTION: every `t` / `start` / `end` is integer epoch SECONDS of the
 // US/Eastern wall clock read as if it were UTC. Build Dates with

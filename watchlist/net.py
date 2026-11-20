@@ -65,10 +65,10 @@ Endpoint facts (verified 2026-11-09/10):
 import threading
 import time
 
-import polymarket_api
+from pipeline import polymarket_api
 from backend import outcomes
 from backend.contract import RETRY
-from polymarket_api import DATA_API_V2, GAMMA_API, PolymarketAPIError
+from pipeline.polymarket_api import DATA_API_V2, GAMMA_API, PolymarketAPIError
 
 from watchlist import problems
 from watchlist.common import log, now_epoch, to_epoch

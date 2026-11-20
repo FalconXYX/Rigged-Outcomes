@@ -131,7 +131,7 @@ async function nextDaily(stack, after) {
 const CARDS_PY = String.raw`
 import json, os, sys
 sys.path.insert(0, os.getcwd())
-import polymarket_api
+from pipeline import polymarket_api
 from watchlist import filters, kinds, net, news, opennow, store, sync
 from watchlist.common import DAY, day_shift, local_bounds, local_day, local_iso, now_epoch
 

@@ -8,7 +8,7 @@ A run ends green unless a person must fix something:
   crash    the code: an unexpected exception (its traceback is in the step's log), a step that failed before
            it started, or a service saying the code's request is wrong (a model it names gone, a request the
            model, Polymarket or the site's API refuses, an answer in a shape the code does not know,
-           requirements.lock failing while PyPI answers)
+           requirements.txt failing while PyPI answers)
   outside  everything else: a service that still did not answer after its retries (Polymarket, Google News,
            the model, the site's API, PyPI), a list kept as it was, a step stopped at its time limit. A
            warning, a line in the run's report (python3 -m backend.status shows it) and in the job's summary;
@@ -52,8 +52,8 @@ KEEPS = {"closed": "it keeps its last version", "open": "it keeps its last versi
 # when the step said the fault is ours (--broken), a crash
 UNGUARDED = {"install": "the Python packages could not be installed after 3 tries (PyPI did not answer, or see the "
                         "step's log); nothing else ran today and the site keeps its lists"}
-BROKEN = {"install": "the Python packages could not be installed although PyPI answers: requirements.lock is wrong "
-                     "(a hash, or a version with no wheel for Python 3.12; see the step's log)"}
+BROKEN = {"install": "the Python packages could not be installed although PyPI answers: requirements.txt is wrong "
+                     "(a version with no wheel for Python 3.12; see the step's log)"}
 
 _active = {"step": None, "dir": None}
 _lock = threading.Lock()                 # one writer of job_run.json at a time (the steps' threads note problems)
@@ -148,7 +148,7 @@ def polymarket_kind(e):
     error, a page that was not JSON), or a status that says busy or not now (BUSY_STATUSES, 5xx). CRASH for one
     that says the request or the code is wrong: an endpoint retired (410), another 4xx (a request Polymarket
     cannot read), an error payload, or an answer whose shape the code does not know (the v2 move was one)."""
-    from polymarket_api import RetiredEndpointError
+    from pipeline.polymarket_api import RetiredEndpointError
     if isinstance(e, RetiredEndpointError):
         return CRASH
     if str(e).startswith("gave up on "):
@@ -159,7 +159,7 @@ def polymarket_kind(e):
 
 def _kind(e):
     import requests
-    from polymarket_api import PolymarketAPIError
+    from pipeline.polymarket_api import PolymarketAPIError
     from watchlist import ai, news, sync
     if isinstance(e, PolymarketAPIError):
         return polymarket_kind(e)
@@ -199,7 +199,7 @@ def describe(e):
     name = type(e).__name__
     try:
         import requests
-        from polymarket_api import PolymarketAPIError
+        from pipeline.polymarket_api import PolymarketAPIError
         from watchlist import ai, news, sync
         who = ("Polymarket did not answer" if isinstance(e, PolymarketAPIError) else
                "Google News did not answer" if isinstance(e, news.NewsError) else

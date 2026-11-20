@@ -21,7 +21,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import polymarket_api  # noqa: E402
+from pipeline import polymarket_api  # noqa: E402
 from watchlist import filters, net, store  # noqa: E402
 from watchlist.common import DAY, to_epoch  # noqa: E402
 

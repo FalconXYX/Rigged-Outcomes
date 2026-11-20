@@ -53,8 +53,8 @@ Layers, bottom up (each imports only the ones above it):
            card sentences, step / leak / odds words, source ranks. Pure; it
            imports nothing from the package, so any module can use it.
 
-The legacy pipeline modules (polymarket_api, and add_market for a market
-added to the main page) are reused, never copied.
+The pipeline package's modules (pipeline.polymarket_api, and pipeline.add_market
+for a market added to the main page) are reused, never copied.
 
 Public API (what the lists build on):
 

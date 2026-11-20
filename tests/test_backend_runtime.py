@@ -113,7 +113,7 @@ def test_partial_later_and_errors():
 
 
 def test_polymarket_not_answering_is_later():
-    import polymarket_api
+    from pipeline import polymarket_api
     w, _ = fresh()
 
     def fetch(ctx):

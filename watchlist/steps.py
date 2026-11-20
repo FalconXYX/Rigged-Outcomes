@@ -402,7 +402,7 @@ def watch_check(ctx):
 # ── the closed list ──────────────────────────────────────────────────────────
 
 def closed_scan(ctx):
-    import polymarket_api
+    from pipeline import polymarket_api
     from watchlist import net
     now = run_now(ctx)
     st = State(ctx).load()
@@ -742,7 +742,7 @@ def _no_events(ctx):
 
 
 def open_walk(ctx):
-    import polymarket_api
+    from pipeline import polymarket_api
     from watchlist import net
     now = run_now(ctx)
     try:

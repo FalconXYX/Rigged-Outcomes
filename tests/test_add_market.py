@@ -24,7 +24,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import add_market as A  # noqa: E402
+from pipeline import add_market as A  # noqa: E402
 
 CID = "0x" + "ab" * 32
 MARKET = {"conditionId": CID, "closed": True, "umaResolutionStatus": "resolved", "question": "Will Gemini Carbon ship?",
@@ -224,7 +224,7 @@ def test_caps_and_failures_leave_nothing_behind():
         got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(fills=0, whale=False).steps())
         assert got["status"] == "failed" and "no trades" in got["note"]
         # a page the site could not read (NaN) fails here, not on the site
-        import export
+        from pipeline import export
         orig = export.export_one
         export.export_one = lambda entry, **kw: ({"name": entry["name"]}, {"name": entry["name"], "x": float("nan")})
         try:

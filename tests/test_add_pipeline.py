@@ -39,8 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import test_backend_fakeworker as F  # noqa: E402
 
-import add_market as A  # noqa: E402
-import polymarket_api as api  # noqa: E402
+from pipeline import add_market as A  # noqa: E402
+from pipeline import polymarket_api as api  # noqa: E402
 from backend import add_steps, contract, outcomes  # noqa: E402
 
 OLD_COMMIT = "3b883c3"
@@ -485,7 +485,7 @@ def test_the_originals_served_like_added_markets():
     """backend.site originals: markets.json's markets built from their CSVs at OLD_COMMIT (what the
     original-project branch holds), each page the one export.py writes from the files, put first in the index
     before a market added earlier; a second run changes nothing."""
-    import export
+    from pipeline import export
     from backend import site
     from watchlist import blobs
     if subprocess.run(["git", "-C", ROOT, "cat-file", "-e", f"{OLD_COMMIT}:markets.json"]).returncode:

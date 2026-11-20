@@ -25,10 +25,10 @@ sys.path.insert(0, ROOT)
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-import export  # noqa: E402
-import polymarket_api as api  # noqa: E402
-import polymarket_trades  # noqa: E402
-import scrape_insiders  # noqa: E402
+from pipeline import export  # noqa: E402
+from pipeline import polymarket_api as api  # noqa: E402
+from pipeline import polymarket_trades  # noqa: E402
+from pipeline import scrape_insiders  # noqa: E402
 
 WALLET = "0x7c3db723f1d4d8cb9c550095203b686cb11e5c6b"
 
@@ -336,7 +336,7 @@ def test_import_graph_has_no_cycle():
     import subprocess
     for order in ("polymarket_trades, scrape_insiders, export",
                   "scrape_insiders, polymarket_trades, export"):
-        code = f"import {order}; import polymarket_api; print('ok')"
+        code = f"from pipeline import {order}; from pipeline import polymarket_api; print('ok')"
         out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120)
         assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
 

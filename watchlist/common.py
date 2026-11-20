@@ -32,8 +32,8 @@ SITE_DATA_DIR = os.path.join(ROOT, "web", "public", "data")
 
 DAY = 86_400
 
-# The legacy modules (polymarket_api, scrape_insiders, …) live at the repo
-# root; make them importable however the package is entered.
+# The pipeline package (pipeline/: polymarket_api, scrape_insiders, …) sits at
+# the repo root; make it importable however the package is entered.
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 

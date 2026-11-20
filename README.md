@@ -30,7 +30,7 @@ VITE_API_URL=http://localhost:8788 VITE_TURNSTILE_SITEKEY=1x00000000000000000000
 **Add a market by hand** (what "Add to main page" does; it saves to the API in `WATCHLIST_API_URL`):
 
 ```bash
-python3 add_market.py --condition-id 0x... --slug SLUG --outcome Yes [--dry-run]
+python3 -m pipeline.add_market --condition-id 0x... --slug SLUG --outcome Yes [--dry-run]
 ```
 
 The original class project (the two Dash apps, `run.py`, the scripts and the CSVs in `data/`) lives on the `original-project` branch.
@@ -39,7 +39,7 @@ The original class project (the two Dash apps, `run.py`, the scripts and the CSV
 
 ## What It Does
 
-1. **Fetches** all trades from Polymarket for a given market (Data API v2, via `polymarket_api.py`)
+1. **Fetches** all trades from Polymarket for a given market (Data API v2, via `pipeline/polymarket_api.py`)
 2. **Cleans** data by aggregating trades per user/outcome/side
 3. **Identifies** suspicious whales: big winning bets from brand-new accounts, or from accounts that staked almost everything on this one market
 4. **Visualizes** the result on the site (`web/`)
@@ -49,11 +49,11 @@ The original class project (the two Dash apps, `run.py`, the scripts and the CSV
 
 ## Data Flow
 
-"Add to main page" → the Worker queues an `add` run → the step function (`backend/add_steps.py`, through `add_market.py`):
+"Add to main page" → the Worker queues an `add` run → the step function (`backend/add_steps.py`, through `pipeline/add_market.py`):
 
-- `polymarket_trades.py` (each trade) → `cleandata.py` (aggregate) → the clean CSV
-- `scrape_insiders.py` (detect patterns) → the insiders CSV
-- `export.py` → the market's page and index entry
+- `pipeline/polymarket_trades.py` (each trade) → `pipeline/cleandata.py` (aggregate) → the clean CSV
+- `pipeline/scrape_insiders.py` (detect patterns) → the insiders CSV
+- `pipeline/export.py` → the market's page and index entry
 
 all in memory, saved in D1 (`backend/site.py`: the page, the two CSVs, the index) and served by the Worker at `/api/data/`. The 7 original markets (`markets.json`) are saved the same way, by `python3 -m backend.site originals`.
 

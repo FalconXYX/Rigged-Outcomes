@@ -1,10 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "git": { "deploymentEnabled": false },
+  "git": { "deploymentEnabled": { "main": true, "**": false } },
   "functions": {
     "api/step.py": {
       "maxDuration": 300,
-      "includeFiles": "{backend/**,watchlist/**,markets.json,add_market.py,cleandata.py,export.py,polymarket_api.py,polymarket_trades.py,scrape_insiders.py}"
+      "includeFiles": "{backend/**,watchlist/**,pipeline/**,markets.json}"
     }
   },
   "routes": [

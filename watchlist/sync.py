@@ -279,7 +279,7 @@ def story_markets(conn, story, fetch_event=None, fetch_market=None):
     wins), and the one market of each outcome split into its own story (a card's slug that is none of those
     events' own; store.open_story_idents). [] when the store has no card for it; an event or a market Gamma no
     longer has is left out. Raises PolymarketAPIError when Polymarket does not answer."""
-    import polymarket_api
+    from pipeline import polymarket_api
     from watchlist import filters, net
     fetch_event = fetch_event or net.fetch_event
     fetch_market = fetch_market or polymarket_api.fetch_market
@@ -366,7 +366,7 @@ def watched_request(m):
 
 def main_page_slugs(added, markets_path=None):
     """The slugs on the main page, as add_market compares them (bare_slug): markets.json's and the added ones'."""
-    import add_market
+    from pipeline import add_market
     rows = (_read(markets_path or MARKETS_FILE, []) or []) + list(added or [])
     return {add_market.bare_slug(m.get("slug")) for m in rows if isinstance(m, dict) and m.get("slug")}
 
@@ -380,7 +380,7 @@ def send_watched(c, stories, on_main, markets_of, dry_run=False):
     Returns (rows, finished): the API's requests for the markets sent (AddRequest rows), and the stories done
     with (their market on the main page, or sent: it has a request now), which the run's report takes off the
     watchlist once Open now no longer lists them. Raises ApiError for a refused token."""
-    import add_market
+    from pipeline import add_market
     sent, finished, waiting = {}, [], 0
     for story in stories:
         try:
@@ -427,7 +427,7 @@ def send_watched(c, stories, on_main, markets_of, dry_run=False):
 def _saved_meanwhile(c, r, e):
     """(entry, the added entries) when a refused save (e: 409 moved) was a market another run saved meanwhile under
     its page name: the database's added markets, read again, have one with this market's slug. Else None."""
-    import add_market
+    from pipeline import add_market
     if e.code != "moved":
         return None
     try:
@@ -464,7 +464,7 @@ def add(c, work, results_path, dry_run=False, adder=None, now=None, refresh=Fals
     from watchlist import blobs
     now = int(now if now is not None else now_epoch())
     if adder is None:
-        import add_market
+        from pipeline import add_market
         adder = add_market.add
     results, finished = [], []
 

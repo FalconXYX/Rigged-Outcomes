@@ -14,7 +14,7 @@ one list failing or crashing, a failed add, a step stopped at its time
 limit, PyPI down) and the ones that must fail the run (a refused job token, a
 used database that lost its state, a crash with its traceback, a crash while
 adding a market, a model the code names gone, a request a service refuses,
-requirements.lock failing while PyPI answers), what each error means, the
+requirements.txt failing while PyPI answers), what each error means, the
 report's status and summary, and a run started hours late.
 """
 import contextlib
@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import requests  # noqa: E402
 
-import polymarket_api  # noqa: E402
+from pipeline import polymarket_api  # noqa: E402
 import fake_api  # noqa: E402
 from fake_api import FakeApi  # noqa: E402
 from backend import contract as C  # noqa: E402
@@ -340,7 +340,7 @@ def test_a_broken_install_fails_the_run_but_pypi_down_does_not():
         code, found = verdict(NOW - 60, {"install": "failure", "pull": "skipped"}, job)
         assert code == 0 and found[0]["kind"] == "outside"
         code, found = verdict(NOW - 60, {"install": "failure", "pull": "skipped"}, job, broken=["install"])
-        assert code == 1 and found[0]["kind"] == "crash" and "requirements.lock" in found[0]["message"]
+        assert code == 1 and found[0]["kind"] == "crash" and "requirements.txt" in found[0]["message"]
 
 
 # ── the model busy for a whole run ───────────────────────────────────────────
@@ -750,7 +750,7 @@ def test_a_failed_add_is_reported_for_that_market_and_the_run_stays_green():
     # one market cannot be added (a reason: reported failed), one Polymarket did not answer for (not reported: it
     # stays approved for the next run), one whose page a scorer wrapped Polymarket's failure for (the same), and
     # the others are still added. add_market.add returns its failures with the exception that caused them
-    import add_market
+    from pipeline import add_market
     with tempfile.TemporaryDirectory() as job, captured():
         api = FakeApi()
         down = polymarket_api.PolymarketAPIError("gave up on https://data-api.polymarket.com/v2/trades after 5 "

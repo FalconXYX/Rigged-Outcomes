@@ -1,6 +1,6 @@
 """
 How a step handler ends other than by returning, and the step's clock (docs/BACKEND.md). Standard
-library only, so watchlist/net.py, news.py, ai.py and polymarket_api.py can raise these without importing the
+library only, so watchlist/net.py, news.py, ai.py and pipeline/polymarket_api.py can raise these without importing the
 runtime.
 
   Later(run_after, reason, pause_lane_until=None)   come back at run_after (epoch seconds, the Worker's clock)

@@ -622,7 +622,7 @@ def test_a_watched_card_sends_the_market_it_is_about():
 
 
 def test_a_watched_card_is_looked_up_by_its_events_and_split_outcomes():
-    import polymarket_api
+    from pipeline import polymarket_api
     conn = store.connect(":memory:")
     base = {"place": "stays", "label": "listed", "listed_since": "2026-11-12"}
     store.save_open_day(conn, "2026-11-12", "updated", "2026-11-12T04:00:00Z",
@@ -692,7 +692,7 @@ class RequestsApi(WorkApi):
 
 
 def test_the_daily_run_adds_the_watched_markets_that_closed():
-    import polymarket_api
+    from pipeline import polymarket_api
     seen = []
 
     def adder(cid, slug, name, outcome, dry_run=False, added=()):

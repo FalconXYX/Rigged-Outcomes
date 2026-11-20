@@ -6,10 +6,10 @@ Why Rigged Outcomes is built the way it is: one row per decision that still hold
 
 | Decision | Why |
 |---|---|
-| Every fetch uses Data API v2 (`polymarket_api.py`) | Polymarket retired Data API v1 and the subgraph in November 2026 |
+| Every fetch uses Data API v2 (`pipeline/polymarket_api.py`) | Polymarket retired Data API v1 and the subgraph in November 2026 |
 | A failed fetch raises; it is never read as "no trades" | The old fetcher scored busy wallets as brand new |
 | Buys at 99¢ or more are not whales | Paying 99¢ is collecting a payout, not an informed bet |
-| `scrape_insiders.py` refuses a `correct_outcome` that contradicts `win_status` | A wrong outcome once picked superbowl's whales from the losing side |
+| `pipeline/scrape_insiders.py` refuses a `correct_outcome` that contradicts `win_status` | A wrong outcome once picked superbowl's whales from the losing side |
 
 ## Both Watchlist lists
 

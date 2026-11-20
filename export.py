@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Export the analysis behind VisualizeBetTiming.py and VisualizeInsiders.py as
-static JSON for the web dashboard (web/). Every calculation here mirrors the
-Dash apps line for line so the numbers on the site match the Python output.
+Export the analysis behind VisualizeBetTiming.py and VisualizeInsiders.py (the
+original Dash apps, on the original-project branch) as JSON for the web
+dashboard (web/). Every calculation here mirrors the Dash apps line for line so
+the numbers on the site match the Python output.
 
-    python3 export.py            # writes web/public/data/
+    python3 export.py            # data/*.csv -> web/public/data/ (CSVs from the original-project branch)
 
 Outputs
     data/index.json              one entry per market (+ ranking fields)
@@ -13,6 +14,10 @@ Outputs
 Timestamps are exported as epoch seconds of the US/Eastern wall clock read as
 if it were UTC (the Dash apps plot naive Eastern times). The frontend formats
 them with UTC formatters so every viewer sees Eastern time.
+
+export_one also takes a market's clean and insiders frames in memory (an
+added market's steps, backend/add_steps.py), giving the same page as from
+the files.
 """
 import json
 import math
@@ -98,12 +103,16 @@ def get_net_profit(row):
     return max(0.0, payout - stake)
 
 
-def prepare_market(m, data_dir="data"):
-    """Load one market's clean CSV and compute everything the timeline and the
-    ranking fields share: the whale threshold, the
-    winner mask, the whale set (after the IQR time-outlier filter, with the
-    per-whale profit) and the crowd. Mirrors VisualizeBetTiming.py."""
-    df = pd.read_csv(os.path.join(data_dir, f"{m['output']}_clean.csv"))
+def prepare_market(m, data_dir="data", df=None):
+    """Load one market's clean CSV (or take its frame, df: not changed) and
+    compute everything the timeline and the ranking fields share: the whale
+    threshold, the winner mask, the whale set (after the IQR time-outlier
+    filter, with the per-whale profit) and the crowd. Mirrors
+    VisualizeBetTiming.py."""
+    if df is None:
+        df = pd.read_csv(os.path.join(data_dir, f"{m['output']}_clean.csv"))
+    else:
+        df = df.copy()
     # Raw ISO strings: the join key back to _insiders.csv (target_trade_time).
     df["first_trade_raw"] = df["first_trade"].astype(str)
     for col in ("first_trade", "last_trade"):
@@ -299,14 +308,15 @@ def categorize(row):
     return "normal"
 
 
-def load_insiders(m, data_dir="data"):
+def load_insiders(m, data_dir="data", df=None):
     """One row per whale position scored by scrape_insiders.py (a wallet can
-    have several rows in one market). None when the file holds no whale
-    rows (a small market scores nobody: the file is a header only, or, from
-    older runs, a lone market_title column), so the market exports without
-    a traders panel instead of failing the build."""
+    have several rows in one market), from the file or its frame (df: not
+    changed). None when it holds no whale rows (a small market scores
+    nobody: the file is a header only, or, from older runs, a lone
+    market_title column), so the market exports without a traders panel
+    instead of failing the build."""
     path = os.path.join(data_dir, f"{m['output']}_insiders.csv")
-    df = pd.read_csv(path)
+    df = pd.read_csv(path) if df is None else df.copy()
     if "user_id" not in df.columns or df.empty:
         print(f"  ! {path}: no whale rows; exporting {m['name']} without traders")
         return None
@@ -458,15 +468,20 @@ def build_ranking(prep, insiders):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def export_one(m, data_dir="data"):
+def export_one(m, data_dir="data", clean=None, insiders=None):
     """One market's index.json entry and its markets/<name>.json payload, from
-    <data_dir>/<Output>_clean.csv and, when it is there, _insiders.csv. The
-    job's "Add to main page" (add_market.py) builds an added market's page
-    with it in a scratch folder."""
-    prep = prepare_market(m, data_dir)
-    insiders = None
-    if os.path.exists(os.path.join(data_dir, f"{m['output']}_insiders.csv")):
-        insiders = load_insiders(m, data_dir)
+    <data_dir>/<Output>_clean.csv and, when it is there, _insiders.csv; or,
+    with clean (a frame read from the clean CSV, as pd.read_csv reads it),
+    from that and insiders (the insiders frame, None when it has none). "Add
+    to main page" builds an added market's page this way (add_market.py)."""
+    if clean is not None:
+        prep = prepare_market(m, df=clean)
+        insiders = load_insiders(m, data_dir, df=insiders) if insiders is not None else None
+    else:
+        prep = prepare_market(m, data_dir)
+        insiders = None
+        if os.path.exists(os.path.join(data_dir, f"{m['output']}_insiders.csv")):
+            insiders = load_insiders(m, data_dir)
 
     title, timeline = build_timeline(prep)
     traders = None
@@ -505,6 +520,11 @@ def export_one(m, data_dir="data"):
     return entry, payload
 
 
+def page_bytes(payload):
+    """A market's page as this script writes markets/<name>.json, byte for byte."""
+    return json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
 def main():
     t0 = time.perf_counter()
     with open(MARKETS_FILE) as f:
@@ -520,8 +540,8 @@ def main():
             continue
         entry, payload = export_one(m)
         path = os.path.join(OUT_DIR, "markets", f"{m['name']}.json")
-        with open(path, "w") as f:
-            json.dump(payload, f, separators=(",", ":"), allow_nan=False)
+        with open(path, "wb") as f:
+            f.write(page_bytes(payload))
         index.append(entry)
         print(f"  ✓ {m['name']:<10} {os.path.getsize(path) / 1024:>7.0f} KB  {entry['title']}")
 

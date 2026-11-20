@@ -17,9 +17,13 @@ and one it refused reported failed, a step killed part way through adding a
 market still reporting it as failed, the catalog from the published files
 and the added markets, and the run's report: decisions counted as applied
 only once this run saved the state, added and failed markets, results older
-than the run never, and a catch-up run's report (no run sent).
+than the run never, and a catch-up run's report (no run sent). And how an add
+or a decision that comes in during a run is never left for the next day:
+the API's time of each read of the work (read_at), the markets to add read
+again right before they are added (add --refresh).
 """
 import contextlib
+import copy
 import io
 import json
 import os
@@ -116,7 +120,7 @@ def a_day(conn):
 
 
 def test_no_api_is_a_no_op():
-    with env(WATCHLIST_API_URL=None, WATCHLIST_JOB_TOKEN=None, GITHUB_OUTPUT=None), \
+    with env(WATCHLIST_API_URL=None, WATCHLIST_JOB_TOKEN=None), \
             tempfile.TemporaryDirectory() as tmp:
         assert sync.client() is None
         out = os.path.join(tmp, "work.json")
@@ -125,7 +129,7 @@ def test_no_api_is_a_no_op():
             assert sync.main(["catalog", "--closed", os.path.join(tmp, "x"), "--open", os.path.join(tmp, "y")]) == 0
         assert "No API configured" in text.getvalue()
         assert json.load(open(out)) == {"fetched_at": json.load(open(out))["fetched_at"], "configured": False,
-                                        "decisions": [], "requests": [], "watched": []}
+                                        "decisions": [], "requests": [], "watched": [], "added": []}
         conn = store.connect(":memory:")
         with captured():
             assert sync.push(None, conn, tmp, "full", "success", NOW) is None
@@ -183,16 +187,19 @@ def test_retries_and_the_token_never_printed():
         assert e.code == "bad_response"
 
 
-def test_pull_writes_work_and_outputs():
+def test_pull_writes_work():
     with tempfile.TemporaryDirectory() as tmp:
-        gh = os.path.join(tmp, "gh_output")
-        with env(GITHUB_OUTPUT=gh), captured():
+        with captured():
             c, _ = fake_client([(200, {"now": NOW, "decisions": [{"story": "s"}],
                                        "requests": [{"status": "approved", "condition_id": "0x1"}],
-                                       "watched": []})])
+                                       "watched": [], "added": [{"condition_id": "0x2", "day": "2026-11-12"}]})])
             doc = sync.pull(c, os.path.join(tmp, "work.json"), now=NOW)
         assert doc["decisions"] == [{"story": "s"}] and json.load(open(os.path.join(tmp, "work.json")))["requests"]
-        assert open(gh).read() == "decisions=true\nrequests=true\n"
+        # the markets added to the main page, for the closed list (their picks stay on their day)
+        from watchlist import upsets
+        assert upsets.load_requested(os.path.join(tmp, "work.json")) == {"0x1", "0x2"}
+        # the API's time of the read (what came in after it waits for the next read)
+        assert doc["read_at"] == NOW
 
 
 def test_queue_payload_carries_each_key():
@@ -283,6 +290,34 @@ def test_apply_mode_rebuilds_the_reviewed_day():
         except RuntimeError:
             pass
         assert len(json.load(open(res))["saved"]) == 2 and json.load(open(res))["at"] == NOW + 5
+
+
+def test_a_crashed_rebuild_leaves_its_decisions_pending():
+    # apply mode: the rebuild's start is on record (decide_results.json "rebuilding"), so a rebuild that crashed
+    # (or a step stopped part way) is never reported applied, even once the state was saved: the decisions stay
+    # pending and the next run applies them again; a rebuild that ran is reported as before
+    conn = store.connect(":memory:")
+    with tempfile.TemporaryDirectory() as job, captured():
+        res = os.path.join(job, "decide_results.json")
+
+        def broken(c, out_path):
+            raise RuntimeError("a bug in the rebuild")
+        try:
+            sync.decide(conn, {"decisions": decisions()}, "apply", res, rebuild=broken, now=NOW + 5)
+            raise AssertionError("no error")
+        except RuntimeError:
+            pass
+        assert json.load(open(res))["rebuilding"] is True and len(json.load(open(res))["saved"]) == 2
+        json.dump({"ok": True, "version": "a" * 32, "changed": True, "at": NOW + 30},
+                  open(os.path.join(job, "state_pushed.json"), "w"))
+        assert sync.done_payload(conn, job, "apply", "partial", NOW)["applied"] == []
+        fine = lambda c, out_path: {"status": "updated"}  # noqa: E731
+        sync.decide(conn, {"decisions": decisions()}, "apply", res, rebuild=fine, now=NOW + 6)
+        assert "rebuilding" not in json.load(open(res)) and json.load(open(res))["rebuilt"]
+        assert len(sync.done_payload(conn, job, "apply", "success", NOW)["applied"]) == 2
+        # full and local runs rebuild nothing: their saved decisions are reported once the state is saved
+        sync.decide(conn, {"decisions": decisions()}, "full", res, now=NOW + 7)
+        assert len(sync.done_payload(conn, job, "full", "success", NOW)["applied"]) == 2
 
 
 def _files(job, pushed_at=None, decided_at=None, added_at=None, results=None):
@@ -393,6 +428,33 @@ def test_a_catch_up_run_sends_the_queue_and_the_catalog_but_no_run():
     assert body["run"]["mode"] == "catchup" and body["applied"] == [] and body["requests"] == []
 
 
+def test_an_add_run_reports_only_its_markets():
+    # the workflow's add run (no saved state restored; another run may be making the lists meanwhile): no queue,
+    # the catalog's main-page markets only (closed.json and open.json on its disk are old copies), and a summary
+    # of what it added
+    conn = store.connect(":memory:")
+    a_day(conn)
+    with tempfile.TemporaryDirectory() as tmp, captured():
+        markets = os.path.join(tmp, "markets.json")
+        json.dump([{"name": "usiran", "slug": "us-strikes-iran"}], open(markets, "w"))
+        stale = os.path.join(tmp, "stale.json")
+        json.dump({"days": [{"day": "2026-11-01", "picks": [{"condition_id": "0xa", "slug": "old"}],
+                             "cards": [{"id": "old"}]}]}, open(stale, "w"))
+        json.dump({"results": RESULTS[:1], "at": NOW + 5}, open(os.path.join(tmp, "add_results.json"), "w"))
+        added = {"name": "market:gemini-carbon", "meta": {"entry": {"name": "gemini-carbon", "slug": "gemini-carbon-ship",
+                                                                    "output": "GeminiCarbon", "correct_outcome": "Yes"}}}
+        c, _ = fake_client([(200, {"blobs": [added]}), (200, {"market": 2, "closed": 1, "open": 1}), (204, None)])
+        body = sync.push(c, conn, tmp, "apply", "success", NOW, now=NOW + 99, closed_path=stale, open_path=stale,
+                         markets_path=markets, adds_only=True)
+    calls = c.session.calls
+    assert [(x["method"], x["url"].split("example")[1]) for x in calls] == [
+        ("GET", "/api/job/blobs?prefix=market:"), ("PUT", "/api/job/catalog"), ("POST", "/api/job/done")]
+    assert calls[1]["json"] == {"markets": [{"name": "usiran", "slug": "us-strikes-iran"},
+                                            {"name": "gemini-carbon", "slug": "gemini-carbon-ship"}]}
+    assert body["run"]["summary"] == "1 market(s) added" and body["requests"][0]["condition_id"] == "0x1"
+    assert body["applied"] == []
+
+
 def test_the_catalog_leaves_the_markets_out_when_the_added_ones_cannot_be_read():
     with tempfile.TemporaryDirectory() as tmp, captured() as text:
         markets = os.path.join(tmp, "markets.json")
@@ -439,11 +501,11 @@ def test_a_client_can_wait_longer():
     sync.client = lambda *a: asked.append(a) or None
     try:
         with contextlib.redirect_stderr(io.StringIO()):
-            for cmd in (["pull", "--db", ":memory:"], ["push", "--db", ":memory:"], ["migrate", "--dir", "x"]):
+            for cmd in (["pull", "--db", ":memory:"], ["push", "--db", ":memory:"]):
                 assert S.main(cmd) in (2, 3)
     finally:
         sync.client = real
-    assert asked == [(S.PATIENT_WAITS,)] * 3
+    assert asked == [(S.PATIENT_WAITS,)] * 2
 
 
 def test_add_runs_each_market_to_add_and_saves_it():
@@ -464,11 +526,10 @@ def test_add_runs_each_market_to_add_and_saves_it():
                          {"condition_id": "0x4", "slug": "m-4", "name": "m-4", "winner": "No", "status": "approved"},
                          {"condition_id": "0x3", "slug": "m-3", "name": "x", "winner": "No", "status": "added"}]}
     with tempfile.TemporaryDirectory() as tmp:
-        gh = os.path.join(tmp, "gh")
         res = os.path.join(tmp, "add_results.json")
         api = FakeApi()
         blobs.put_json(api, "market:older", {}, {"entry": {"name": "older", "slug": "o"}})
-        with env(GITHUB_OUTPUT=gh, GITHUB_ACTIONS=None), captured():
+        with captured():
             got = sync.add(api, work, res, adder=adder, now=NOW)
         assert [x[0] for x in seen] == ["0x1", "0x2", "0x4"] and seen[0] == ("0x1", "m-1", None, "Yes", False, ["older"])
         assert seen[2][-1] == ["older", "m-1"]                                  # a market added this run counts too
@@ -480,7 +541,7 @@ def test_add_runs_each_market_to_add_and_saves_it():
                              "by": "local"}
         commits = [b for m, p, b in api.log if m == "POST" and "market:older" not in p]
         assert len(commits) == 2 and all(b["expect"] is None for b in commits)    # never over a market saved before
-        assert json.load(open(res))["at"] == NOW and open(gh).read() == "markets=true\n"
+        assert json.load(open(res))["at"] == NOW
         assert json.load(open(res))["results"] == got
         # killed part way through the second market: the first's result and the second on record as failed
         def killed(cid, slug, name, outcome, dry_run=False, added=()):
@@ -488,7 +549,7 @@ def test_add_runs_each_market_to_add_and_saves_it():
                 raise KeyboardInterrupt
             return built(name or "m-9", slug)
         try:
-            with env(GITHUB_OUTPUT=gh), captured():
+            with captured():
                 sync.add(api, {"requests": work["requests"][:2]}, res, adder=killed, now=NOW + 1)
             raise AssertionError("not interrupted")
         except KeyboardInterrupt:
@@ -505,9 +566,9 @@ def test_add_runs_each_market_to_add_and_saves_it():
         # a dry run writes no results, saves nothing and never asks for a deploy
         os.remove(res)
         puts = api.calls["PUT"]
-        with env(GITHUB_OUTPUT=gh), captured():
+        with captured():
             sync.add(api, work, res, dry_run=True, adder=adder, now=NOW)
-        assert not os.path.exists(res) and open(gh).read().endswith("markets=false\n") and seen[-1][4] is True
+        assert not os.path.exists(res) and seen[-1][4] is True
         assert api.calls["PUT"] == puts
 
 
@@ -522,20 +583,20 @@ def test_add_when_the_database_does_not_take_it():
                          {"condition_id": "0x5", "slug": "m-5", "name": "m-5", "winner": "Yes", "status": "approved"}]}
     adder = lambda cid, slug, name, outcome, dry_run=False, added=(): built(name, slug)  # noqa: E731
     with tempfile.TemporaryDirectory() as tmp:
-        res, gh = os.path.join(tmp, "add_results.json"), os.path.join(tmp, "gh")
+        res = os.path.join(tmp, "add_results.json")
         api = FakeApi()
         api.fail_next(None, "network", method="PUT", path="market:m-1")
         api.fail_next(503, "server", method="POST", path="market:m-2")
         api.fail_next(400, "bad_request", method="POST", path="market:m-3")
         api.fail_next(409, "full", method="POST", path="market:m-5")                          # the Worker's cap
         blobs.put_json(api, "market:m-4", {}, {"entry": {"name": "other", "slug": "o"}})        # the name taken
-        with env(GITHUB_OUTPUT=gh), captured() as text:
+        with captured() as text:
             got = sync.add(api, work, res, adder=adder, now=NOW)
         assert [(r["condition_id"], r["status"], r["note"]) for r in got] == [
             ("0x3", "failed", "the database refused it (bad_request)"),
             ("0x4", "failed", "the database refused it (moved)"),
             ("0x5", "failed", sync.FULL)]
-        assert "tried again next run" in text.getvalue() and open(gh).read() == "markets=false\n"
+        assert "tried again next run" in text.getvalue()
         assert json.load(open(res))["results"] == got
         with tempfile.TemporaryDirectory() as job:
             _files(job, added_at=NOW, results=got)
@@ -543,13 +604,373 @@ def test_add_when_the_database_does_not_take_it():
                                                                   NOW)["requests"]} == {"0x3", "0x4", "0x5"}
         calls = []
         counting = lambda *a, **k: calls.append(a) or built("x", "x")  # noqa: E731
-        with env(GITHUB_OUTPUT=gh), captured() as text:
+        with captured() as text:
             assert sync.add(None, work, res, adder=counting, now=NOW) == []
         assert "No API configured" in text.getvalue() and json.load(open(res))["results"] == [] and calls == []
         api.fail_next(503, "server", method="GET", path="prefix=market:")
-        with env(GITHUB_OUTPUT=gh), captured() as text:
+        with captured() as text:
             assert sync.add(api, work, res, adder=counting, now=NOW) == []
         assert "wait for the next run" in text.getvalue() and calls == []
+
+
+def test_a_market_another_run_saved_meanwhile_is_reported_added():
+    # an add run beside a daily run can build the same market: the second save is refused (409 moved, the name
+    # taken), and when the market there is this one (its slug) it is reported added, not failed, and the deploy
+    # is the other run's; a name taken by another market stays a failure
+    work = {"requests": [{"condition_id": "0x1", "slug": "m-1", "name": None, "winner": "Yes", "status": "approved"},
+                         {"condition_id": "0x2", "slug": "m-2", "name": None, "winner": "Yes", "status": "approved"}]}
+    with tempfile.TemporaryDirectory() as tmp:
+        res = os.path.join(tmp, "add_results.json")
+        api = FakeApi()
+
+        def adder(cid, slug, name, outcome, dry_run=False, added=()):
+            got = built(slug, slug)
+            # meanwhile the other run saves m-1 itself, and another market under the name m-2
+            other = dict(got["entry"]) if slug == "m-1" else {"name": "m-2", "slug": "someone-else"}
+            blobs.put_json(api, f"market:{slug}", {}, {"entry": other, "condition_id": cid})
+            return got
+        with captured() as text:
+            got = sync.add(api, work, res, adder=adder, now=NOW)
+        assert "another run saved it meanwhile" in text.getvalue()
+    assert [(r["condition_id"], r["status"], r["name"], r["note"], r["saved"]) for r in got] == [
+        ("0x1", "added", "m-1", "already on the main page", False),
+        ("0x2", "failed", "m-2", "the database refused it (moved)", False)]
+
+
+# ── what comes in during a run ───────────────────────────────────────────────
+
+class WorkApi(FakeApi):
+    """The fake API, also answering GET /api/job/work with `work` (as it is when asked)."""
+
+    def __init__(self, work):
+        super().__init__(now=NOW)
+        self.work = work
+
+    def request(self, method, path, body=None):
+        got = super().request(method, path, body)          # records the call, raises a fail_next
+        return copy.deepcopy(self.work) if (method, path) == ("GET", "/api/job/work") else got
+
+
+def test_add_refresh_reads_the_markets_to_add_again():
+    # the add step asks for the markets to add again, so one sent during the run's first hours is added too, one
+    # another run added meanwhile is not, and the read's time is the step's read_at; the API not answering that
+    # read: the ones the run read first are added
+    seen = []
+
+    def adder(cid, slug, name, outcome, dry_run=False, added=()):
+        seen.append(cid)
+        return built(name or slug, slug)
+
+    first = {"requests": [{"condition_id": "0x1", "slug": "m-1", "name": None, "winner": "Yes", "status": "approved"}]}
+    later = {"now": NOW + 3600, "decisions": [], "watched": [],
+             "requests": [{"condition_id": "0x2", "slug": "m-2", "name": None, "winner": "No", "status": "approved"}]}
+    with tempfile.TemporaryDirectory() as tmp:
+        res = os.path.join(tmp, "add_results.json")
+        api = WorkApi(later)
+        with captured():
+            got = sync.add(api, first, res, adder=adder, now=NOW + 3600, refresh=True)
+        assert seen == ["0x2"] and [(r["condition_id"], r["status"]) for r in got] == [("0x2", "added")]
+        assert ("GET", "/api/job/work", None) in api.other
+        # the API down for that read: work.json's are added, and no read_at
+        seen.clear()
+        api = WorkApi(later)
+        api.fail_next(503, "server", method="GET", path="/api/job/work")
+        with captured() as text:
+            got = sync.add(api, first, res, adder=adder, now=NOW + 3600, refresh=True)
+        assert seen == ["0x1"] and "could not be read again" in text.getvalue()
+        # nothing approved when asked again: nothing is tried and the added markets are not even read
+        seen.clear()
+        api = WorkApi(dict(later, requests=[dict(later["requests"][0], status="added")]))
+        with captured():
+            assert sync.add(api, first, res, adder=adder, now=NOW + 3600, refresh=True) == []
+        assert seen == [] and api.calls["GET"] == 1
+        assert json.load(open(res))["results"] == []
+        # the CLI passes --refresh through
+        calls = []
+        real_add, real_client = sync.add, sync.client
+        sync.add = lambda *a, **k: calls.append(k) or []
+        sync.client = lambda *a, **k: None
+        try:
+            with captured():
+                sync.main(["add", "--work", os.path.join(tmp, "none.json"), "--refresh"])
+                sync.main(["add", "--work", os.path.join(tmp, "none.json")])
+        finally:
+            sync.add, sync.client = real_add, real_client
+        assert [k["refresh"] for k in calls] == [True, False]
+
+
+# ── the site's watchlist: a watched market that closed goes to the main page ─
+
+def gm(cid, question, end, result=None, closed_at=None, event="e1", vol=50_000):
+    """A Gamma market: open with no closed_at; once closed, result "Yes" or "No", "50-50" (resolved with no
+    winner) or "pending" (closed, not resolved yet)."""
+    m = {"conditionId": cid, "question": question, "slug": f"m-{cid[2:]}", "endDate": end, "volumeNum": vol,
+         "outcomes": '["Yes", "No"]', "events": [{"id": event, "slug": f"ev-{event}", "title": "T"}]}
+    if closed_at is None:
+        return dict(m, closed=False, outcomePrices='["0.4", "0.6"]')
+    prices = {"Yes": '["1", "0"]', "No": '["0", "1"]', "50-50": '["0.5", "0.5"]', "pending": '["0.97", "0.03"]'}
+    return dict(m, closed=True, closedTime=closed_at, outcomePrices=prices[result],
+                umaResolutionStatus="proposed" if result == "pending" else "resolved")
+
+
+D13, D14, D15 = "2026-11-13 12:08:10.08+00", "2026-11-14 17:50:42.09+00", "2026-11-15 09:00:00+00"
+
+
+def test_a_watched_card_sends_the_market_it_is_about():
+    choose = sync.watched_choice
+    ids = lambda m: m and m["conditionId"]  # noqa: E731
+    # one market: its result, whichever way it went; still open, closed with no clear result (a 50-50
+    # resolution, or not resolved yet): it waits
+    yes = gm("0x1", "Will Acme be sold?", "2026-12-01", "Yes", D14)
+    no = gm("0x1", "Will Acme be sold?", "2026-12-01", "No", D14)
+    assert ids(choose([yes])) == "0x1" and ids(choose([no])) == "0x1"
+    for waits in ([gm("0x1", "Will Acme be sold?", "2026-12-01")], [gm("0x1", "Q?", "2026-12-01", "50-50", D14)],
+                  [gm("0x1", "Q?", "2026-12-01", "pending", D14)], []):
+        assert choose(waits) is None
+    # a date ladder (Lutnick, 2026-11-14): November 13 passed with nothing happening while November 30 and
+    # December 31 are open, and an outcome of another event split into the story is open too: the card goes on
+    lutnick = [gm("0x13", "Howard Lutnick out by November 13?", "2026-11-14", "No", D13),
+               gm("0x30", "Howard Lutnick out by November 30?", "2026-12-01"),
+               gm("0x31", "Howard Lutnick out by December 31?", "2027-01-01"),
+               gm("0xaa", "Will Howard Lutnick leave the Trump administration before 2027?", "2027-01-01",
+                  event="e2")]
+    assert choose(lutnick) is None
+    # ...he leaves: the dates from November 30 resolve Yes on the same news; the shortest date is the real event
+    # (the closed list's ladder rule: the same pick, so its Recently closed card follows it)
+    left = lutnick[:1] + [gm(m["conditionId"], m["question"], m["endDate"], "Yes", D15, m["events"][0]["id"])
+                          for m in lutnick[1:3]] + lutnick[3:]
+    assert ids(choose(left)) == "0x30"
+    from watchlist import upsets as up
+    assert [m["conditionId"] for m in up.ladder_choice(left[:3])[0]] == ["0x30"]
+    # ...and the split outcome of the other event too, on the same day: the most money traded, as the closed list
+    # counts markets settled by the same news once
+    both = left[:3] + [gm("0xaa", lutnick[3]["question"], "2027-01-01", "Yes", D15, "e2", vol=900_000)]
+    assert ids(choose(both)) == "0xaa"
+    # every date passed with nothing happening: once the last one has closed, its market (the card's final
+    # answer); while one is still open, it waits; the last one without a clear result waits too
+    nothing = [gm("0x13", "Acme deal by November 13?", "2026-11-14", "No", D13),
+               gm("0x14", "Acme deal by November 14?", "2026-11-15", "No", D14)]
+    assert ids(choose(nothing)) == "0x14" and choose(nothing + [gm("0x15", "Acme deal by Dec?", "2026-12-31")]) is None
+    assert choose(nothing[:1] + [gm("0x14", "Acme deal by November 14?", "2026-11-15", "pending", D14)]) is None
+    # "continues through": No means it happened, so the shortest date that resolved No
+    truce = [gm("0x8", "US x Iran ceasefire continues through November 8?", "2026-11-09", "No", D14),
+             gm("0x9", "US x Iran ceasefire continues through November 30?", "2026-12-01", "No", D14)]
+    assert ids(choose(truce)) == "0x8"
+    # an event where exactly one outcome wins (Eurovision Asia's jury winner, 2026-11-14): the winner, whatever
+    # closed when
+    jury = [gm(f"0x{i}", f"Will {c} be the jury winner?", "2026-11-15", "Yes" if c == "the Philippines" else "No",
+               "2026-11-14 17:58:37+00" if c == "the Philippines" else D14) for i, c in
+            enumerate(("Vietnam", "Thailand", "the Philippines", "Laos"), 1)]
+    assert ids(choose(jury)) == "0x3"
+    # the closed list's $10,000 floor first: a thin date that resolved Yes yields to one over it
+    thin = [gm("0x1", "Acme deal by November 13?", "2026-11-14", "Yes", D14, vol=900),
+            gm("0x2", "Acme deal by November 30?", "2026-12-01", "Yes", D14)]
+    assert ids(choose(thin)) == "0x2" and ids(choose(thin[:1])) == "0x1"
+    # what it sends: the closed pick's fields, from Polymarket's own
+    req = sync.watched_request(left[1])
+    assert req == {"condition_id": "0x30", "slug": "m-30", "question": "Howard Lutnick out by November 30?",
+                   "url": "https://polymarket.com/event/ev-e1", "winner": "Yes", "closed": "2026-11-15T09:00:00+00:00",
+                   "day": "2026-11-15"}
+
+
+def test_a_watched_card_is_looked_up_by_its_events_and_split_outcomes():
+    import polymarket_api
+    conn = store.connect(":memory:")
+    base = {"place": "stays", "label": "listed", "listed_since": "2026-11-12"}
+    store.save_open_day(conn, "2026-11-12", "updated", "2026-11-12T04:00:00Z",
+                        [dict(base, id="lutnick", event_ids=["326604"], slugs=["ev-326604", "m-13", "m-30"]),
+                         dict(base, id="other", event_ids=[], slugs=["solo"])])
+    # the next day's card lists another outcome split into the story, and the events' own slugs again
+    store.save_open_day(conn, "2026-11-13", "updated", "2026-11-13T04:00:00Z",
+                        [dict(base, id="lutnick", event_ids=["326604", "404"], slugs=["ev-326604", "m-30", "leave",
+                                                                                     "gone"])])
+    assert store.open_story_idents(conn, "lutnick") == (["326604", "404"], ["ev-326604", "m-13", "m-30", "leave",
+                                                                            "gone"])
+    assert store.open_story_idents(conn, "nobody") == ([], [])
+    asked = []
+
+    def event(eid):
+        asked.append(("event", eid))
+        if eid == "404":
+            raise polymarket_api.PolymarketAPIError("HTTP 404", status=404)
+        return {"id": eid, "slug": "ev-326604", "title": "Lutnick out by...?",
+                "markets": [{"conditionId": "0x13", "slug": "m-13"}, {"conditionId": "0x30", "slug": "m-30"},
+                            {"conditionId": "0x31", "slug": "m-31"}]}
+
+    def market(slug):
+        asked.append(("market", slug))
+        if slug == "gone":
+            raise ValueError("Market not found on Gamma: gone")
+        return {"conditionId": "0xaa", "slug": slug, "events": [{"id": "73897", "slug": "who-will-leave"}]}
+
+    with captured() as text:
+        got = sync.story_markets(conn, "lutnick", fetch_event=event, fetch_market=market)
+    # every market of its event (December 31 too, which no card listed), the split outcome by its slug alone,
+    # each event's slug on its markets (the link); an event or a market Polymarket no longer has is left out
+    assert [m["conditionId"] for m in got] == ["0x13", "0x30", "0x31", "0xaa"]
+    assert asked == [("event", "326604"), ("event", "404"), ("market", "leave"), ("market", "gone")]
+    assert got[0]["events"] == [{"id": "326604", "slug": "ev-326604", "title": "Lutnick out by...?"}]
+    assert got[3]["events"][0]["slug"] == "who-will-leave" and "no longer has its event 404" in text.getvalue()
+    assert sync.story_markets(conn, "nobody", fetch_event=event, fetch_market=market) == []
+    # Polymarket not answering raises (the story waits for the next run)
+    def down(eid):
+        raise polymarket_api.PolymarketAPIError("gave up on /events after 4 attempts", status=503)
+    try:
+        sync.story_markets(conn, "lutnick", fetch_event=down, fetch_market=market)
+        raise AssertionError("not raised")
+    except polymarket_api.PolymarketAPIError:
+        pass
+
+
+class RequestsApi(WorkApi):
+    """The fake API, also holding the requests with the Worker's rules: POST /api/job/requests records each market
+    sent as approved once (one there already is left as it is) and answers with their rows; GET /api/job/work
+    lists the approved ones."""
+
+    def __init__(self, work, rows=()):
+        super().__init__(work)
+        self.rows = {r["condition_id"]: dict(r) for r in rows}
+
+    def request(self, method, path, body=None):
+        got = super().request(method, path, body)
+        if (method, path) == ("POST", "/api/job/requests"):
+            for r in body["requests"]:
+                self.rows.setdefault(r["condition_id"], dict(r, status="approved", name=None, note=None,
+                                                             requested_at=self.now, decided_at=self.now, done_at=None))
+            return {"requests": [copy.deepcopy(self.rows[r["condition_id"]]) for r in body["requests"]], "skipped": []}
+        if (method, path) == ("GET", "/api/job/work"):
+            return dict(got, requests=[copy.deepcopy(r) for r in self.rows.values() if r["status"] == "approved"])
+        return got
+
+
+def test_the_daily_run_adds_the_watched_markets_that_closed():
+    import polymarket_api
+    seen = []
+
+    def adder(cid, slug, name, outcome, dry_run=False, added=()):
+        seen.append((cid, slug, outcome))
+        return built(slug, slug, outcome)
+
+    closed = {"won": [gm("0xa1", "Will Acme be sold?", "2026-12-01", "Yes", D14)],
+              "lost": [gm("0xb1", "Acme deal by November 13?", "2026-11-14", "No", D13),
+                       gm("0xb2", "Acme deal by November 14?", "2026-11-15", "No", D14)],
+              "ladder": [gm("0xc1", "Globex out by November 13?", "2026-11-14", "No", D13),
+                         gm("0xc2", "Globex out by November 30?", "2026-12-01")],
+              "pending": [gm("0xd1", "Will Initech merge?", "2026-11-14", "pending", D14)],
+              "main": [gm("0xe1", "Will Hooli be sold?", "2026-11-14", "Yes", D14)],
+              "added": [gm("0xf1", "Will Pied Piper be sold?", "2026-11-14", "Yes", D14)],
+              "failed": [gm("0x01", "Will Umbrella be sold?", "2026-11-14", "Yes", D14)],
+              "same": [gm("0xa1", "Will Acme be sold?", "2026-12-01", "Yes", D14)]}
+    looked = []
+
+    def markets_of(story):
+        looked.append(story)
+        if story == "down":
+            raise polymarket_api.PolymarketAPIError("gave up on /events/9 after 4 attempts", status=503)
+        return copy.deepcopy(closed[story])
+
+    stories = ["won", "lost", "ladder", "pending", "main", "added", "failed", "same", "down"]
+    work = {"requests": [{"condition_id": "0x99", "slug": "visitor", "name": None, "winner": "Yes",
+                          "status": "approved"}], "watched": [{"story": s} for s in stories] + [{"count": 2}]}
+    # a visitor's add of 0x99 waits; the "failed" story's market was sent before and failed: left as it is
+    rows = [dict(work["requests"][0], decided_at=NOW - 60),
+            {"condition_id": "0x01", "slug": "m-01", "name": "umbrella", "winner": "Yes", "status": "failed"}]
+    with tempfile.TemporaryDirectory() as tmp:
+        res, markets = (os.path.join(tmp, n) for n in ("add_results.json", "markets.json"))
+        json.dump([{"name": "hooli", "slug": "event-x/m-e1#3", "output": "Hooli"}], open(markets, "w"))
+        api = RequestsApi({"now": NOW + 5, "decisions": [], "watched": work["watched"]}, rows)
+        blobs.put_json(api, "market:pied", {}, {"entry": {"name": "pied", "slug": "m-f1"}})
+        real = sync.MARKETS_FILE
+        sync.MARKETS_FILE = markets
+        try:
+            with captured() as text:
+                got = sync.add(api, work, res, adder=adder, now=NOW + 5, refresh=True, watched=True,
+                               markets_of=markets_of)
+        finally:
+            sync.MARKETS_FILE = real
+        log = text.getvalue()
+        # each story looked up once; sent: the one that resolved and the dated one whose last date passed (the
+        # card's final answer), once each, with the closed pick's fields
+        assert sorted(looked) == sorted(stories)
+        sends = [b for m, p, b in api.log if (m, p) == ("POST", "/api/job/requests")]
+        assert len(sends) == 1 and [r["condition_id"] for r in sends[0]["requests"]] == ["0x01", "0xb2", "0xa1"]
+        assert sends[0]["requests"][2] == sync.watched_request(closed["won"][0])
+        # ...before the markets to add are read again, so that read lists them with the visitor's, and all of them
+        # are added in this run; the one that failed before is not added twice
+        reads = [i for i, (m, p, _) in enumerate(api.log) if (m, p) == ("GET", "/api/job/work")]
+        assert reads and reads[0] > api.log.index(("POST", "/api/job/requests", sends[0]))
+        assert sorted(seen) == [("0x99", "visitor", "Yes"), ("0xa1", "m-a1", "Yes"), ("0xb2", "m-b2", "No")]
+        assert {r["condition_id"]: r["status"] for r in got} == {"0x99": "added", "0xa1": "added", "0xb2": "added"}
+        assert blobs.head(api, "market:m-a1")["meta"]["condition_id"] == "0xa1"
+        # the stories done with: sent (a request of any status now) or on the main page already (markets.json's
+        # and the added ones'); the open ladder, the one not resolved yet and the one Polymarket did not answer for
+        # wait for the next day's look
+        doc = json.load(open(res))
+        assert sorted(doc["watched"]) == ["added", "failed", "lost", "main", "same", "won"]
+        assert "the watched market 'down' could not be looked up" in log and "looked up again next run" in log
+        assert "9 watched, 3 closed with a result to send to the main page, 2 on it already, 2 still open" in log
+        with tempfile.TemporaryDirectory() as job:
+            with open(os.path.join(job, "add_results.json"), "w") as f:
+                json.dump(doc, f)
+            body = sync.done_payload(store.connect(":memory:"), job, "full", "success", NOW)
+        assert sorted(body["watched"]) == sorted(doc["watched"])
+        assert {r["condition_id"] for r in body["requests"]} == {"0x99", "0xa1", "0xb2"}
+        # the next day (the report marked them added): sent again, the API keeps each row as it is, so nothing is
+        # added twice; they are still done with, for the report that takes them off once Open now drops them
+        for r in body["requests"]:
+            api.rows[r["condition_id"]]["status"] = r["status"]
+        seen.clear()
+        with captured():
+            sync.MARKETS_FILE = markets
+            try:
+                again = sync.add(api, work, res, adder=adder, now=NOW + 86400, refresh=True, watched=True,
+                                 markets_of=markets_of)
+            finally:
+                sync.MARKETS_FILE = real
+        assert seen == [] and again == [] and sorted(json.load(open(res))["watched"]) == sorted(doc["watched"])
+        assert {cid: r["status"] for cid, r in api.rows.items()} == {"0x99": "added", "0x01": "failed",
+                                                                     "0xb2": "added", "0xa1": "added"}
+        # without --refresh the rows the API answered are added; a dry run sends nothing
+        api2 = RequestsApi({"now": NOW}, [])
+        seen.clear()
+        with captured():
+            sync.add(api2, {"watched": [{"story": "won"}]}, res, adder=adder, now=NOW, watched=True,
+                     markets_of=markets_of)
+        assert seen == [("0xa1", "m-a1", "Yes")]
+        api3 = RequestsApi({"now": NOW}, [])
+        with captured():
+            sync.add(api3, {"watched": [{"story": "won"}]}, res, adder=adder, now=NOW, watched=True,
+                     markets_of=markets_of, dry_run=True)
+        assert not [p for m, p, _ in api3.log if m == "POST"] and seen[-1][0] == "0xa1"
+        # the API not taking them: the visitor's adds still go, and the next daily run sends them
+        api4 = RequestsApi({"now": NOW}, [])
+        api4.fail_next(503, "server", method="POST", path="/api/job/requests")
+        seen.clear()
+        with captured() as text:
+            got = sync.add(api4, {"requests": work["requests"], "watched": [{"story": "won"}]}, res, adder=adder,
+                           now=NOW, watched=True, markets_of=markets_of)
+        assert seen == [("0x99", "visitor", "Yes")] and "the next daily run sends them" in text.getvalue()
+        assert json.load(open(res))["watched"] == []
+        # the added markets unreadable: nothing is looked up or sent
+        api5 = RequestsApi({"now": NOW}, [])
+        api5.fail_next(503, "server", method="GET", path="prefix=market:")
+        looked.clear()
+        with captured() as text:
+            assert sync.add(api5, work, res, adder=adder, now=NOW, watched=True, markets_of=markets_of) == []
+        assert looked == [] and "wait for the next run" in text.getvalue()
+        # the CLI: --watched with the store it reads the cards from
+        calls = []
+        real_add, real_client = sync.add, sync.client
+        sync.add = lambda *a, **k: calls.append(k) or []
+        sync.client = lambda *a, **k: None
+        try:
+            with captured():
+                sync.main(["add", "--work", os.path.join(tmp, "none.json"), "--refresh", "--watched", "--db",
+                           os.path.join(tmp, "s.db")])
+                sync.main(["add", "--work", os.path.join(tmp, "none.json"), "--refresh"])
+        finally:
+            sync.add, sync.client = real_add, real_client
+        assert [(k["watched"], k["conn"] is not None) for k in calls] == [(True, True), (False, False)]
 
 
 if __name__ == "__main__":

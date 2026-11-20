@@ -1,6 +1,19 @@
+"""
+Consolidate a market's raw trades (one row per fill) into positions: one row per (wallet, outcome, side), with
+the binary market's complementary SELL folded into its BUY.
+
+    python3 cleandata.py --input data/<Output>.csv --output data/<Output>_clean.csv
+
+clean_rows() does the work in memory (add_market feeds it a market's fills as they come off the feed, with no
+file); main() is the same over CSV files.
+"""
 import csv
+import io
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+COLUMNS = ["user_id", "eoa_address", "market_id", "market_title", "outcome", "side", "avg_odds", "contracts",
+           "dollar_amount", "win_status", "first_trade", "last_trade", "num_trades"]
 
 INPUT_CSV  = "data/USxIranStrikesFeb28.csv"
 OUTPUT_CSV = "data/USxIranStrikesFeb28_clean.csv"
@@ -11,27 +24,34 @@ class Group:
     contracts:        float = 0.0
     dollar_amount:    float = 0.0
     odds_x_contracts: float = 0.0
-    timestamps:       list[str] = field(default_factory=list)
+    first:            str | None = None
+    last:             str | None = None
+    num:              int = 0
     meta:             dict[str, str] | None = None
 
-def main(input_csv: str = INPUT_CSV, output_csv: str = OUTPUT_CSV) -> None:
-    # ── Load ─────────────────────────────────────────────────────────────────
-    with open(input_csv, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
 
-    all_outcomes = {r["outcome"] for r in rows}
-
+def clean_rows(rows):
+    """The positions (dicts with COLUMNS) of raw trade rows: an iterable of dicts with the raw CSV's columns, the
+    numbers as numbers or as their text, consumed once and never held (a market's fills can be hundreds of
+    thousands). Returns (positions, number of raw rows)."""
+    all_outcomes: set[str] = set()
     groups: dict[tuple[str, str, str], Group] = {}
+    n = 0
     for row in rows:
+        n += 1
+        all_outcomes.add(row["outcome"])
         key = (row["user_id"], row["outcome"], row["side"])
         g = groups.setdefault(key, Group())
         c = float(row["contracts"])
         g.contracts        += c
         g.dollar_amount    += float(row["dollar_amount"])
         g.odds_x_contracts += float(row["odds"]) * c
-        g.timestamps.append(row["timestamp"])
+        ts = row["timestamp"]
+        g.first = ts if g.first is None or ts < g.first else g.first
+        g.last = ts if g.last is None or ts > g.last else g.last
+        g.num += 1
         if g.meta is None:
-            g.meta = row
+            g.meta = {k: row.get(k, "") for k in ("eoa_address", "market_id", "market_title", "win_status")}
 
     # ── Build output rows ────────────────────────────────────────────────────
     clean = []
@@ -48,9 +68,9 @@ def main(input_csv: str = INPUT_CSV, output_csv: str = OUTPUT_CSV) -> None:
             "contracts":     round(g.contracts, 4),
             "dollar_amount": round(g.dollar_amount, 4),
             "win_status":    g.meta["win_status"],
-            "first_trade":   min(g.timestamps),
-            "last_trade":    max(g.timestamps),
-            "num_trades":    len(g.timestamps),
+            "first_trade":   g.first,
+            "last_trade":    g.last,
+            "num_trades":    g.num,
         })
 
     # ── Merge complementary positions in binary markets ──────────────────────
@@ -90,15 +110,32 @@ def main(input_csv: str = INPUT_CSV, output_csv: str = OUTPUT_CSV) -> None:
         clean = [r for i, r in enumerate(clean) if i not in to_remove]
 
     clean.sort(key=lambda r: r["first_trade"])
+    return clean, n
 
-    # ── Save ─────────────────────────────────────────────────────────────────
+
+def write(clean, f):
+    """The positions as CSV into an open text file (newline=""), exactly as main() saves them."""
+    writer = csv.DictWriter(f, fieldnames=clean[0].keys())
+    writer.writeheader()
+    writer.writerows(clean)
+
+
+def to_text(clean):
+    """The clean CSV's text, byte for byte what main() writes to its file."""
+    buf = io.StringIO(newline="")
+    write(clean, buf)
+    return buf.getvalue()
+
+
+def main(input_csv: str = INPUT_CSV, output_csv: str = OUTPUT_CSV) -> None:
+    with open(input_csv, newline="", encoding="utf-8") as f:
+        clean, n = clean_rows(csv.DictReader(f))
+
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=clean[0].keys())
-        writer.writeheader()
-        writer.writerows(clean)
+        write(clean, f)
 
-    print(f"Input:  {len(rows):,} raw trades")
+    print(f"Input:  {n:,} raw trades")
     print(f"Output: {len(clean):,} consolidated user positions → {output_csv}")
 
 

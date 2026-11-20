@@ -77,8 +77,10 @@ def test_an_answer_that_is_not_a_feed_is_an_error():
 
 
 def test_build_query():
+    # Toronto days: midnight UTC on Nov 7 is still Nov 6 in Toronto
     assert news.build_query("Banxico  rate decision", 1_790_000_000, "2026-11-07T00:00:00Z") == \
-        "Banxico rate decision after:2026-09-21 before:2026-11-07"
+        "Banxico rate decision after:2026-09-21 before:2026-11-06"
+    assert news.build_query("x", None, "2026-11-07T05:00:00Z") == "x before:2026-11-07"
     assert news.build_query("x") == "x"
 
 

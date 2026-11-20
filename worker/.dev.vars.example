@@ -7,3 +7,8 @@ VISITOR_SALT=dev-salt
 DEV=on
 TURNSTILE_STRICT=off
 ALLOWED_ORIGINS=http://localhost:5190,http://127.0.0.1:5190,http://localhost:5173
+
+# Signs the wake-ups the Worker sends to STEP_URL (a local step server, python3 -m backend.dev_server).
+WAKE_SECRET=dev-wake-secret
+# Where wake-ups go locally (only a 127.0.0.1 or localhost address is woken with DEV=on): python3 -m backend.dev_server
+# STEP_URL=http://127.0.0.1:9601/api/step

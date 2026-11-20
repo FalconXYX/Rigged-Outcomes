@@ -1,93 +1,108 @@
-# Deploy
+# Deploying Rigged Outcomes
 
-**What gets set up**
+Everything here runs on free plans.
 
-- **The site** stays on GitHub Pages.
-- **The API** is a Cloudflare Worker: a small program Cloudflare runs for free at an address like `https://rigged-outcomes-api.<your-name>.workers.dev`. The site calls it when a visitor adds a timeline marker, watches an open market or adds a closed one to the main page, and the review page (`#/review`) calls it for your decisions.
-- **The database** is Cloudflare D1, a small SQL database attached to the Worker. It stores the markers, the site's one watchlist, the markets added to the main page, your decisions and everything the daily job keeps (its memory between runs, the published lists and the added markets' pages).
-- **The bot check** is Cloudflare Turnstile, the "are you a person" check (usually invisible) that runs before any visitor's write is accepted.
-- **The job** is a GitHub Action: at about 04:17 UTC (GitHub often starts it hours late) it makes both Watchlist lists, applies your decisions, adds the markets visitors sent to the main page and republishes the site; a catch-up at about 10:17 UTC reads what Open now left unread. It saves to the database only and never commits to the repository.
+| Piece | Where | What it does |
+|---|---|---|
+| The site | GitHub Pages | Static pages that read every market from the API. Rebuilt when you push `main` |
+| The API | Cloudflare Worker + D1 database | Visitor actions, the job queue, the schedule (every minute, in Toronto time), and the data the site reads |
+| The job | Vercel (Python function) | Builds the lists and adds markets, in short steps the API starts |
+| Bot check | Cloudflare Turnstile | Runs before any visitor write |
 
-Everything is on Cloudflare's and GitHub's free plans; Cloudflare doesn't ask for a card.
+## Before you start
 
-## Your part: Cloudflare (about 15 minutes)
+- Accounts: Cloudflare, Vercel (Hobby), GitHub, and a Gemini API key from https://aistudio.google.com/apikey.
+- On your computer: Node 20+, Python 3.12, and the GitHub CLI (`gh`).
+- Keep your secrets in a `.env` file in the folder **above** the repo, so it is never committed. The Python tools read `WATCHLIST_API_URL`, `WATCHLIST_JOB_TOKEN` and `GEMINI_API_KEY` from there.
 
-**1. Create the account**
-1. Go to https://dash.cloudflare.com/sign-up, enter your email and a password, and press **Sign up**.
-2. Open the email from Cloudflare and click its verification link.
-3. Back in the dashboard, skip any "add a domain / what do you want to do" screen. You don't need a domain or a paid plan for any of this.
+Make random values with `openssl rand -hex 32`.
 
-**2. Check your workers.dev name** (the address the API will live at)
-1. In the left menu, click **Workers & Pages** (also under **Compute**, or type "Workers" in the search bar at the top).
-2. On that page, look on the right for **Your subdomain**: it shows something like `parthjain.workers.dev`.
-   - If it shows a name, you're done with this step. The API will be `https://rigged-outcomes-api.<that name>.workers.dev`.
-   - If you want a different name, or there's no name yet, click **Change** (or **Set up**) next to **Your subdomain**, type a name (lowercase letters, numbers and hyphens, e.g. `parthjain`), and confirm.
+## 1. Cloudflare (the API)
 
-**3. Create the bot check (Turnstile) widget**
-1. In the left menu, click **Turnstile** (or type "Turnstile" in the search bar at the top).
-2. Click **Add widget** and fill in:
-   - **Widget name:** `Rigged Outcomes`
-   - **Hostname management:** click **Add hostnames**, type `parthjain.ca`, add it, and make sure it's ticked.
-   - **Widget mode:** **Managed**
-   - **Pre-clearance support:** **No**
-3. Click **Create**.
-4. The next page shows two keys, each with a copy button:
-   - **Site Key**: public. It goes into the site so the check can run in visitors' browsers.
-   - **Secret Key**: private. It goes into the Worker so it can confirm a visitor passed.
+Run these from `worker/`:
 
-   If you leave this page, go back to **Turnstile**, click **Rigged Outcomes**, and the keys are shown there again.
+1. Sign in: `npx wrangler login`.
+2. Create the database: `npx wrangler d1 create rigged-outcomes`. Copy the id it prints into `database_id` in `wrangler.toml`.
+3. Create the tables: `npx wrangler d1 migrations apply rigged-outcomes --remote`.
+4. Make the bot check. In the Cloudflare dashboard, go to **Turnstile → Add widget**. Add your site's domain as the hostname, choose **Managed**, and keep the **Site key** and **Secret key**.
+5. Set the secrets. Run `npx wrangler secret put NAME` for each one and paste the value when asked:
 
-**4. Put both keys in your `.env` file**
-1. Open the file that holds your Gemini key: `Rigged Outcomes/.env`, the folder that contains the repo. For example, in Terminal:
-   ```bash
-   open -e "/Users/parthjain/Documents/Code/CCT416/Rigged Outcomes/.env"
-   ```
-2. At the end, add these two lines, each on its own line, with no spaces and no quotes:
-   ```
-   TURNSTILE_SITEKEY=paste the Site Key here
-   TURNSTILE_SECRET=paste the Secret Key here
-   ```
-3. Save with ⌘S. This file is outside the repo, so it's never committed.
+   | Name | Value |
+   |---|---|
+   | `TURNSTILE_SECRET` | Turnstile's Secret key |
+   | `OWNER_TOKEN` | A random value: your password for the review page |
+   | `JOB_TOKEN` | A random value: the job's key to the API |
+   | `VISITOR_SALT` | A random value |
+   | `WAKE_SECRET` | A random value: signs the API's calls to Vercel |
+   | `WAKE_GATE` | A random value: the header the Vercel firewall lets through |
 
-**5. Sign this Mac in to Cloudflare** (so the deploy can create things in your account)
-1. In Terminal:
-   ```bash
-   cd "/Users/parthjain/Documents/Code/CCT416/Rigged Outcomes/Rigged-Outcomes/worker" && npx wrangler login
-   ```
-2. A browser tab opens saying Wrangler wants access to your account. Click **Allow**. If no tab opens, copy the link Terminal prints into your browser.
-3. The tab then says you've granted access. Terminal prints "Successfully logged in".
-4. To check, run `npx wrangler whoami`. It should print your email and account name.
+6. In `wrangler.toml`, set `ALLOWED_ORIGINS` and `TURNSTILE_HOSTNAMES` to your site's domain.
+7. Deploy: `npx wrangler deploy`. It prints the API's address, for example `https://rigged-outcomes-api.<you>.workers.dev`.
 
-Then tell Claude "Cloudflare done".
+## 2. Vercel (the job)
 
-## Claude's part (done)
+Run these from the repository root:
 
-1. Created the D1 database `rigged-outcomes` (its id is in `worker/wrangler.toml`) and its tables.
-2. Deployed the Worker `rigged-outcomes-api` with its secrets: the Turnstile secret, `OWNER_TOKEN` (your review page password, kept in `.env`), `JOB_TOKEN` and `VISITOR_SALT`. Its address is `WATCHLIST_API_URL` in `.env`.
-3. Set the GitHub secrets `GEMINI_API_KEY` and `WATCHLIST_JOB_TOKEN` and the variables `API_URL` and `TURNSTILE_SITEKEY`.
-4. Sent the API the catalog of what visitors may write to, and wrote the move of the job's memory into the database (you run it: step 2 below).
+1. Sign in and link: `npx vercel login`, then `npx vercel link` (create a project, directory `./`).
+2. Add four settings. Run `npx vercel env add NAME production --sensitive` for each one and paste the value:
 
-**Going live** (yours, in this order, from the repository root unless it says otherwise):
+   | Name | Value |
+   |---|---|
+   | `GEMINI_API_KEY` | Your Gemini key |
+   | `WATCHLIST_API_URL` | The API's address from step 1.7 |
+   | `WATCHLIST_JOB_TOKEN` | The same value as `JOB_TOKEN` |
+   | `WAKE_SECRET` | The same value as the Worker's `WAKE_SECRET` |
 
-1. The new tables, then the Worker that reads them: `cd worker && npx wrangler d1 migrations apply rigged-outcomes --remote && npx wrangler deploy`. The job running today keeps working.
-2. Right after a Watchlist run has finished, with none running or waiting: `git fetch origin watchlist-data && python3 -m watchlist.state migrate`. It copies the branch's state and lists into the database (it reads the API from `.env`), prints the branch commit it copied, and changes nothing in git.
-3. Review and commit the code. Before pushing `main`, run `git fetch origin watchlist-data && git rev-parse origin/watchlist-data`. If that commit isn't the one step 2 printed, a Watchlist run (daily, or an apply run from the review page) saved to the branch in between: run `python3 -m watchlist.state migrate --force` again. Then push `main`.
-4. Start one run by hand (Actions → Watchlist → Run workflow, mode full) and check that it finishes and that the deploy after it shows both lists.
-5. Once a run has succeeded from the database, delete the branch: `git push origin --delete watchlist-data`.
+3. Deploy: `npx vercel deploy --prod`. It prints the production address, for example `https://rigged-outcomes.vercel.app`.
+4. Put that address plus `/api/step` into `STEP_URL` in `worker/wrangler.toml`, then run `npx wrangler deploy` again from `worker/`.
+5. Add the firewall rule, so only your API can start the job. In the Vercel dashboard, open the project and go to **Firewall → Configure → New Rule**:
+   - **Name:** `only the Worker`
+   - **If** `Request Path` `equals` `/api/step`
+   - **And** `Request Header` with key `x-ro-gate` `does not equal` the `WAKE_GATE` value itself. That's the long random string, not the word "WAKE_GATE".
+   - **Then:** `Deny`
 
-## After
+   Click **Save Rule**, then **Review Changes → Publish**.
+6. Check it: `curl -X POST https://<your-project>.vercel.app/api/step` should answer `403`.
 
-- Open https://parthjain.ca/Rigged-Outcomes/#/review, unlock it with the owner token, and go through the Open now queue.
-- Add a marker on a market's Timeline, and press Watch on an Open now card.
-- GitHub turns a schedule off after 60 days with no activity in the repository (the daily bot commits used to count as activity; your own commits still do). When the review page warns that no daily run has reported, turn it back on under Actions → Watchlist → **Enable workflow**.
+## 3. GitHub (the site)
+
+1. In the repo, go to **Settings → Secrets and variables → Actions → Variables** and add two variables:
+   - `API_URL`: the API's address
+   - `TURNSTILE_SITEKEY`: Turnstile's Site key
+2. Go to **Settings → Pages** and set **Source** to **GitHub Actions**.
+3. Put the 7 original markets in the database, from the repository root: `python3 -m backend.site originals`. It builds their pages from the CSVs on the `original-project` branch (on a fresh clone, run `git fetch origin original-project` first). Running it again changes nothing.
+4. Push `main`. The "Deploy dashboard to GitHub Pages" action builds the site.
+
+## After a code change
+
+Pushing only rebuilds the site. Deploy the other parts yourself:
+
+| You changed | Run |
+|---|---|
+| `web/` | Push `main` |
+| `worker/` | `cd worker && npx wrangler deploy`. If there's a new file in `worker/migrations/`, run `npx wrangler d1 migrations apply rigged-outcomes --remote` first |
+| The Python job: `api/`, `backend/`, `watchlist/`, `add_market.py` and the other scripts | `npx vercel deploy --prod` |
+
+Before pushing, run the tests: `python3 tests/test_*.py`, `cd worker && npm test`, and the end-to-end tests in `tests/end-to-end/` (see its README).
+
+## Day to day
+
+- **The daily run:** at 4 AM Toronto time. If a step couldn't finish, a catch-up runs at 10 AM.
+- **The review page:** `https://<your site>/#/review`, unlocked with `OWNER_TOKEN`. It shows:
+  - the Open now queue;
+  - recent runs and any failed step;
+  - how much of Vercel's free allowance is used.
+- **The free allowance:** adds wait when Vercel use reaches 65% of the free monthly allowance, and all work stops at 80%. That keeps the account from being paused.
 
 ## If something breaks
 
-- **Back to the site without the API:** `gh variable delete API_URL --repo FalconXYX/Rigged-Outcomes && gh workflow run deploy.yml --ref main`. The site then has no Watchlist lists or added markets, and the daily job fails at its setup check until the variable is back.
-- **See the API's errors as they happen:** `cd worker && npx wrangler tail`
-- **Stop visitor writes:** the pause switch on `#/review`.
-- **Take an added market back off the main page:** `python3 -m watchlist.blobs rm market:<name> && gh workflow run deploy.yml --ref main`. Its request then shows "taken off the main page", and no one can send it again.
-- **Undo a bad save of the job's memory or a list:** `python3 -m watchlist.blobs versions state` lists the last 3 saves it replaced, and `python3 -m watchlist.blobs restore state <version>` makes one live again (the same for `list:closed` and `list:open`). Nothing else in the database changes.
-- **The database as it was at an earlier time (up to 7 days back, D1 Time Travel; everything since is replaced):** `cd worker && npx wrangler d1 time-travel restore rigged-outcomes --timestamp <ISO time>`
-- **The old D3 site back:** GitHub → Settings → Pages → Source: Deploy from a branch → `D3.js`.
-- **GitHub job not working:** `scripts/watchlist-mac.sh` runs the same daily job on this Mac.
+| Problem | Fix |
+|---|---|
+| See the API's errors | `cd worker && npx wrangler tail` |
+| See the job's log | `npx vercel logs --deployment <your-project>.vercel.app` |
+| Stop visitors' changes | The pause switch on the review page |
+| Stop all work on Vercel | Set the Worker's `WAKE_SECRET` to a new random value. Set it back to resume |
+| Take a market off the main page | `python3 -m backend.site rm NAME` |
+| Undo a bad save of a list | `python3 -m watchlist.blobs versions site:closed.json`, then `python3 -m watchlist.blobs restore site:closed.json <version>`. The same works for `site:open.json` and `state` |
+| Put the database back to an earlier time (up to 7 days) | `cd worker && npx wrangler d1 time-travel restore rigged-outcomes --timestamp <time>` |
+| Vercel can't reach Google News or Polymarket | `scripts/watchlist-mac.sh` runs the daily lists on your own computer |

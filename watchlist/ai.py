@@ -124,7 +124,8 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from watchlist import filters, store
-from watchlist.common import DEMO_DIR, ROOT, Budget, iso, log, now_epoch, to_epoch
+from watchlist.common import (DEMO_DIR, ROOT, Budget, clamp_timeout, iso, local_day, log, now_epoch, step_sleep,
+                              submit, to_epoch)
 
 URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
 # First answer wins. flash-lite first (fast, ~1-5 s); the others are the
@@ -201,14 +202,8 @@ class GeminiError(RuntimeError):
 
 # ── key ──────────────────────────────────────────────────────────────────────
 
-_KEY = {}
-
-
-def api_key():
-    """GEMINI_API_KEY from the environment, else from ../.env (the repo's
-    parent). Read at call time; never logged, printed or stored."""
-    if "key" in _KEY:
-        return _KEY["key"]
+def _key_value():
+    """GEMINI_API_KEY from the environment, else from ../.env (the repo's parent), or ""."""
     key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if not key and os.path.exists(ENV_FILE):
         with open(ENV_FILE, encoding="utf-8") as f:
@@ -218,19 +213,23 @@ def api_key():
                     line = line[7:].strip()
                 if line.startswith("GEMINI_API_KEY="):
                     key = line.split("=", 1)[1].split(" #", 1)[0].strip().strip('"').strip("'")
+    return key
+
+
+def api_key():
+    """GEMINI_API_KEY from the environment, else from ../.env (the repo's
+    parent). Read at call time; never logged, printed or stored."""
+    key = _key_value()
     if not key:
         raise GeminiError(f"GEMINI_API_KEY is not set (environment or {ENV_FILE})", config=True)
-    _KEY["key"] = key
     return key
 
 
 def _scrub(text):
     s = str(text)
-    k = _KEY.get("key")
+    k = _key_value()
     return s.replace(k, "<key>") if k else s
 
-
-# ── response parsing ─────────────────────────────────────────────────────────
 
 def output_text(payload):
     """The answer text of an Interactions response: the text parts of its
@@ -310,17 +309,20 @@ _MODEL_GONE = re.compile(r"\bmodels?\b.{0,80}?\b(?:not found|not supported|unsup
                          r"is not available|no longer available)\b|\b(?:unknown|invalid|unsupported) model\b",
                          re.I | re.S)
 _DAILY_QUOTA = re.compile(r"per ?day|daily", re.I)
-_GONE = set()                   # models already reported gone in this process
+_GONE = set()                   # a command's models already reported gone (a step has its own: outcomes.per_job)
 _GONE_LOCK = threading.Lock()
 
 
 def _report_gone(model, status, msg):
     """A model the code names is gone (retired, renamed, or not one this key may use): a problem of the code for
-    the run's report and verdict (watchlist.problems), once per model. Its lists go on with the other models."""
+    the run's report and verdict (watchlist.problems), once per model a step (a command: a process). Its lists
+    go on with the other models."""
+    from backend import outcomes
+    gone = outcomes.per_job("ai_gone", set, _GONE)
     with _GONE_LOCK:
-        if model in _GONE:
+        if model in gone:
             return
-        _GONE.add(model)
+        gone.add(model)
     from watchlist import problems
     problems.note(f"the model {model} is gone (HTTP {status}: {_scrub(msg)[:120]}); name another in its place "
                   f"(watchlist/ai.py MODELS, watchlist/kinds.py, watchlist/judge.py JUDGE_MODELS)", problems.CRASH)
@@ -441,13 +443,14 @@ class Client:
                 self._note("fallbacks")
             tried += 1
             for attempt in range(self.retries):
+                timeout = clamp_timeout(self.timeout, f"a {model} request", floor=min(self.timeout, 30))
                 self._space()
                 with self._lock:
                     self.stats["requests"] += 1
                 t0 = time.monotonic()
                 try:
                     resp = self.session.post(URL, json=self.body(model, prompt, schema),
-                                             headers={"x-goog-api-key": key}, timeout=self.timeout)
+                                             headers={"x-goog-api-key": key}, timeout=timeout)
                 except requests.Timeout:
                     with self._lock:
                         self.stats["seconds"] += time.monotonic() - t0
@@ -457,7 +460,7 @@ class Client:
                 except requests.RequestException as e:
                     last = GeminiError(f"{model}: {type(e).__name__}: {e}", model=model)
                     self._note("retries", str(last))
-                    self.sleep(min(MAX_BACKOFF, 2.0 * 2 ** attempt))
+                    step_sleep(min(MAX_BACKOFF, 2.0 * 2 ** attempt), "a retry of the model", self.sleep)
                     continue
                 with self._lock:
                     self.stats["seconds"] += time.monotonic() - t0
@@ -486,7 +489,7 @@ class Client:
                     break
                 if status in (408, 429) or status >= 500:
                     self._note("retries", str(last))
-                    self.sleep(_retry_after(resp, attempt))
+                    step_sleep(_retry_after(resp, attempt), "a retry of the model", self.sleep)
                     continue
                 # any other 4xx: this request is refused, not this model. Skipping the model would send
                 # every later batch down the slower fallbacks; the caller splits the batch instead.
@@ -691,12 +694,12 @@ def _parse_date(v):
 
 def _today(today=None):
     """today as a datetime.date: a date, a datetime, "YYYY-MM-DD", or None
-    for the current UTC day."""
+    for the current Toronto day."""
     if isinstance(today, datetime):
         return today.astimezone(timezone.utc).date() if today.tzinfo else today.date()
     if today is not None and not isinstance(today, str):
         return today
-    return _parse_date(today) or datetime.now(timezone.utc).date()
+    return _parse_date(today) or _parse_date(local_day(now_epoch()))
 
 
 def validate(answer, rules, end_ts=None, today=None):
@@ -824,7 +827,7 @@ Answer with JSON only: {"labels": [{"id": "<market id>", "type": "...", "reveal_
 
 def build_prompt(items, today=None):
     """The prompt for one batch. items: [{id, question, rules, end_ts, event}]."""
-    today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = today or local_day(now_epoch())
     blocks = []
     for it in items:
         end = iso(it.get("end_ts")) if it.get("end_ts") is not None else "none"
@@ -982,7 +985,7 @@ def label_markets(markets, conn=None, events=None, refresh=False, client=None, b
     conn = conn or store.default_conn()
     client = client or Client()
     events = events or {}
-    today = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = today or local_day(now_epoch())
     out, todo, seen = {}, [], set()
     for m in markets:
         mid = str(m.get("id") or "")
@@ -1012,7 +1015,7 @@ def label_markets(markets, conn=None, events=None, refresh=False, client=None, b
         return got, failed, errs
 
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(chunks)))) as pool:
-        results = list(pool.map(work, chunks))
+        results = [f.result() for f in [submit(pool, work, c) for c in chunks]]
     failed = [i for _, f, _ in results for i in f]
     if failed:
         log(f"  ai: {len(failed)} market(s) not labelled this run")

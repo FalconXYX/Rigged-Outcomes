@@ -1,12 +1,10 @@
-# Python dependencies for the analysis pipeline. The workflows install
-# requirements.lock instead: the same packages at the tested versions, each
-# with its hash (pip install --require-hashes -r requirements.lock).
+# Python dependencies for the analysis pipeline and the backend's Vercel step function (api/step.py, Python
+# 3.12): Vercel installs this file, so the versions are the tested ones, the same as requirements.lock (each
+# package with its hash: pip install --require-hashes -r requirements.lock).
+# tzdata gives zoneinfo America/Toronto where the system has no time zone files.
 #
 #   pip install -r requirements.txt
-#
-# The two Dash visualizers (VisualizeBetTiming.py, VisualizeInsiders.py) also
-# need `plotly`, `dash` and `dash-mantine-components`; they are optional and
-# not used by the site or CI.
-requests
-pandas
-numpy
+requests==2.33.1
+pandas==3.0.1
+numpy==2.4.4
+tzdata==2026.6

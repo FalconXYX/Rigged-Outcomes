@@ -1,27 +1,27 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { fmtDay, fmtInt } from "../../lib/format";
+import { calDate, fmtDayAt, fmtInt, torontoDay } from "../../lib/format";
 import { openSheet, setQuery } from "../../lib/router";
 
 // What the Watchlist page's two sections share: times in words, the icons,
 // the cards' columns, the cards' "Details" button, the details panel that
 // opens under a card's row, and the panel's plain list of headlines (folded
-// when long). All times are UTC.
+// when long). Every day and time is read on Toronto's clock (lib/format.ts).
 
 export const ms = (iso: string) => Date.parse(iso);
 export const DAY_MS = 864e5;
-export const dayOf = (t: number) => Math.floor(t / DAY_MS) * DAY_MS;
+/** Calendar days from Toronto's day at `b` to Toronto's day at `a` (ISO stamps in any offset). */
+export const daysBetween = (a: string, b: string) =>
+  Math.round((calDate(torontoDay(a)).getTime() - calDate(torontoDay(b)).getTime()) / DAY_MS);
 export const plural = (n: number, one: string, many = `${one}s`) => `${fmtInt(n)} ${n === 1 ? one : many}`;
 
 /**
  * A report the source dated but did not time: the news pipeline stamps those
- * midnight Pacific, 07:00 or 08:00 UTC exactly. Read those as date-only.
- * (Until upsets.py saves a "time known" flag, this is the only tell.)
+ * midnight Pacific exactly (07:00 or 08:00 on the zero offset, 03:00 on
+ * Toronto's). Read those as date-only; Toronto's day of the stamp is the
+ * report's date. (Until upsets.py saves a "time known" flag, this is the only tell.)
  */
-const DATE_ONLY = /T0[78]:00:00(?:\.0+)?(?:Z|\+00:00)$/;
+const DATE_ONLY = /(?:T0[78]:00:00(?:\.0+)?(?:Z|\+00:00)|T03:00:00(?:\.0+)?-0[45]:00)$/;
 export const dateOnly = (iso: string) => DATE_ONLY.test(iso);
-
-/** "23:12", the clock time in UTC */
-export const hhmm = (iso: string) => new Date(iso).toISOString().slice(11, 16);
 
 export const Chevron = ({ up }: { up?: boolean }) => (
   <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden className="cl-chev" data-up={up || undefined}>
@@ -291,7 +291,7 @@ export function NewsList<T extends Story>({
                 {/* "Reuters · Nov 12" stays on one line; a long name ("ABC News - Breaking News, …") may wrap, its date kept with its last word */}
                 <span className={h.source.length > NOWRAP ? undefined : "wl-nowrap"}>
                   {h.source}
-                  {h.published && `\u00a0·\u00a0${fmtDay(new Date(h.published)).replace(/ /g, "\u00a0")}`}
+                  {h.published && `\u00a0·\u00a0${fmtDayAt(h.published).replace(/ /g, "\u00a0")}`}
                 </span>
                 {m && (
                   <>

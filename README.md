@@ -11,29 +11,29 @@ Live at **https://parthjain.ca/Rigged-Outcomes/**. Why things are built the way 
 **Install dependencies** (Python 3.12, Node 24; run everything from the repo root):
 
 ```bash
-pip install -r requirements.txt                    # requests, pandas, numpy
-pip install plotly dash dash-mantine-components    # only for the two Dash apps
+pip install -r requirements.txt     # requests, pandas, numpy, tzdata
 npm --prefix web install
+npm --prefix worker install
 ```
 
-**Run full analysis on a market:**
+**Run it locally** (first-time setup of the local API: [`worker/README.md`](worker/README.md)):
 
 ```bash
-python3 run.py iran               # fetch + clean the markets whose name/slug contains "iran"
-python3 run.py                    # fetch + clean every market (rewrites the committed CSVs)
-python3 scrape_insiders.py iran   # score the whales of one market
+npm --prefix worker run dev         # the API and its local database at http://127.0.0.1:8788
+python3 -m backend.dev_server       # a local step function for the API to wake (docs/BACKEND.md)
+WATCHLIST_API_URL=http://localhost:8788 WATCHLIST_JOB_TOKEN=dev-job-token \
+  python3 -m backend.site originals # the 7 original markets into the local database
+VITE_API_URL=http://localhost:8788 VITE_TURNSTILE_SITEKEY=1x00000000000000000000AA \
+  npm --prefix web run dev          # the site at http://localhost:5173
 ```
 
-**View results:**
+**Add a market by hand** (what "Add to main page" does; it saves to the API in `WATCHLIST_API_URL`):
 
 ```bash
-python3 export.py                   # data/*.csv → web/public/data/ (the site's JSON)
-npm --prefix web run dev            # the site at http://localhost:5173
-python3 VisualizeInsiders.py iran   # interactive trader dashboard (Dash)
-python3 VisualizeBetTiming.py iran  # timeline of trading activity (Dash)
+python3 add_market.py --condition-id 0x... --slug SLUG --outcome Yes [--dry-run]
 ```
 
-Output CSVs go to `data/` folder (new raw CSVs are gitignored: tens of MB).
+The original class project (the two Dash apps, `run.py`, the scripts and the CSVs in `data/`) lives on the `original-project` branch.
 
 ---
 
@@ -42,19 +42,20 @@ Output CSVs go to `data/` folder (new raw CSVs are gitignored: tens of MB).
 1. **Fetches** all trades from Polymarket for a given market (Data API v2, via `polymarket_api.py`)
 2. **Cleans** data by aggregating trades per user/outcome/side
 3. **Identifies** suspicious whales: big winning bets from brand-new accounts, or from accounts that staked almost everything on this one market
-4. **Visualizes** the result on the site (`web/`) and in the two Dash apps
+4. **Visualizes** the result on the site (`web/`)
 5. **Watches** for new cases: a daily Watchlist page built from market text and the news
 
 ---
 
 ## Data Flow
 
-`markets.json` → `run.py` →
+"Add to main page" → the Worker queues an `add` run → the step function (`backend/add_steps.py`, through `add_market.py`):
 
-- `polymarket_trades.py` (fetch raw trades) → `{Output}.csv`
-- `cleandata.py` (aggregate) → `{Output}_clean.csv`
+- `polymarket_trades.py` (each trade) → `cleandata.py` (aggregate) → the clean CSV
+- `scrape_insiders.py` (detect patterns) → the insiders CSV
+- `export.py` → the market's page and index entry
 
-then `scrape_insiders.py` (detect patterns) → `{Output}_insiders.csv`, and `export.py` → `web/public/data/` (the site's JSON).
+all in memory, saved in D1 (`backend/site.py`: the page, the two CSVs, the index) and served by the Worker at `/api/data/`. The 7 original markets (`markets.json`) are saved the same way, by `python3 -m backend.site originals`.
 
 ---
 
@@ -64,7 +65,7 @@ Each market needs:
 
 - `name`: Short identifier (the site's URL: `#/m/<name>`)
 - `slug`: Polymarket market slug
-- `output`: CSV filename prefix
+- `output`: the CSVs' name prefix
 - `correct_outcome`: "Yes" or "No" (what actually happened)
 - `timeRanges` (optional): Define "Normal" vs "Leadup" periods for analysis (`YYYY-MM-DD-HH:MM`, US/Eastern)
 - `importantDates` (optional): Events drawn on the timeline
@@ -88,11 +89,11 @@ Example:
 
 ## Key Columns
 
-**Raw data (`.csv`):** `user_id` (wallet address), `outcome` (Yes or No), `side` (BUY or SELL), `contracts`, `dollar_amount`, `odds` (price per contract), `timestamp`
+**Raw trades:** `user_id` (wallet address), `outcome` (Yes or No), `side` (BUY or SELL), `contracts`, `dollar_amount`, `odds` (price per contract), `timestamp`
 
-**Cleaned data (`_clean.csv`):** one row per user/outcome/side, with `avg_odds`, `win_status` (WIN or LOSS), `first_trade` / `last_trade` and `num_trades`
+**Clean CSV (`_clean.csv`):** one row per user/outcome/side, with `avg_odds`, `win_status` (WIN or LOSS), `first_trade` / `last_trade` and `num_trades`
 
-**Insiders (`_insiders.csv`):** `market_position` (USD on the winning outcome), `prior_bet_count`, `portfolio_concentration` and the flags below
+**Insiders CSV (`_insiders.csv`):** `market_position` (USD on the winning outcome), `prior_bet_count`, `portfolio_concentration` and the flags below
 
 ---
 
@@ -109,30 +110,29 @@ Either sets `is_suspicious`; both at once is *critical* on the site. The "Leadup
 
 ## Web Dashboard
 
-Vite + React + TypeScript + D3 in `web/`, built from the JSON `export.py` writes. Every push to `main` publishes it to GitHub Pages (`.github/workflows/deploy.yml`); setup and fixes are in [`docs/DEPLOY.md`](docs/DEPLOY.md).
+Vite + React + TypeScript + D3 in `web/`. Every market (the 7 original ones and those added later) and the Watchlist's lists come from the API as the page loads. Every push to `main` publishes the site to GitHub Pages (`.github/workflows/deploy.yml`); setup and fixes are in [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 | Route | Page |
 |---|---|
 | `#/` | Home: every market as a card |
 | `#/m/<name>` | Bet timeline with replay and visitors' markers; `/traders`: flagged traders |
 | `#/watchlist` | Open now and Recently closed (below) |
-| `#/review` | The owner's page: the last run, the Open now queue, what visitors added, a pause switch |
+| `#/review` | The owner's page: the runs, the budget, the Open now queue, what visitors added, a pause switch |
 
 ---
 
 ## Watchlist
 
-Two daily lists made from market text and Google News headlines, read by free Gemini and Gemma models. No prices, trades or wallets.
+Two daily lists made from market text and Google News headlines, read by free Gemini and Gemma models. No prices, trades or wallets. Every day and time is Toronto's.
 
-- **Open now** (`watchlist/opennow.py`): up to 5 open markets where a few people will know the answer first and this week's news shows a step; a person approves each step on `#/review`.
-- **Recently closed** (`watchlist/upsets.py`): 3 to 5 closed markets a day someone may have known early; "Add to main page" runs the analysis above on one (`add_market.py`).
-- **Backend** (`worker/`): a Cloudflare Worker + D1 database holding markers, the watchlist, added markets, the owner's decisions and the job's data (never git); see [`worker/README.md`](worker/README.md).
-- **Daily job** (`.github/workflows/watchlist.yml`): at about 04:17 UTC the owner's decisions, both lists, the added markets and a deploy; a catch-up at about 10:17 UTC reads what Open now left unread.
+- **Open now** (`watchlist/opennow.py`): up to 5 open markets where a few people will know the answer first and this week's news shows a step; a person approves each step on `#/review`. A market whose answer is already public (a released game, film, show, album or book included) is dropped. "Watch this market" puts one on the site's watchlist: once it closes with a result, it is added to the main page by itself.
+- **Recently closed** (`watchlist/upsets.py`): 3 closed markets a day someone may have known early; "Add to main page" runs the analysis above on one, and it is on the main page within minutes.
+- **Backend** ([`docs/BACKEND.md`](docs/BACKEND.md)): a Cloudflare Worker and its D1 database (the API, the job queue, the schedule, everything published) wake a Vercel function that does the work in short steps. Both on free plans; nothing runs on GitHub but the site build.
+- **Schedule:** the daily run from 04:00 Toronto time, a catch-up from 10:00 only when work was left; an add starts the moment it is clicked.
 
 **Run it locally** (the lists ask Gamma, Gemini and Google News; the key is `GEMINI_API_KEY` or `../.env`):
 
 ```bash
 python3 -m watchlist.upsets             # Recently closed: today so far → web/public/data/closed.json
 python3 -m watchlist.opennow            # Open now → web/public/data/open.json
-npm --prefix worker run dev             # the API at http://127.0.0.1:8788 (first-time setup: worker/README.md)
 ```

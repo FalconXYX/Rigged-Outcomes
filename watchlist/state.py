@@ -1,15 +1,17 @@
 """
 The daily job's memory between runs: the store tables the two lists read
 and write, saved in the site's database (the API's D1 database, through its
-job endpoints: watchlist.blobs). A GitHub Actions runner starts empty every
-day, and both lists depend on what earlier runs stored: the closed list's
+job endpoints: watchlist.blobs). Each step of the daily run on Vercel starts
+from an empty folder (watchlist.steps loads and saves this state itself),
+and both lists depend on what earlier runs stored: the closed list's
 checks and AI labels (a market is never asked about twice), the open list's
 99c check at an event's first entry (it must never run again: a later jump
 to 99c may be the very case the list is for), its filings, readings, days
 and cards, and a person's decisions. Nothing else in the store is kept
 (trade CSVs, wallet look-ups, the earlier scans' results): no list reads it.
-The published lists and the news searches cache are saved beside it, and
-nothing of the job's is kept in git.
+The published lists are saved beside it (site:closed.json, site:open.json,
+put by the daily run's publish steps); the news searches are rows of the
+database's news_cache table. Nothing of the job's is kept in git.
 
 In the database, as blobs (watchlist.blobs):
 
@@ -19,24 +21,19 @@ In the database, as blobs (watchlist.blobs):
                open-list day left unread (the catch-up run's check) and
                each table's row count and sha256; a table's file is one
                JSON object per row, keys sorted, rows in primary key order
-  list:closed, list:open   closed.json and open.json, byte for byte (the
-               site's deploy fetches them: watchlist.publish)
-  cache:news   the news searches cache, which only saves a same-day rebuild
-               its searches (best effort: a pull or push never fails over it)
+  site:closed.json, site:open.json   closed.json and open.json, byte for
+               byte (the Worker serves them at /api/data/)
 
-    python3 -m watchlist.state dump DIR | load DIR [--allow-empty]
-    python3 -m watchlist.state pull [--force] [--site-dir DIR] [--news-cache PATH]
-    python3 -m watchlist.state push [--seed | --onto-head] [--by github|mac|local] [--run-url URL]
-                                    [--site-dir DIR] [--news-cache PATH]
+    python3 -m watchlist.state pull [--force] [--site-dir DIR]
+    python3 -m watchlist.state push [--seed | --onto-head] [--by vercel|mac|local] [--run-url URL]
+                                    [--site-dir DIR]
     python3 -m watchlist.state prune [--dry-run]
-    python3 -m watchlist.state migrate [--ref origin/watchlist-data | --dir DIR] [--force [--replace-run-state]]
 
 Every command takes --db PATH (default WATCHLIST_DB, else
 data/watchlist/watchlist.db). The API is WATCHLIST_API_URL with
 WATCHLIST_JOB_TOKEN (watchlist.sync), tried again for about 14 minutes
 (PATIENT_WAITS) when it does not answer, so a short outage never costs a run
-its work; --site-dir defaults to web/public/data and --news-cache to
-opennow's. The database keeps the state's and the lists' last 3 replaced
+its work; --site-dir defaults to web/public/data. The database keeps the state's and the lists' last 3 replaced
 versions: python3 -m watchlist.blobs versions state / restore state VERSION
 undoes a bad save.
 
@@ -48,12 +45,12 @@ not match their manifest, and a local store holding anything newer than the
 saved state (an open-list day, a decision or a closed check made since):
 --force replaces the local copy, after backing it up. A fresh database (no
 blob at all but the added markets) is no refusal: the run starts from the
-local store as it is (empty on a runner), with a warning, and its push saves
-the first state. One that holds what is saved only after a state (a list,
-the news cache, a replaced state version) but no state is refused as the
+local store as it is, with a warning, and its push saves the first state.
+One that holds what is saved only after a state (a list, a replaced state
+version) but no state is refused as the
 setup's problem: the state was lost, or API_URL points at another database.
 push refuses (exit 3) when the saved state changed since this
-run's pull, so two writers (the Mac and GitHub) never overwrite each other,
+run's pull, so two writers (the Mac and the daily run) never overwrite each other,
 and saves nothing when no table changed; a push that went through (or found
 nothing to change) counts as this place's new pull, so pushing again later
 from here works. --seed saves the first state (there must be none yet);
@@ -61,13 +58,6 @@ from here works. --seed saves the first state (there must be none yet);
 only when it changed. Each refusal says whether it is the setup's (a person
 must fix it) or an outside one (the API down, another run saved first),
 for the run's report (watchlist.problems).
-
-migrate is the one-off move from the old watchlist-data git branch: it reads
-the branch's files with git show (it never fetches, commits or pushes), or a
-folder holding state/ and site/ (--dir), checks them against their manifest
-and saves them byte for byte. It changes nothing locally. Over a state the
-database holds it needs --force, and over one a run saved (not an earlier
-migrate) --replace-run-state as well.
 
 prune removes only what no list reads again: readings over 60 days old
 (the longest look back is the open list's 22-day step history; sooner, but
@@ -82,15 +72,15 @@ import hashlib
 import json
 import os
 import sqlite3
-import subprocess
 import sys
 
 from watchlist import blobs, kinds as K, problems, store, sync
-from watchlist.common import DAY, DB_PATH, JOB_DIR, ROOT, SITE_DATA_DIR, day_str, iso, log, now_epoch
+from watchlist.common import DAY, DB_PATH, JOB_DIR, SITE_DATA_DIR, day_str, iso, log, now_epoch
 
 FORMAT = 1
-STATE, NEWS = "state", "cache:news"                     # blob names (the lists are list:closed, list:open)
-MIGRATE_REF = "origin/watchlist-data"
+STATE = "state"                                         # blob name (the lists are site:closed.json, site:open.json)
+# saved without a state on a fresh database: the added markets (and a run's scratch data)
+NOT_AFTER_STATE = ("market:", "site:index.json", "site:markets/", "scratch:")
 # The tables the lists read and write, with their primary keys (the rows' order in a dump)
 TABLES = {
     "ai_labels": ("market_id", "rules_sha1"),
@@ -115,6 +105,8 @@ ANSWERS_MAX_BYTES = 30_000_000    # past this, readings go sooner (never inside 
 CHECKS_DAYS = 45                  # closed checks kept this long (a market closes once; the job recomputes 2 days)
 RUN_NOTES_DAYS = 16               # open-list days older than this lose their bulky notes
 BULKY_INFO = ("awaiting", "seen_step_headlines", "held_back_stories")
+# a reading that found a story answered is kept: it keeps the story off the open list for good
+KEEP_ANSWERED = "COALESCE(json_extract(data, '$.answered'), 0) = 0"
 PATIENT_WAITS = (2, 8, 30, 60, 120, 300, 300)  # seconds before each retry of a call here (sync.Client): ~14 min
 NO_API = "No API configured (WATCHLIST_API_URL, WATCHLIST_JOB_TOKEN): the job's memory is in the database"
 MOVED = "the saved state changed since this run's pull (another run saved first); nothing was saved"
@@ -214,14 +206,6 @@ def _write(path, data):
     os.replace(tmp, path)
 
 
-def dump(conn, out_dir, **kw):
-    """Write the state files to out_dir; returns the manifest."""
-    files = dump_files(conn, **kw)
-    for name, data in files.items():
-        _write(os.path.join(out_dir, name), data)
-    return json.loads(files["manifest.json"])
-
-
 def verify(files):
     """The manifest of a state ({file name: bytes}) once every table file matches its row count and sha256;
     raises StateError(2) otherwise."""
@@ -251,7 +235,7 @@ def load_files(conn, files, allow_empty=False):
     manifest = verify(files)
     counts = {t: int(manifest["tables"][t]["rows"]) for t in TABLES}
     if not allow_empty and not any(counts.values()):
-        raise StateError(2, "the saved state is empty; load it anyway with --allow-empty")
+        raise StateError(2, "the saved state is empty: it holds no row at all")
     with store.transaction(conn):
         for t in TABLES:
             have = {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
@@ -268,16 +252,6 @@ def load_files(conn, files, allow_empty=False):
     return counts
 
 
-def load(conn, in_dir, allow_empty=False):
-    files = {}
-    for name in ["manifest.json"] + [f"{t}.jsonl" for t in TABLES]:
-        p = os.path.join(in_dir, name)
-        if os.path.exists(p):
-            with open(p, "rb") as f:
-                files[name] = f.read()
-    return load_files(conn, files, allow_empty=allow_empty)
-
-
 # ── prune ────────────────────────────────────────────────────────────────────
 
 def prune(conn, now=None, dry_run=False, answers_days=ANSWERS_DAYS, max_answer_bytes=ANSWERS_MAX_BYTES):
@@ -290,8 +264,8 @@ def prune(conn, now=None, dry_run=False, answers_days=ANSWERS_DAYS, max_answer_b
         while cutoff < floor and (conn.execute("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM open_answers "
                                                "WHERE created_at >= ?", (cutoff,)).fetchone()[0] > max_answer_bytes):
             cutoff += DAY
-        out["open_answers"] = conn.execute("SELECT COUNT(*) FROM open_answers WHERE created_at < ?",
-                                           (cutoff,)).fetchone()[0]
+        out["open_answers"] = conn.execute("SELECT COUNT(*) FROM open_answers WHERE created_at < ? AND "
+                                           + KEEP_ANSWERED, (cutoff,)).fetchone()[0]
         checks_cut = now - CHECKS_DAYS * DAY
         out["closed_checks"] = conn.execute("SELECT COUNT(*) FROM closed_checks WHERE created_at < ?",
                                             (checks_cut,)).fetchone()[0]
@@ -309,7 +283,7 @@ def prune(conn, now=None, dry_run=False, answers_days=ANSWERS_DAYS, max_answer_b
     if dry_run or not any(out.values()):
         return out
     with store.transaction(conn):
-        conn.execute("DELETE FROM open_answers WHERE created_at < ?", (cutoff,))
+        conn.execute("DELETE FROM open_answers WHERE created_at < ? AND " + KEEP_ANSWERED, (cutoff,))
         conn.execute("DELETE FROM closed_checks WHERE created_at < ?", (checks_cut,))
         conn.executemany("UPDATE open_runs SET info = ? WHERE day = ?", notes)
     return out
@@ -351,8 +325,8 @@ def _backup_db(conn, db_path, now):
 # ── pull and push ────────────────────────────────────────────────────────────
 
 def _list_name(file_name):
-    """"closed.json" -> "list:closed"."""
-    return "list:" + file_name.rsplit(".", 1)[0]
+    """"closed.json" -> "site:closed.json"."""
+    return "site:" + file_name
 
 
 def _doc_files(doc):
@@ -382,30 +356,9 @@ def _pulled(job_dir, version, made_at, tables, now):
     _write(os.path.join(job_dir, "state_pulled.json"), json.dumps(doc).encode())
 
 
-def _pull_news(c, path):
-    """The saved news cache into path, when the local file is missing or older than it. Never fails."""
-    try:
-        h = blobs.head(c, NEWS)
-        if h is None:
-            return False
-        if os.path.exists(path) and os.path.getmtime(path) >= int(h["updated_at"]):
-            log("  news cache: the local one is as new; kept")
-            return False
-        h, data = blobs.get(c, NEWS, h)
-        if h is None:
-            return False
-        _write(path, data)
-        log(f"  news cache pulled ({len(data) / 1e6:.1f} MB)")
-        return True
-    except (sync.ApiError, blobs.BlobError, OSError, KeyError, TypeError, ValueError) as e:
-        problems.note(f"the news cache was not pulled ({e}); the open list searches the news again")
-        return False
-
-
-def pull(conn, c, db_path=DB_PATH, force=False, site_dir=SITE_DATA_DIR, job_dir=JOB_DIR, news_cache=None, now=None):
+def pull(conn, c, db_path=DB_PATH, force=False, site_dir=SITE_DATA_DIR, job_dir=JOB_DIR, now=None):
     """Load the saved state into the store and the published lists into site_dir (the closed list merges its
-    older days from closed.json); news_cache: the news searches cache's path, or None to leave it. c: the API
-    (sync.Client). Returns the manifest."""
+    older days from closed.json). c: the API (sync.Client). Returns the manifest."""
     now = int(now if now is not None else now_epoch())
     if c is None:
         raise StateError(2, NO_API)
@@ -423,7 +376,7 @@ def pull(conn, c, db_path=DB_PATH, force=False, site_dir=SITE_DATA_DIR, job_dir=
                             f"can be made live again: python3 -m watchlist.blobs versions state")
     if h is None:
         _never_saved(c)
-        return _start_fresh(conn, c, lists, site_dir, job_dir, news_cache, now)
+        return _start_fresh(conn, c, lists, site_dir, job_dir, now)
     files = _doc_files(doc)
     manifest = verify(files)
     mine, theirs = latest_stamps(conn), manifest.get("latest") or {}
@@ -436,8 +389,6 @@ def pull(conn, c, db_path=DB_PATH, force=False, site_dir=SITE_DATA_DIR, job_dir=
     counts = load_files(conn, files)
     for name, data in lists.items():
         _write(os.path.join(site_dir, name), data)
-    if news_cache:
-        _pull_news(c, news_cache)
     _pulled(job_dir, h["version"], manifest.get("made_at"),
             {t: manifest["tables"][t]["sha256"] for t in TABLES}, now)
     log(f"state pulled from the database, version {h['version'][:8]} (made {manifest.get('made_at')} by "
@@ -447,14 +398,14 @@ def pull(conn, c, db_path=DB_PATH, force=False, site_dir=SITE_DATA_DIR, job_dir=
 
 
 def _never_saved(c):
-    """With no state in the database: raises StateError(2, CONFIG) unless the database is fresh. A list, the news
-    cache and a replaced state version are saved only after a state was (push, migrate), and the API never
+    """With no state in the database: raises StateError(2, CONFIG) unless the database is fresh. A list and a
+    replaced state version are saved only after a state was (push, the daily run), and the API never
     deletes a state: holding one of them without a state means the state was lost or API_URL points at another
     database, and starting from nothing would record every first-entry 99c check again at today's prices. The
-    added markets do not count: a first run whose save failed may still add one."""
+    added markets (and a run's scratch data) do not count: an add may come before the first daily run."""
     try:
         held = sorted(str(h.get("name")) for h in blobs.heads(c, "")
-                      if not str(h.get("name")).startswith(sync.ADDED_PREFIX))
+                      if not str(h.get("name")).startswith(NOT_AFTER_STATE))
         try:
             kept = blobs.versions(c, STATE)
         except sync.ApiError as e:
@@ -471,7 +422,7 @@ def _never_saved(c):
                             f"-m watchlist.state push --seed)")
 
 
-def _start_fresh(conn, c, lists, site_dir, job_dir, news_cache, now):
+def _start_fresh(conn, c, lists, site_dir, job_dir, now):
     """pull with no saved state in the database: the local store stays as it is (empty on a runner) and its push
     saves the first state; the lists the database holds are written. Returns {"fresh": True}."""
     problems.note("No saved state in the database: this run starts from "
@@ -479,8 +430,6 @@ def _start_fresh(conn, c, lists, site_dir, job_dir, news_cache, now):
                   + ", and its save becomes the first state")
     for name, data in lists.items():
         _write(os.path.join(site_dir, name), data)
-    if news_cache:
-        _pull_news(c, news_cache)
     _pulled(job_dir, None, None, {t: _sha256(table_bytes(conn, t)[0]) for t in TABLES}, now)
     log(f"state: a fresh start; lists: {', '.join(lists) or 'none saved'}")
     return {"fresh": True}
@@ -498,7 +447,7 @@ def _push_lists(c, by, run_url, site_dir, now):
     if not present:
         return sent
     try:
-        have = {h.get("name"): h for h in blobs.heads(c, "list:")}
+        have = {h.get("name"): h for h in blobs.heads(c, "site:")}
         for name, data in present.items():
             if (have.get(_list_name(name)) or {}).get("sha256") == blobs.sha256(data):
                 continue
@@ -512,29 +461,11 @@ def _push_lists(c, by, run_url, site_dir, now):
     return sent
 
 
-def _push_news(c, path, by, now):
-    """Send the news cache when it differs from the saved one. Never fails."""
-    try:
-        if not os.path.exists(path):
-            return False
-        with open(path, "rb") as f:
-            data = f.read()
-        h = blobs.head(c, NEWS)
-        if h is not None and h.get("sha256") == blobs.sha256(data):
-            return False
-        got = blobs.put(c, NEWS, data, {"by": by, "made_at": iso(now)})
-        log(f"  news cache saved ({len(data) / 1e6:.1f} MB, {got['parts']} part(s))")
-        return True
-    except (sync.ApiError, blobs.BlobError, OSError, KeyError, TypeError) as e:
-        problems.note(f"the news cache was not saved ({e}); the next run searches the news again")
-        return False
-
-
-def push(conn, c, seed=False, onto_head=False, by="github", run_url=None, site_dir=SITE_DATA_DIR, job_dir=JOB_DIR,
-         news_cache=None, now=None):
-    """Prune, then save the state (only when a table changed since this run's pull), the published lists that
-    changed and the news cache. seed: the first state (there must be none); onto_head: over whatever is saved,
-    not this run's pull. Returns {"version", "changed", "lists", "news"}."""
+def push(conn, c, seed=False, onto_head=False, by="local", run_url=None, site_dir=SITE_DATA_DIR, job_dir=JOB_DIR,
+         now=None):
+    """Prune, then save the state (only when a table changed since this run's pull) and the published lists that
+    changed. seed: the first state (there must be none); onto_head: over whatever is saved, not this run's pull.
+    Returns {"version", "changed", "lists"}."""
     now = int(now if now is not None else now_epoch())
     if c is None:
         raise StateError(3, f"{NO_API}; nothing was saved")
@@ -587,154 +518,39 @@ def push(conn, c, seed=False, onto_head=False, by="github", run_url=None, site_d
            json.dumps({"ok": True, "version": version, "changed": changed, "at": now}).encode())
     _pulled(job_dir, version, made_at, shas, now)
     sent = _push_lists(c, by, run_url, site_dir, now)
-    news = _push_news(c, news_cache, by, now) if news_cache else False
-    return {"version": version, "changed": changed, "lists": sent, "news": news}
-
-
-# ── migrate: the one-off move from the watchlist-data branch ────────────────
-
-def _git_reader(ref):
-    """(read(path) -> bytes | None, "<ref> <sha>") for a commit of this checkout: git show only."""
-    def git(*args):
-        return subprocess.run(["git", "-C", ROOT, *args], capture_output=True)
-
-    r = git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
-    if r.returncode != 0:
-        raise StateError(2, f"git knows no {ref} here: fetch it first (git fetch origin watchlist-data)")
-    sha = r.stdout.decode().strip()
-
-    def read(path):
-        got = git("show", f"{sha}:{path}")
-        return got.stdout if got.returncode == 0 else None
-    return read, f"{ref} {sha}"
-
-
-def _dir_reader(folder):
-    def read(path):
-        p = os.path.join(folder, path)
-        if not os.path.isfile(p):
-            return None
-        with open(p, "rb") as f:
-            return f.read()
-    return read, f"dir {os.path.abspath(folder)}"
-
-
-def migrate(c, ref=MIGRATE_REF, from_dir=None, force=False, reader=None, replace_run_state=False):
-    """Save the branch's state/ and site/ files (or a folder's, or reader(path)'s) in the database as they are.
-    Refuses (3) when the database already holds a state, unless force; and when a run saved it (its meta has no
-    migrated_from), unless replace_run_state too. Returns the state's new head."""
-    if c is None:
-        raise StateError(3, f"{NO_API}; nothing was saved")
-    if reader is not None:
-        read, source = reader, ref
-    elif from_dir:
-        read, source = _dir_reader(from_dir)
-    else:
-        read, source = _git_reader(ref)
-    files = {}
-    for name in ["manifest.json"] + [f"{t}.jsonl" for t in TABLES]:
-        data = read(f"state/{name}")
-        if data is not None:
-            files[name] = data
-    manifest = verify(files)
-    doc = _doc(files)
-    lists = {name: read(f"site/{name}") for name in SITE_FILES}
-    try:
-        cur = blobs.head(c, STATE)
-    except sync.ApiError as e:
-        raise StateError(3, f"the database did not answer ({e}); nothing was saved")
-    meta = (cur or {}).get("meta") or {}
-    if cur is not None and not force:
-        raise StateError(3, f"the database already holds a state (made {meta.get('made_at')} by {meta.get('by')}); "
-                            f"--force replaces it")
-    if cur is not None and not meta.get("migrated_from") and not replace_run_state:
-        raise StateError(3, f"the database's state was saved by a run (made {meta.get('made_at')} by "
-                            f"{meta.get('by')}), not by migrate; the branch's would replace that run's work. Nothing "
-                            f"was saved; --replace-run-state replaces it anyway")
-    try:
-        got = blobs.put_json(c, STATE, doc, dict(manifest, migrated_from=source),
-                             expect=cur["version"] if cur else None)
-    except sync.ApiError as e:
-        raise StateError(3, ("the saved state changed while migrating" if e.code == "moved" else
-                             f"the state was not saved ({e})") + "; nothing was saved")
-    except blobs.BlobError as e:
-        raise StateError(3, f"{e}; nothing was saved")
-    log(f"migrated {source} (made {manifest.get('made_at')} by {manifest.get('by')}) into the database: version "
-        f"{got['version'][:8]}, {got['parts']} part(s)")
-    for t in TABLES:
-        log(f"  {t:<14} {manifest['tables'][t]['rows']:>6} rows")
-    try:
-        for name, data in lists.items():
-            if data is None:
-                log(f"  site/{name}: not in {source}; left out")
-                continue
-            h = blobs.put(c, _list_name(name), data, {"by": manifest.get("by"), "made_at": manifest.get("made_at"),
-                                                     "run_url": manifest.get("run_url"), "migrated_from": source})
-            log(f"  site/{name} -> {_list_name(name)}: {len(data):,} bytes, {h['parts']} part(s)")
-    except (sync.ApiError, blobs.BlobError) as e:
-        raise StateError(3, f"the state was migrated but the lists were not ({e}); run migrate --force again")
-    return got
+    return {"version": version, "changed": changed, "lists": sent}
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def _news_path(arg):
-    if arg:
-        return arg
-    from watchlist import opennow
-    return opennow.NEWS_CACHE
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description="The daily job's memory, saved in the site's database.")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("dump", "load", "pull", "push", "prune", "migrate"):
+    for name in ("pull", "push", "prune"):
         p = sub.add_parser(name)
         p.add_argument("--db", default=DB_PATH, help="the sqlite store (default WATCHLIST_DB, else data/watchlist/)")
-        if name in ("dump", "load"):
-            p.add_argument("dir")
         if name in ("pull", "push"):
             p.add_argument("--site-dir", default=SITE_DATA_DIR, help="where the published lists live")
-            p.add_argument("--news-cache", default=None, help="the news searches cache (default: opennow's)")
-    sub.choices["load"].add_argument("--allow-empty", action="store_true", help="load a state with no row at all")
     sub.choices["pull"].add_argument("--force", action="store_true",
                                      help="replace a local store that holds newer data (it is backed up first)")
     g = sub.choices["push"].add_mutually_exclusive_group()
     g.add_argument("--seed", action="store_true", help="save the first state (the database must hold none)")
     g.add_argument("--onto-head", action="store_true",
                    help="save this store over whatever is saved now, not over this run's pull")
-    sub.choices["push"].add_argument("--by", choices=("github", "mac", "local"), default="local")
+    sub.choices["push"].add_argument("--by", choices=("vercel", "mac", "local"), default="local")
     sub.choices["push"].add_argument("--run-url", default=None)
     sub.choices["prune"].add_argument("--dry-run", action="store_true", help="say what would go, remove nothing")
-    g = sub.choices["migrate"].add_mutually_exclusive_group()
-    g.add_argument("--ref", default=MIGRATE_REF, help="the branch's commit to read with git show")
-    g.add_argument("--dir", default=None, help="read state/ and site/ from this folder instead")
-    sub.choices["migrate"].add_argument("--force", action="store_true", help="replace a state the database holds")
-    sub.choices["migrate"].add_argument("--replace-run-state", action="store_true",
-                                        help="with --force: replace it even when a run saved it")
     args = ap.parse_args(argv)
     try:
-        if args.cmd == "migrate":
-            migrate(sync.client(PATIENT_WAITS), ref=args.ref, from_dir=args.dir, force=args.force,
-                    replace_run_state=args.replace_run_state)
-            return 0
         conn = store.connect(args.db)
-        if args.cmd == "dump":
-            m = dump(conn, args.dir)
-            log(f"state dumped to {args.dir}: " + ", ".join(f"{t} {v['rows']}" for t, v in m["tables"].items()))
-        elif args.cmd == "load":
-            counts = load(conn, args.dir, allow_empty=args.allow_empty)
-            log(f"state loaded from {args.dir}: {sum(counts.values())} rows")
-        elif args.cmd == "prune":
+        if args.cmd == "prune":
             out = prune(conn, dry_run=args.dry_run)
             log(("would remove: " if args.dry_run else "removed: ") + ", ".join(f"{v} {k}" for k, v in out.items()))
         elif args.cmd == "pull":
-            pull(conn, sync.client(PATIENT_WAITS), db_path=args.db, force=args.force, site_dir=args.site_dir,
-                 news_cache=_news_path(args.news_cache))
+            pull(conn, sync.client(PATIENT_WAITS), db_path=args.db, force=args.force, site_dir=args.site_dir)
         else:
-            got = push(conn, sync.client(PATIENT_WAITS), seed=args.seed, onto_head=args.onto_head, by=args.by,
-                       run_url=args.run_url, site_dir=args.site_dir, news_cache=_news_path(args.news_cache))
-            sync._output(open_list="open.json" in got["lists"])     # the catch-up run deploys only on this
+            push(conn, sync.client(PATIENT_WAITS), seed=args.seed, onto_head=args.onto_head, by=args.by,
+                 run_url=args.run_url, site_dir=args.site_dir)
     except StateError as e:
         print(f"state {args.cmd}: {e}", file=sys.stderr, flush=True)
         problems.note(f"state {args.cmd}: {e}", e.kind, echo=False)       # an annotation, and the run's record

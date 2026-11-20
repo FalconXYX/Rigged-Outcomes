@@ -22,7 +22,7 @@ export interface AddedEvent {
   t: number;
   label: string;
   source: "manual" | "ai";
-  /** when it was added (epoch seconds, UTC); absent on the dev server's in-memory markers */
+  /** when it was added (epoch seconds); absent on the dev server's in-memory markers */
   created_at?: number;
 }
 
@@ -197,7 +197,8 @@ export interface ClosedPick {
 
 export interface ClosedDay {
   day: string;
-  /** when the day was counted (ISO UTC); on the day itself, the counts are partial ("so far", "by 04:17"). Absent in
+  /** when the day was counted (ISO 8601 with Toronto's offset; older files: the zero offset); on the day itself, the
+   * counts are partial ("so far", "by 04:17"). Absent in
    * files from before it was kept: the file's generated_at stands in */
   counted_at?: string;
   closed_markets: number;
@@ -221,15 +222,16 @@ export interface ClosedData {
 /* ── Open list ("Open now": watchlist/kinds.py vocabulary → data/open.json) ── */
 // Markets still open where a few people will know the answer before the public, and this week's
 // news shows them moving toward it. No prices, odds, volumes, trades or wallets anywhere in it.
-// Dates are YYYY-MM-DD (UTC); times are ISO-8601 UTC.
+// Dates are Toronto calendar days (YYYY-MM-DD); times are ISO 8601 with an offset (the backend's own stamps carry
+// Toronto's), and the site shows every one on Toronto's clock.
 
-/** A headline as Google News gave it. A report its source dated but did not time is stamped 07:00 or 08:00 UTC exactly. */
+/** A headline as Google News gave it. A report its source dated but did not time is stamped midnight Pacific exactly. */
 export interface OpenHeadline {
   title: string;
   source: string;
   published: string | null;
   url: string;
-  /** a step: a person approved it (rules.steps_by "person"), or both step readings marked it ("model") */
+  /** a step: a person approved it (rules.steps_by "person"), or the step reading marked it ("model") */
   step: boolean;
   /** the step on the card face (Details labels it "On the card") */
   on_card: boolean;
@@ -285,7 +287,7 @@ export interface OpenCard {
   polymarket: OpenPolymarket;
   /** Details' right column: the last 14 days, newest first, up to 10 plus every step */
   headlines: OpenHeadline[];
-  /** when the "already out" check last ran ("Now · Checked Nov 13, 04:00 UTC: no report yet that it has happened");
+  /** when the "already out" check last ran ("No report yet that it has happened (checked Nov 13)");
    * null when there was nothing to read (no headline in the last 7 days) */
   checked_at: string | null;
   /** the Polymarket events in the card's story, and their event and market slugs (the closed list matches on these) */
@@ -324,8 +326,8 @@ export interface OpenData {
     held_back_days: number;
     prompt_version: string;
     model: string;
-    /** who confirms each step: "person" (the step readings suggest steps and a person approves every card's step
-     * before it shows) or "model" (a step shows when both step readings mark it) */
+    /** who confirms each step: "person" (the step reading suggests steps and a person approves every card's step
+     * before it shows) or "model" (a step shows when the step reading marks it) */
     steps_by?: "person" | "model";
   };
   /** newest first; days[0] is the latest list. Empty until a person has approved a first card */

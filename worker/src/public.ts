@@ -1,8 +1,10 @@
 // What any visitor can do, with no sign-in: read and add timeline markers (and undo their own for 24
 // hours), put an open market on the site's one watchlist or take it off, and add a closed one to the main
-// page. Every write carries a Turnstile token (taking a market off the watchlist needs none), checked before a
-// daily limit is spent, and may only touch what the job listed in the catalog; the browser never supplies a
-// market's text.
+// page (which queues its add run and wakes the step function at once, queue.ts and wake.ts). Every write
+// carries a Turnstile token (taking a market off the watchlist needs none), checked before a daily limit is
+// spent, and may only touch what the job listed in the catalog; the browser never supplies a market's text.
+
+import { CONTRACT } from "./contract";
 
 import {
   BODY,
@@ -27,6 +29,8 @@ import {
   turnstile,
   visitorOf,
 } from "./lib";
+import { graphJobs, runId } from "./queue";
+import { wakeReady } from "./wake";
 
 /** Live markers a market's timeline holds at most. */
 const MARKERS_MAX = 60;
@@ -197,13 +201,24 @@ export async function unwatch({ req, env, url }: Ctx): Promise<Response> {
 
 // ---------- "Add to main page" ----------
 
-type RequestRow = { status: string; name: string | null; decided_at: number | null; done_at: number | null };
+type RequestRow = { status: string; name: string | null; decided_at: number | null; done_at: number | null; note: string | null };
 
-/** What any visitor may see of a market sent to the main page: its state and when it changed. */
-const publicRequest = (r: RequestRow) => ({ status: r.status, name: r.name, decided_at: r.decided_at, done_at: r.done_at });
+/** The note of an added market's request once the owner took the market off the main page (blobs.deleteBlob). */
+const TAKEN_OFF = "taken off the main page";
+const takenOff = (r: RequestRow) => r.status === "failed" && r.note === TAKEN_OFF;
 
-const REQUEST_ROW = "SELECT status, name, decided_at, done_at FROM requests WHERE condition_id = ?";
+/**
+ * What any visitor may see of a market sent to the main page: its state (approved, added, failed: the job
+ * couldn't add it, or removed: the owner took it off the main page) and when it changed.
+ */
+const publicRequest = (r: RequestRow) => ({ status: takenOff(r) ? "removed" : r.status, name: r.name, decided_at: r.decided_at, done_at: r.done_at });
 
+const REQUEST_ROW = "SELECT status, name, decided_at, done_at, note FROM requests WHERE condition_id = ?";
+
+/**
+ * A closed market's state for a visitor's card, which open pages ask every 15 seconds while it is on its way.
+ * Nothing is restarted from here: the queue retries a step, and the cron's watchdog mends an add left with no run.
+ */
 export async function getRequest({ env, url }: Ctx): Promise<Response> {
   const cid = conditionId(url.searchParams.get("cid"));
   const [listed, settings, row] = await env.DB.batch([
@@ -216,11 +231,15 @@ export async function getRequest({ env, url }: Ctx): Promise<Response> {
 }
 
 /**
- * Add a closed pick to the main page: it is recorded as approved at once, the status the job adds on its next
- * run (the page name comes from the slug there, add_market.page_name). One row per market: an existing one
- * comes back as it is (200, spending nothing). The question, links and dates are copied from the catalog's pick.
+ * Add a closed pick to the main page: it is recorded as approved at once and its add run is made in the same
+ * batch (add.fetch, the whale batches, add.export: docs/BACKEND.md), then the add lane is woken after
+ * the answer, so the market is on the main page within minutes with no site rebuild (the page name comes from
+ * the slug there, add_market.page_name). One row per market: an existing one comes back as it is (200, spending
+ * nothing and making nothing), except one the job could not add (failed, not one the owner took off the main
+ * page), which is approved again with a run of its own, like a new add. The question, links and dates are
+ * copied from the catalog's pick.
  */
-export async function addRequest({ req, env }: Ctx): Promise<Response> {
+export async function addRequest({ req, env, waitUntil, clock }: Ctx): Promise<Response> {
   const body = await readBody(req, BODY.visitor);
   await requireWrites(env);
   const cid = conditionId(body.condition_id);
@@ -232,21 +251,37 @@ export async function addRequest({ req, env }: Ctx): Promise<Response> {
     env.DB.prepare("SELECT slug, data FROM catalog WHERE kind = 'closed' AND id = ?").bind(cid),
   ]);
   const old = existing.results[0] as RequestRow | undefined;
-  if (old) return json({ request: publicRequest(old) });
+  if (old && (old.status !== "failed" || takenOff(old))) return json({ request: publicRequest(old) });
   const p = pick.results[0] as { slug: string; data: string } | undefined;
   if (!p) fail(404, "not_listed", "That market is no longer on the closed list.");
   const onMain = await env.DB.prepare("SELECT 1 FROM catalog WHERE kind = 'market' AND slug = ?").bind(normSlug(p.slug)).first();
   if (onMain) fail(409, "on_main", "That market is already on the main page.");
-  await quota(req, env, "request", visitor);
+  const at = await clock();
+  await quota(req, env, "request", visitor, [], at);
 
   const d = JSON.parse(p.data) as Record<string, string>;
-  const at = now();
-  await env.DB.prepare(
-    `INSERT INTO requests (condition_id, slug, question, url, winner, closed, day, status, requested_at, decided_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'approved', ?8, ?8) ON CONFLICT (condition_id) DO NOTHING`,
-  )
-    .bind(cid, d.slug, d.question, d.url, d.winner, d.closed, d.day, at)
-    .run();
+  const slot = `${cid}:${at}`;
+  const run = runId("add", slot);
+  const [added] = await env.DB.batch([
+    old
+      ? env.DB.prepare(
+          `UPDATE requests SET status = 'approved', note = NULL, done_at = NULL, decided_at = ?2, run_id = ?4
+           WHERE condition_id = ?1 AND status = 'failed' AND coalesce(note, '') != ?3`,
+        ).bind(cid, at, TAKEN_OFF, run)
+      : env.DB.prepare(
+          `INSERT INTO requests (condition_id, slug, question, url, winner, closed, day, status, requested_at, decided_at, run_id)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'approved', ?8, ?8, ?9) ON CONFLICT (condition_id) DO NOTHING`,
+        ).bind(cid, d.slug, d.question, d.url, d.winner, d.closed, d.day, at, run),
+    // the run only when this click made the request approved with it (a click racing this one makes none)
+    env.DB.prepare(
+      `INSERT INTO runs (id, kind, slot, state, meta, created_at, deadline)
+       SELECT ?1, 'add', ?2, 'queued', json_object('condition_id', ?3), ?4, ?5
+       WHERE EXISTS (SELECT 1 FROM requests WHERE condition_id = ?3 AND status = 'approved' AND run_id = ?1)
+       ON CONFLICT DO NOTHING`,
+    ).bind(run, slot, cid, at, at + CONTRACT.schedule.add_run_s),
+    graphJobs(env, "add", [run], at),
+  ]);
+  if (added.meta.changes) waitUntil(wakeReady(env, at, { only: ["add"], handler: true }));
   const row = await env.DB.prepare(REQUEST_ROW).bind(cid).first<RequestRow>();
   return json({ request: publicRequest(row!) }, 201);
 }

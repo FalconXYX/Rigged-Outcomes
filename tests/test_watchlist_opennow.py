@@ -49,9 +49,25 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from watchlist import ai, kinds as K, opennow as O, store  # noqa: E402
-from watchlist.common import DAY, ROOT, Budget, to_epoch  # noqa: E402
+from watchlist.common import DAY, Budget, to_epoch  # noqa: E402
 
-NOW = to_epoch("2026-11-13T04:00:00Z")
+NOW = to_epoch("2026-11-13T09:00:00Z")
+
+
+def two_readings(fn):
+    """Run a test with two news searches for a first-group story, two step readings and two "already out"
+    readings a story (the code keeps these settings; the daily run searches and reads once:
+    LISTS open_searches_per_story, open_step_readings and open_out_readings)."""
+    def run():
+        saved = (O.SEARCHES_PER_STORY, O.STEP_READINGS, O.OUT_READINGS, O.OUT_RUNS)
+        O.SEARCHES_PER_STORY, O.STEP_READINGS, O.OUT_READINGS, O.OUT_RUNS = 2, 2, 2, (1, 2)
+        try:
+            return fn()
+        finally:
+            O.SEARCHES_PER_STORY, O.STEP_READINGS, O.OUT_READINGS, O.OUT_RUNS = saved
+    run.__name__ = fn.__name__
+    return run
+
 SHIPPED_STEPS_BY = O.STEPS_BY
 O.STEPS_BY = "model"     # the whole runs below test the readings' own steps; test_steps_wait_for_a_person_when_set
                          # tests the approval the module ships with
@@ -344,6 +360,7 @@ def test_step_prompt_and_candidates():
     assert O.considered_keys([{"run": 1, "data": {"considered": ["x", "y"]}}, {"run": 2, "data": {}}]) == {"x", "y"}
 
 
+@two_readings
 def test_step_verdicts():
     a, b, c, d = (O._bare(_h(t, 5)) for t in ("Board weighs A", "Board weighs B", "Board denies C", "Board weighs D"))
 
@@ -582,7 +599,9 @@ EXPECTED = {
                    "G:Tesla-SpaceX merger announced"],
     "2026-11-11": ["S:Jensen Huang out as Nvidia CEO", "S:Foreign troops enter Gaza", "Next James Bond named",
                    "G:Tesla-SpaceX merger announced", "D:Eurovision Asia jury winner"],
-    "2026-11-12": ["S:Foreign troops enter Gaza", "Israel strikes Iran (the ceasefire ends)", "Next James Bond named",
+    # (made at 04:00 Toronto, five hours after the proposal's 04:00 UTC: the same five cards, the two new steps
+    # in the other order)
+    "2026-11-12": ["S:Foreign troops enter Gaza", "Next James Bond named", "Israel strikes Iran (the ceasefire ends)",
                    "G:Tesla-SpaceX merger announced", "D:Eurovision Asia jury winner"],
     "2026-11-13": ["Lutnick out at Commerce", "Tesla-SpaceX merger announced", "New Nvidia CEO named",
                    "G:Rubio out as Secretary of State", "D:Eurovision Asia jury winner"],
@@ -600,11 +619,11 @@ def _hd(t, source, title):
 
 
 def replay(stay_days=K.STAY_DAYS):
-    """The list each day Nov 6-13 at 04:00 UTC from REPLAY, through story_row and select, as the proposal's
+    """The list each day Nov 6-13 at 04:00 Toronto from REPLAY, through story_row and select, as the proposal's
     replay builds it."""
     prev, out, held_out = [], {}, {}
     for d in range(6, 14):
-        now = to_epoch(f"2026-11-{d:02d}T04:00:00Z")
+        now = to_epoch(f"2026-11-{d:02d}T09:00:00Z")              # 04:00 in Toronto, the daily run's time
         rows = []
         for name, group, dec, thread, created, deadline, resolved, steps, held in REPLAY:
             if to_epoch(created + "T00:01:00Z") > now or to_epoch(deadline + "T23:00:00Z") <= now + 12 * 3600:
@@ -625,6 +644,7 @@ def replay(stay_days=K.STAY_DAYS):
     return out, held_out
 
 
+@two_readings
 def test_replay_five_places():
     got, held = replay()
     for day, want in EXPECTED.items():
@@ -858,6 +878,7 @@ ROE_K, ACME_K, TURNER_K, RUR_K = (O.story_key(t) for t in (
     "Turner Prize 2026 winner?", "Ruritania x Freedonia ceasefire continues through...?"))
 
 
+@two_readings
 def test_whole_runs():
     conn = store.connect(":memory:")
     with tempfile.TemporaryDirectory() as tmp:
@@ -902,7 +923,7 @@ def test_whole_runs():
                                  "reveal_note": None}
         assert [h["title"] for h in roe["headlines"]] == ["White House weighs Jane Roe's future, officials say",
                                                          "Jane Roe should go"]          # the odds headline is gone
-        assert roe["checked_at"] == "2026-11-13T04:00:00Z" and roe["other_side"] is None
+        assert roe["checked_at"] == "2026-11-13T09:00:00Z" and roe["other_side"] is None
         assert acme["question"] == "Will Acme and Globex announce a merger?" and acme["group"] == 1
         assert turner["place"] == "dated" and turner["headline"] is None and turner["checked_at"] is None
         assert turner["timing"]["reveal"] == "2026-11-15" and turner["question"] == "Who wins the Turner Prize 2026?"
@@ -938,7 +959,8 @@ def test_whole_runs():
         assert d3["status"] == "updated"
         got = {c["id"]: c["place"] for c in d3["cards"]}
         assert ROE_K not in got and got[ACME_K] == "stays" and got[TURNER_K] == "dated", got
-        assert ROE_K in [h["id"] for h in s3["held_back"]]
+        # read as out: dropped for good (recorded in the state), no longer merely held back
+        assert ROE_K in store.open_answered(conn) and ROE_K not in [h["id"] for h in s3["held_back"]]
         # the new headline ("Jane Roe prepares exit plan, sources say") was read once, with the new one first
         roe3 = [p for p in day3.steps_asked() if "Jane Roe" in p]
         assert roe3 and step_lines(roe3[0])[0][1] == "Jane Roe prepares exit plan, sources say", roe3[:1]
@@ -953,6 +975,7 @@ def plus_search(query, after=None, before=None, limit=None):
     return hs
 
 
+@two_readings
 def test_second_reading_must_agree():
     # a model that marks only the headline it is shown first: the second reading (reverse order) disagrees on
     # Acme's two headlines, so neither counts; a person may approve one
@@ -1063,6 +1086,7 @@ def test_a_rerun_on_the_same_news_asks_nothing():
         assert json.load(open(out))["days"][0]["cards"] == cards
 
 
+@two_readings
 def test_a_down_rerun_keeps_the_days_list():
     # a good list, then a re-run the same day with a new headline while the model is down: the list made
     # earlier today stands (it is not replaced by yesterday's, or by none)
@@ -1072,7 +1096,7 @@ def test_a_down_rerun_keeps_the_days_list():
         _run(conn, NOW, FakeClient(), out)
         day = json.load(open(out))["days"][0]
         s = _run(conn, NOW + 2 * 3600, FakeClient(down=True), out, plus_search)
-        assert s["model_down"] and s["kept_earlier_list"] == "2026-11-13T04:00:00Z" and s["status"] == "updated"
+        assert s["model_down"] and s["kept_earlier_list"] == "2026-11-13T09:00:00Z" and s["status"] == "updated"
         again = json.load(open(out))["days"][0]
         assert again["status"] == "updated" and again["cards"] == day["cards"] and again["run_at"] == day["run_at"]
         assert store.get_open_day(conn, "2026-11-13")["run_at"] == NOW
@@ -1112,7 +1136,7 @@ def test_a_persons_rebuild_reads_no_new_step():
                      review_of=reviewed)
         assert not c.steps_asked() and s2["status"] == "updated", s2["step_reading"]
         day = json.load(open(out))["days"][0]
-        assert [x["id"] for x in day["cards"]] == [ROE_K, TURNER_K] and day["run_at"] == "2026-11-13T04:00:00Z"
+        assert [x["id"] for x in day["cards"]] == [ROE_K, TURNER_K] and day["run_at"] == "2026-11-13T09:00:00Z"
         # a day the model was down for stays "not updated today" when a person rebuilds it
         _run(conn, NOW + DAY, FakeClient(down=True), out)
         stale = store.get_open_day(conn, "2026-11-14")
@@ -1124,6 +1148,7 @@ def test_a_persons_rebuild_reads_no_new_step():
         assert [x["id"] for x in json.load(open(out))["days"][0]["cards"]] == [ROE_K, TURNER_K]
 
 
+@two_readings
 def test_steps_wait_for_a_person_when_set():
     # STEPS_BY "person" (the fallback in the approved open-list proposal (2026-11-13) when the bars are not
     # met, as they were not out of sample on 2026-11-14): the readings' steps are only proposed; a card shows
@@ -1423,6 +1448,7 @@ def test_a_long_pause_never_runs_past_the_budget():
         assert s["out_of_time"]["left_for_next_run"]["steps 1"], s["out_of_time"]
 
 
+@two_readings
 def test_the_budget_stops_new_step_readings():
     # a slow step model (20 minutes an answer) and a 60-minute budget: no step reading starts in its last 20
     # minutes, kept for "already out". Roe's and Acme's first readings are made and stored as they arrive;
@@ -1437,7 +1463,7 @@ def test_the_budget_stops_new_step_readings():
         assert s["status"] == "updated" and not s["model_down"] and not s["step_failed"], s["model_down"]
         assert _asked(slow.steps_asked()) == [ROE_Q, ACME_Q] and s["requests"]["steps 1"] == 2, s["requests"]
         assert "steps 2" not in s["requests"]
-        assert s["out_of_time"] == {"budget_minutes": 60.0, "left_for_next_run": {
+        assert s["out_of_time"] == {"left_for_next_run": {
             "steps 1": [RUR_K], "steps 2": sorted([ROE_K, ACME_K])}}, s["out_of_time"]
         st = s["step_reading"]
         assert st["reading 1: stories read"] == 2 and st["reading 1: stories left for the next run (out of time)"] == 1
@@ -1470,6 +1496,7 @@ def test_the_budget_stops_new_step_readings():
         assert RUR_K in [h["id"] for h in s2["held_back"]]
 
 
+@two_readings
 def test_a_killed_run_keeps_its_readings():
     # every reading is stored as it arrives: a run killed during the step readings (the step's timeout) keeps
     # the ones it made, and the next run does not ask them again
@@ -1500,6 +1527,7 @@ def test_a_killed_run_keeps_its_readings():
         assert [c["id"] for c in json.load(open(out))["days"][0]["cards"]] == [ROE_K, ACME_K, TURNER_K]
 
 
+@two_readings
 def test_the_budget_stops_already_out_too():
     # the six step readings take 20 minutes each and an "already out" request 15, on a 130-minute budget:
     # every step reading starts before the last 20 minutes, the first "already out" request runs in them,
@@ -1548,46 +1576,6 @@ def test_news_past_the_budget_keeps_the_last_list():
         assert d2["day"] == "2026-11-14" and [x["id"] for x in d2["cards"]] == [x["id"] for x in day1["cards"]]
 
 
-def test_the_workflow_gives_the_budget_room():
-    # the daily job passes a budget its Open now step's timeout leaves room for (the requests in flight when it
-    # runs out, then the list), and the job's own timeout, under GitHub's 6 hours, is never reached: the budget is
-    # cut by the time the steps before it took (budget = min(cap, deadline - minutes since the job started)), and
-    # `timeout` stops the open list at the budget plus its slack whatever it is doing, so it ends by the deadline
-    # plus its slack and the steps after it still fit with their timeouts
-    with open(os.path.join(ROOT, ".github", "workflows", "watchlist.yml")) as f:
-        text = f.read()
-    job = text.split("\n  lists:\n", 1)[1].split("\n  deploy:\n", 1)[0]
-    job_timeout = int(re.search(r"^    timeout-minutes: (\d+)", job, re.M).group(1))
-    names = re.findall(r"^      - name: (.+)$", job, re.M)
-    blocks = dict(zip(names, re.split(r"^      - name: .+$", job, flags=re.M)[1:]))
-    timeouts = {n: int(m.group(1)) for n, b in blocks.items() if (m := re.search(r"timeout-minutes: (\d+)", b))}
-    step = blocks["Open now list"]
-    timeout = timeouts["Open now list"]
-    deadline = int(re.search(r"left=\$\(\( (\d+) - \(\$\(date \+%s\) - STARTED\) / 60 \)\)", step).group(1))
-    cap = int(re.search(r"budget=\$\(\( left < (\d+) \? left : \1 \)\)", step).group(1))
-    floor = int(re.search(r"-lt (\d+) \]; then budget=\1", step).group(1))
-    kill, slack = (int(x) for x in re.search(r'timeout -k (\d+) "\$\(\( budget \+ (\d+) \)\)m" \\\n\s+python3 -m '
-                                             r'watchlist\.opennow --budget-minutes "\$budget"', step).groups())
-    hard = slack + -(-kill // 60)                         # minutes past the budget it may run, at the most
-    assert cap == O.BUDGET_MINUTES and cap + O.OUT_RESERVE_MINUTES <= cap + slack
-    assert cap + hard <= timeout, (cap, hard, timeout)    # ours stops it before GitHub's step timeout would
-    order = list(blocks)
-    before = [timeouts[n] for n in order[:order.index("Open now list")] if n in timeouts]
-    after = [timeouts[n] for n in order[order.index("Open now list") + 1:] if n in timeouts]
-    assert len(before) >= 5 and len(after) >= 5, (before, after)
-    assert len(after) == len(order) - order.index("Open now list") - 1, "every step after it has a timeout"
-    # the steps before it never leave it under its floor; it ends by the deadline plus its slack; the rest fit,
-    # with 3 minutes to spare for the checkout before the job's clock (STARTED) starts
-    assert sum(before) + floor <= deadline, (before, deadline)
-    assert deadline + hard + sum(after) + 3 <= job_timeout <= 360, (deadline, hard, after, job_timeout)
-    # and the closed list and an apply-mode rebuild stop themselves before their own step's timeout
-    for name, flag in (("Recently closed list", "--budget-minutes"), ("Apply the owner's decisions", "--budget-minutes")):
-        minutes = int(re.search(flag + r" (\d+)", blocks[name]).group(1))
-        assert minutes + 10 <= timeouts[name], (name, minutes)
-
-
-# ── the daily job's entry points: the headline key, the rebuild, the news-down guard ──
-
 def test_headline_key():
     # the key a decision is stored under (store.open_reviews), which the job sends with every candidate
     assert O.headline_key is O._key
@@ -1615,7 +1603,7 @@ def test_rebuild_reviewed_is_the_approve_path():
             else:
                 got = O.rebuild_reviewed(conn, out_path=out, news_cache_path=None, client=c, walk=lambda: EVENTS,
                                          search=plus_search, sleep=lambda s: None, workers=1)
-            assert not c.steps_asked() and got["status"] == "updated" and got["run_at"] == "2026-11-13T04:00:00Z"
+            assert not c.steps_asked() and got["status"] == "updated" and got["run_at"] == "2026-11-13T09:00:00Z"
             outs.append((json.load(open(out)), got["awaiting"], O.latest_day(conn)["cards"]))
     assert outs[0] == outs[1]
     assert [c["id"] for c in outs[0][0]["days"][0]["cards"]] == [ROE_K, TURNER_K]
@@ -1623,6 +1611,7 @@ def test_rebuild_reviewed_is_the_approve_path():
     assert O.rebuild_reviewed(store.connect(":memory:"), out_path=None) is None
 
 
+@two_readings
 def test_news_down_keeps_the_last_list():
     # NEWS_DOWN_AFTER searches failing in a row: the feed is given up on, no model is asked after it, the last
     # list's live cards stay (with the headlines they had) and the day is "not updated today"
@@ -1700,6 +1689,7 @@ def _read(path):
         return f.read()
 
 
+@two_readings
 def test_a_catch_up_with_nothing_to_read_does_nothing():
     conn = store.connect(":memory:")
     with tempfile.TemporaryDirectory() as tmp:
@@ -1742,6 +1732,7 @@ def test_a_catch_up_with_nothing_to_read_does_nothing():
     assert O.left_unread(None) == 0
 
 
+@two_readings
 def test_a_catch_up_reads_only_what_the_days_run_left():
     # the day's run ran out of time (as in test_the_budget_stops_new_step_readings): Ruritania's first reading and
     # Roe's and Acme's second were left, so only the dated card showed. Six hours later the catch-up asks only
@@ -1769,7 +1760,7 @@ def test_a_catch_up_reads_only_what_the_days_run_left():
         assert s["requests"]["steps 1"] == 1 and s["requests"]["steps 2"] == 3 and "names" not in s["requests"]
         assert "7" not in store.pool_entries(conn)                                     # it enters at the next run
         day = json.loads(_read(out))["days"][0]
-        assert day["run_at"] == "2026-11-13T04:00:00Z" and day["status"] == "updated"
+        assert day["run_at"] == "2026-11-13T09:00:00Z" and day["status"] == "updated"
         assert [x["id"] for x in day["cards"]] == [ROE_K, ACME_K, TURNER_K] and _read(out) != before
         assert RUR_K in [h["id"] for h in s["held_back"]] and s["out_of_time"] is None
         info = store.get_open_day(conn, "2026-11-13")["info"]
@@ -1812,6 +1803,7 @@ def test_a_catch_up_that_changes_nothing_leaves_the_list_as_it_was():
             assert bool(store.open_answer_history(conn, RUR_K, O.PROMPT_VERSION)) == read
 
 
+@two_readings
 def test_a_persons_rebuild_keeps_what_was_left_unread():
     # an apply run's rebuild reads no step: the day's unread stories stay unread (for the catch-up, and for the
     # next day's shortlist, which reads them as new), and a day the model was down for keeps why
@@ -1842,93 +1834,6 @@ def test_a_persons_rebuild_keeps_what_was_left_unread():
                     "step_failed": ["a", "c"], "step_failed_busy": ["a"],
                     "left_for_next_run": {"already out": 1, "steps 1": 2}, "seen_step_headlines": ["a\x1fx"]}
     assert O.left_unread({"info": info}) == 1 + 2 + 1 + 1
-
-
-def test_the_catch_up_run_in_the_workflow():
-    # a second schedule 6 hours after the daily one runs in catchup mode: its check (one request, no install)
-    # stands aside while another run is going or waiting and reads what today's list left from the saved state's
-    # head; the lists job (the same concurrency group as the daily run) skips the work, the decisions, the closed
-    # list and the markets to add, passes --catch-up with a budget of 120 minutes at most, and deploys only when
-    # the save sent a changed open.json
-    with open(os.path.join(ROOT, ".github", "workflows", "watchlist.yml")) as f:
-        text = f.read()
-    crons = re.findall(r'^    - cron: "(\d+) (\d+) \* \* \*"', text, re.M)
-    assert crons == [("17", "4"), ("17", "10")], crons
-    daily, catch = (" ".join([m, h, "*", "*", "*"]) for m, h in crons)
-    assert f"MODE: ${{{{ inputs.mode || (github.event.schedule == '{catch}' && 'catchup') || 'full' }}}}" in text
-    assert "options: [full, apply, catchup]" in text
-    check = text.split("\n  check:\n", 1)[1].split("\n  lists:\n", 1)[0]
-    assert f"inputs.mode == 'catchup' || github.event.schedule == '{catch}'" in check and "concurrency" not in check
-    assert check.index('select(.status != \\"completed\\"') < check.index('if [ "$MODE" = catchup ]')
-    assert "/api/job/blobs/state" in check and ".meta.open_left" in check and "date -u +%F" in check
-    job = text.split("\n  lists:\n", 1)[1].split("\n  deploy:\n", 1)[0]
-    assert "      group: watchlist" in job and "cancel-in-progress: false" in job
-    names = re.findall(r"^      - name: (.+)$", job, re.M)
-    blocks = dict(zip(names, re.split(r"^      - name: .+$", job, flags=re.M)[1:]))
-    assert "env.MODE != 'catchup'" in blocks["Fetch the owner's decisions, the markets to add and the watchlist"]
-    assert "env.MODE == 'full'" in blocks["Recently closed list"] and "catchup" not in blocks["Recently closed list"]
-    step = blocks["Open now list"]
-    assert "(env.MODE == 'full' || env.MODE == 'catchup')" in step
-    assert 'catch_up=(--catch-up); budget=$(( budget < 120 ? budget : 120 ))' in step
-    assert '--budget-minutes "$budget" "${catch_up[@]}"' in step
-    publish = blocks["Decide whether to publish"]
-    assert publish.index('if [ "$MODE" = catchup ]; then') < publish.index("steps.add.outputs.markets")
-    assert 'if [ "${{ steps.save.outputs.open_list }}" = true ]; then echo "publish=true"' in publish
-    assert '--mode "$MODE"' in blocks["Report to the API"]
-
-
-def test_the_catch_up_check_stands_aside_and_reads_what_is_left():
-    # the check job's own script, run with a fake gh, curl and date: another run going or waiting (the day's run,
-    # started late) ends it at once; else today's unread count from the saved state's head decides
-    import shutil
-    import subprocess
-    import textwrap
-    if not (shutil.which("bash") and shutil.which("jq")):
-        print("  (skipped: needs bash and jq, as GitHub's runners have)")
-        return
-    with open(os.path.join(ROOT, ".github", "workflows", "watchlist.yml")) as f:
-        check = f.read().split("\n  check:\n", 1)[1].split("\n  lists:\n", 1)[0]
-    script = textwrap.dedent(check.split("        run: |\n", 1)[1])
-    with tempfile.TemporaryDirectory() as tmp:
-        bin_dir, calls = os.path.join(tmp, "bin"), os.path.join(tmp, "calls")
-        os.makedirs(bin_dir)
-        fakes = {"gh": 'echo "$FAKE_BUSY"',
-                 "curl": f'cat > /dev/null; echo "$@" >> {calls}; [ -n "$FAKE_HEAD" ] || exit 22; echo "$FAKE_HEAD"',
-                 "date": 'echo "$FAKE_TODAY"'}
-        for name, body in fakes.items():
-            with open(os.path.join(bin_dir, name), "w") as f:
-                f.write("#!/bin/sh\n" + body + "\n")
-            os.chmod(os.path.join(bin_dir, name), 0o755)
-
-        def run(mode, busy="0", left=None, head=None):
-            out = os.path.join(tmp, "out")
-            open(out, "w").close()
-            if os.path.exists(calls):
-                os.remove(calls)
-            if head is None and left is not None:
-                head = json.dumps({"name": "state", "meta": {"open_left": left}})
-            env = dict(PATH=bin_dir + os.pathsep + os.environ["PATH"], MODE=mode, FAKE_BUSY=busy, FAKE_HEAD=head or "",
-                       FAKE_TODAY="2026-11-13", API_URL="http://api.test/", WATCHLIST_JOB_TOKEN="tok-secret",
-                       GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="7", GITHUB_OUTPUT=out)
-            p = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script], env=env,
-                               capture_output=True, text=True, timeout=60)
-            assert p.returncode == 0, p.stderr
-            asked = open(calls).read() if os.path.exists(calls) else ""
-            assert "tok-secret" not in asked
-            return [x for x in open(out).read().split() if x.startswith("work=")][-1], p.stdout, asked
-
-        work, said, asked = run("catchup", busy="1", left={"day": "2026-11-13", "unread": 3})
-        assert work == "work=false" and "Another Watchlist run is going or waiting" in said and asked == ""
-        work, _, asked = run("catchup", left={"day": "2026-11-13", "unread": 3})
-        assert work == "work=true" and "http://api.test/api/job/blobs/state" in asked
-        assert run("catchup", left={"day": "2026-11-13", "unread": 0})[0] == "work=false"
-        assert run("catchup", left={"day": "2026-11-12", "unread": 5})[0] == "work=false"   # no list today yet
-        assert run("catchup", left=None, head=json.dumps({"meta": {}}))[0] == "work=false"   # saved by older code
-        work, said, _ = run("catchup")                                                      # the API did not answer
-        assert work == "work=false" and "::warning::" in said
-        # apply mode still asks for the work
-        work, _, asked = run("apply", head=json.dumps({"decisions": [{"story": "x"}], "requests": []}))
-        assert work == "work=true" and "/api/job/work" in asked
 
 
 if __name__ == "__main__":

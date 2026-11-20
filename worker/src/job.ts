@@ -1,13 +1,13 @@
-// The daily job's endpoints, behind JOB_TOKEN (watchlist/sync.py): what to apply, the open list's review
-// queue, the catalog of what visitors may write to, and the run's report (which also prunes old rows). The
-// job's own data (its memory, the lists, added markets) is in blobs.ts.
+// The daily lists' endpoints, behind JOB_TOKEN (watchlist/sync.py, called from the step function's jobs): what
+// to apply, the open list's review queue, the catalog of what visitors may write to, the watched markets sent to
+// the main page (each gets its add run at once), and the run's report. The job's own data (its memory, the lists,
+// added markets) is in blobs.ts; the queue itself in queue.ts; old rows go in the cron's daily prune (cron.ts).
 
-import { pruneParts } from "./blobs";
+import { CONTRACT } from "./contract";
 import {
   BODY,
   CONDITION_ID,
   type Ctx,
-  DAY,
   DAY_TEXT,
   HttpError,
   MARKET_NAME,
@@ -27,6 +27,8 @@ import {
 } from "./lib";
 import { decision } from "./owner";
 import { forgetMarkers } from "./public";
+import { graphJobs } from "./queue";
+import { wakeReady } from "./wake";
 
 /** opennow offers at most QUEUE_MAX (15) stories a day; twice that leaves room. */
 const QUEUE_ITEMS = 30;
@@ -36,18 +38,26 @@ const ITEM_BYTES = 60_000;
 
 /**
  * What the job applies: pending decisions (a "withdrawn" one included: the job removes it from its store), the
- * markets to add to the main page (status approved), and the stories on the site's watchlist.
+ * markets on their way to the main page (status approved, each with its run), the stories on the site's
+ * watchlist, and the markets added to the main page (`added`: condition id and day; the closed list keeps their
+ * picks). A read writes nothing.
  */
-export async function work({ env }: Ctx): Promise<Response> {
-  const [decisions, requests, watched] = await env.DB.batch([
+export async function work({ env, clock }: Ctx): Promise<Response> {
+  const at = await clock();
+  const [decisions, requests, watched, added] = await env.DB.batch([
     env.DB.prepare("SELECT * FROM open_decisions WHERE applied_at IS NULL ORDER BY decided_at"),
     env.DB.prepare("SELECT * FROM requests WHERE status = 'approved' ORDER BY decided_at"),
     env.DB.prepare("SELECT story FROM watches ORDER BY story"),
+    env.DB.prepare("SELECT condition_id, day FROM requests WHERE status = 'added' ORDER BY day, condition_id"),
   ]);
-  return json({ now: now(), decisions: decisions.results.map(decision), requests: requests.results, watched: watched.results });
+  return json({ now: at, decisions: decisions.results.map(decision), requests: requests.results, watched: watched.results, added: added.results });
 }
 
-/** Replace one day's review queue (opennow's `awaiting`, each candidate with its headline key), keeping 7 days. */
+/**
+ * Replace one day's review queue (opennow's `awaiting`, each candidate with its headline key), keeping 7 days. The
+ * newest day sent is kept as settings.queue_day ({day, run_at, steps_by}), so a day with nothing to check still
+ * reads as that day's queue, empty.
+ */
 export async function putQueue({ req, env }: Ctx): Promise<Response> {
   const body = await readBody(req, BODY.job);
   const day = text(body.day, "day", 10);
@@ -80,12 +90,16 @@ export async function putQueue({ req, env }: Ctx): Promise<Response> {
          SELECT ?1, json_extract(value, '$.story'), json_extract(value, '$.n'), json_extract(value, '$.data'), ?2, ?3, ?4 FROM json_each(?5)`,
       ).bind(day, runAt, stepsBy, at, chunk),
     ),
+    env.DB.prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('queue_day', ?1, ?2)
+       ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?2 WHERE json_extract(?1, '$.day') >= json_extract(settings.value, '$.day')`,
+    ).bind(JSON.stringify({ day, run_at: runAt, steps_by: stepsBy }), at),
     pruneQueue(env),
   ]);
   return noContent();
 }
 
-const pruneQueue = (env: Ctx["env"]) =>
+export const pruneQueue = (env: Ctx["env"]) =>
   env.DB.prepare(`DELETE FROM open_queue WHERE day NOT IN (SELECT DISTINCT day FROM open_queue ORDER BY day DESC LIMIT ${QUEUE_DAYS})`);
 
 /** Text cut to max characters, or null when it isn't text. */
@@ -145,21 +159,33 @@ const CATALOG_KINDS = {
 /**
  * What visitors may write to, as the job lists it: main-page markets (markers, and "already on the main page"),
  * closed picks (Add to main page) and open cards (the watchlist). Each section sent replaces its kind in one
- * transaction; a section left out is kept. A repeated id keeps its last entry. An entry that doesn't fit (a
- * markets.json name with capitals, a pick with no link) is left out and named in `skipped`, so one odd entry
- * can't stop the rest.
+ * transaction; a section left out is kept. The markets section always holds every added market too (from their
+ * market:<name> records), so a writer that read the added markets before another add finished never drops it.
+ * A repeated id keeps its last entry. An entry that doesn't fit (a markets.json name with capitals, a pick with
+ * no link) is left out and named in `skipped`, so one odd entry can't stop the rest.
  */
 export async function putCatalog({ req, env }: Ctx): Promise<Response> {
   const body = await readBody(req, BODY.job);
   const at = now();
   const statements: D1PreparedStatement[] = [];
   const skipped: string[] = [];
+  const added =
+    body.markets === undefined
+      ? []
+      : (
+          await env.DB.prepare(
+            `SELECT json_extract(meta, '$.entry.name') AS name, json_extract(meta, '$.entry.slug') AS slug FROM job_blobs
+             WHERE name > 'market:' AND name < 'market;' AND json_extract(meta, '$.entry.name') IS NOT NULL ORDER BY name`,
+          ).all<{ name: unknown; slug: unknown }>()
+        ).results;
   for (const [section, spec] of Object.entries(CATALOG_KINDS)) {
     if (body[section] === undefined) continue;
     const rows = new Map<string, Entry>();
-    list(body[section], section, 5000).forEach((v, i) => {
+    const sent = list(body[section], section, 5000).map((v, i): [string, unknown] => [`${section}[${i}]`, v]);
+    const kept = section === "markets" ? added.map((v): [string, unknown] => [`the added market ${String(v.name)}`, v]) : [];
+    [...kept, ...sent].forEach(([where, v]) => {
       try {
-        const e = spec.entry(v, `${section}[${i}]`);
+        const e = spec.entry(v, where);
         rows.set(e.id, e);
       } catch (err) {
         if (!(err instanceof HttpError)) throw err;
@@ -183,14 +209,69 @@ export async function putCatalog({ req, env }: Ctx): Promise<Response> {
   return json({ market: n("market"), closed: n("closed"), open: n("open"), skipped: skipped.slice(0, 50) });
 }
 
+/** Rows one call of the watched markets takes at most. */
+const WATCHED_SENT = 200;
+
+/**
+ * The markets the site's watchlist sends to the main page (the daily run's watch.check: a watched open card's
+ * market that closed with a result). Each is recorded as approved, as a visitor's "Add to main page" is, from
+ * the job's copy of the closed pick (the fields the catalog's closed entries hold, checked the same way), and
+ * gets its add run in the same batch, so it is added at once and its Recently closed card follows it; the add
+ * lane is woken after the answer. One row per market: one there already (a visitor's add, or one added or
+ * failed) is left as it is. An entry that doesn't fit is left out and named in `skipped`. Answers with the rows
+ * of the markets sent, as they are now.
+ */
+export async function addRequests({ req, env, clock, waitUntil }: Ctx): Promise<Response> {
+  const body = await readBody(req, BODY.job);
+  const rows = new Map<string, string>();
+  const skipped: string[] = [];
+  list(body.requests, "requests", WATCHED_SENT).forEach((v, i) => {
+    try {
+      const e = CATALOG_KINDS.closed.entry(v, `requests[${i}]`);
+      rows.set(e.id, e.data);
+    } catch (err) {
+      if (!(err instanceof HttpError)) throw err;
+      skipped.push(err.message);
+    }
+  });
+  if (!rows.size) return json({ requests: [], skipped });
+  const at = await clock();
+  const picks = [...rows.values()].map((d) => JSON.parse(d) as Record<string, string>);
+  const runs = [...rows.keys()].map((cid) => `add:${cid}:${at}`);
+  const results = await env.DB.batch([
+    ...jsonChunks(picks).map((chunk) =>
+      env.DB.prepare(
+        `INSERT INTO requests (condition_id, slug, question, url, winner, closed, day, status, requested_at, decided_at, run_id)
+         SELECT json_extract(value, '$.condition_id'), json_extract(value, '$.slug'), json_extract(value, '$.question'),
+                json_extract(value, '$.url'), json_extract(value, '$.winner'), json_extract(value, '$.closed'),
+                json_extract(value, '$.day'), 'approved', ?1, ?1, 'add:' || json_extract(value, '$.condition_id') || ':' || ?3
+         FROM json_each(?2) WHERE true
+         ON CONFLICT (condition_id) DO NOTHING`,
+      ).bind(at, chunk, String(at)), // the slot's second as text: a bound number reaches SQLite as a REAL ("1796248600.0")
+    ),
+    // an add run for each request just made (its run_id is this call's)
+    env.DB.prepare(
+      `INSERT INTO runs (id, kind, slot, state, meta, created_at, deadline)
+       SELECT run_id, 'add', substr(run_id, 5), 'queued', json_object('condition_id', condition_id), ?1, ?2
+       FROM requests WHERE run_id IN (SELECT value FROM json_each(?3)) AND status = 'approved'
+       ON CONFLICT DO NOTHING`,
+    ).bind(at, at + CONTRACT.schedule.add_run_s, JSON.stringify(runs)),
+    graphJobs(env, "add", runs, at),
+    env.DB.prepare("SELECT * FROM requests WHERE condition_id IN (SELECT value FROM json_each(?)) ORDER BY decided_at").bind(
+      JSON.stringify([...rows.keys()]),
+    ),
+  ]);
+  if (results[results.length - 3].meta.changes) waitUntil(wakeReady(env, at, { only: ["add"], handler: true }));
+  return json({ requests: results[results.length - 1].results, skipped });
+}
+
 /**
  * The run's report. `applied`: decisions the job saved and pushed, marked applied only while their decided_at is
  * unchanged (one decided again meanwhile stays pending); a withdrawn one the job has removed from its store goes.
  * `requests`: what adding the markets did (the page name the job gave one is kept), recorded only while it is
- * still approved. `run`: one job_runs row. Then the old rows go: limits after 3 days, runs beyond 200, deleted
- * markers after 30 days, visitor hashes on markers after 30 days, watchlist stories over 30 days old that are no
- * longer listed, withdrawals no run reported within 30 days, queue days beyond 7, and blob parts a save left
- * uncommitted after a day.
+ * still approved. `watched`: the watchlist's stories the job is done with (their market sent to the main page,
+ * or on it already), each taken off the watchlist once the catalog's open cards no longer list it. `run`: one
+ * job_runs row. Old rows go in the cron's daily prune (cron.ts).
  */
 export async function done({ req, env }: Ctx): Promise<Response> {
   // Only what identifies a row is strict here; a long note or summary is cut and a link that isn't https:// is
@@ -216,6 +297,7 @@ export async function done({ req, env }: Ctx): Promise<Response> {
       note: clip(r.note, 500),
     };
   });
+  const watched = list(body.watched ?? [], "watched", 1000).map((v, i) => text(v, `watched[${i}]`, 200));
   const run =
     body.run === undefined || body.run === null
       ? null
@@ -253,6 +335,13 @@ export async function done({ req, env }: Ctx): Promise<Response> {
       ).bind(at, chunk),
     );
   }
+  for (const chunk of jsonChunks(watched)) {
+    statements.push(
+      env.DB.prepare(
+        "DELETE FROM watches WHERE story IN (SELECT value FROM json_each(?)) AND story NOT IN (SELECT id FROM catalog WHERE kind = 'open')",
+      ).bind(chunk),
+    );
+  }
   if (run) {
     statements.push(
       env.DB.prepare("INSERT INTO job_runs (mode, status, started_at, finished_at, summary, url) VALUES (?, ?, ?, ?, ?, ?)").bind(
@@ -265,19 +354,6 @@ export async function done({ req, env }: Ctx): Promise<Response> {
       ),
     );
   }
-  const old = new Date((at - 3 * DAY) * 1000).toISOString().slice(0, 10);
-  statements.push(
-    env.DB.prepare("DELETE FROM quota WHERE day < ?").bind(old),
-    env.DB.prepare("DELETE FROM job_runs WHERE id NOT IN (SELECT id FROM job_runs ORDER BY id DESC LIMIT 200)"),
-    env.DB.prepare("DELETE FROM markers WHERE deleted_at IS NOT NULL AND deleted_at < ?").bind(at - 30 * DAY),
-    env.DB.prepare("UPDATE markers SET visitor = NULL WHERE visitor IS NOT NULL AND created_at < ?").bind(at - 30 * DAY),
-    env.DB.prepare("DELETE FROM watches WHERE created_at < ? AND story NOT IN (SELECT id FROM catalog WHERE kind = 'open')").bind(
-      at - 30 * DAY,
-    ),
-    env.DB.prepare("DELETE FROM open_decisions WHERE decision = 'withdrawn' AND decided_at < ?").bind(at - 30 * DAY),
-    pruneQueue(env),
-    pruneParts(env, at),
-  );
-  await env.DB.batch(statements);
+  if (statements.length) await env.DB.batch(statements);
   return noContent();
 }

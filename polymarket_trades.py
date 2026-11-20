@@ -20,7 +20,8 @@ counterparties of every fill, exactly like the old per-wallet crawl did, so
 positions aggregate the same way; the old crawl was lossy (a wallet's walk
 stopped early on rate limits or the v1 offset cap and silently kept the
 newest rows only), so a re-fetch of an old market can hold MORE rows than
-the committed CSV, never fewer (see tests/test_v2_parity.py).
+the committed CSV, never fewer (checked against two committed markets when
+the pipeline moved to v2).
 """
 import csv
 import json

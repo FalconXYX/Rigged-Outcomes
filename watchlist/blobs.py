@@ -4,10 +4,14 @@ tables job_blobs and job_blob_parts): everything the job keeps between runs,
 and nothing of it in git. Each item is a blob, one document saved whole:
 
   state                 the job's memory (watchlist.state)
-  list:closed, list:open   the published lists, byte for byte
-  cache:news            the news searches cache (opennow)
-  market:<page name>    a market added with "Add to main page" (add_market,
-                        watchlist.sync): its index.json entry and its page
+  site:closed.json, site:open.json   the published lists, byte for byte
+  site:index.json       the added markets' index, which the Worker serves
+  site:markets/<name>.json   an added market's page (backend.site)
+  market:<page name>    an added market's data record (backend.site,
+                        watchlist.sync), to rebuild its page from
+  scratch:<run>:<name>  a step's data too big for a result row (pruned)
+
+The news searches are rows of the database's news_cache table, not blobs.
 
 A document is gzip-compressed, base64-encoded and sent in parts of
 PART_CHARS characters (D1 holds up to 2 MB a row, the Worker takes up to
@@ -25,7 +29,7 @@ size and sha256 end to end (the Worker never decodes anything).
 
     python3 -m watchlist.blobs ls [--prefix P]
     python3 -m watchlist.blobs get NAME [--version V] [--out FILE]   the document, decompressed
-    python3 -m watchlist.blobs versions NAME              the kept versions of state, list:closed or list:open
+    python3 -m watchlist.blobs versions NAME              the kept versions of state, site:closed.json or site:open.json
     python3 -m watchlist.blobs restore NAME VERSION       make a kept version live again (undo a bad save)
     python3 -m watchlist.blobs rm NAME                    market:<name>: take a market off the main page (its
                                                           request then shows "taken off the main page")

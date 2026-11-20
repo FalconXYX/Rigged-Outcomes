@@ -3,34 +3,13 @@ The watchlist's sqlite store: data/watchlist/watchlist.db.
 
 sqlite because the machine has no pyarrow and because the production plan
 is Cloudflare D1, which is sqlite: these tables are meant to move there
-as-is. Everything a scan learns is written here so every script is
-resumable (a market already analysed, a wallet already looked up, a market
-already labelled is never fetched again) and the closed scan doubles as the
-backfill engine for the track record.
+as-is. Everything a list learns is written here so every step is resumable
+(a market already labelled or checked is never asked again).
 
 Tables (all times are UTC epoch seconds unless the column says _iso/_day):
 
-  wallet_volume  one /v2/user-volume answer per (wallet, UTC day of the end
-                 bound). The endpoint floors its bounds to whole UTC days, so
-                 every end epoch on the same day gets the same answer; the
-                 day is the key. complete=1 once that day is over (the answer
-                 can no longer change), else the row is re-fetched after
-                 net.INCOMPLETE_MAX_AGE seconds.
-  wallet_day_trades  the exact-cutoff check (net.day_trades): a wallet's
-                 TRADE fills from 00:00 UTC of a cutoff's day up to the
-                 cutoff, per (wallet, cutoff); complete like wallet_volume.
-  markets        every market a scan has seen, with its role in its event
-                 (main | other | excluded | unresolved) and why.
-  events         one row per Gamma event a scan has seen: title, series,
-                 which market was analysed and which were not, and the
-                 type / series_key columns the AI labeller and the track
-                 record fill in later.
-  results        the method's result per (condition_id, cutoff_variant):
-                 the headline numbers as columns, the whole dict as JSON.
-  whales         the method's whale rows per (condition_id, cutoff_variant).
   ai_labels      AI answers per (market_id, sha1 of the rules text).
   meta           free key/value (resume cursors, run notes).
-  closed_results (view) results joined to their event's series_key/type.
 
   The open list ("Open now", approved 2026-11-13; vocabulary in watchlist.kinds):
   open_pool      an open event the first time it entered the pool, with the
@@ -67,103 +46,12 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 
-from watchlist import filters
 from watchlist.common import DB_PATH, iso, now_epoch, to_epoch
 
 LOCK = threading.RLock()
 _DEFAULT = {}
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS wallet_volume (
-    wallet       TEXT    NOT NULL,
-    day          INTEGER NOT NULL,           -- UTC day number of the end bound (epoch // 86400)
-    volume       REAL,                       -- shares, as served
-    volume_usdc  REAL,                       -- dollars
-    trade_count  INTEGER,
-    fetched_at   INTEGER NOT NULL,
-    complete     INTEGER NOT NULL,           -- 1 once the day is over
-    PRIMARY KEY (wallet, day)
-);
-CREATE TABLE IF NOT EXISTS wallet_day_trades (
-    wallet       TEXT    NOT NULL,
-    cutoff       INTEGER NOT NULL,           -- inclusive end: a whale's first trade
-    day_start    INTEGER NOT NULL,           -- 00:00 UTC of the cutoff's day
-    trade_count  INTEGER,                    -- TRADE fills in [day_start, cutoff]
-    tx_count     INTEGER,                    -- unique transaction hashes among them
-    volume_usdc  REAL,
-    capped       INTEGER NOT NULL,           -- 1 when the walk hit its page cap (counts are floors)
-    fetched_at   INTEGER NOT NULL,
-    complete     INTEGER NOT NULL,           -- 1 once the cutoff is settled (the answer can no longer change)
-    PRIMARY KEY (wallet, cutoff)
-);
-CREATE TABLE IF NOT EXISTS markets (
-    condition_id   TEXT PRIMARY KEY,
-    market_id      TEXT,
-    event_id       TEXT,
-    question       TEXT,
-    slug           TEXT,
-    closed_ts      INTEGER,
-    end_ts         INTEGER,
-    volume         REAL,
-    neg_risk       INTEGER,
-    winner         TEXT,
-    tags           TEXT,                     -- JSON list of tag slugs
-    role           TEXT,                     -- main | other | excluded | unresolved
-    reason         TEXT,                     -- why excluded / why not main
-    seen_at        INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS markets_event ON markets(event_id);
-CREATE INDEX IF NOT EXISTS markets_closed ON markets(closed_ts);
-CREATE TABLE IF NOT EXISTS events (
-    event_id            TEXT PRIMARY KEY,
-    title               TEXT,
-    slug                TEXT,
-    series_slug         TEXT,
-    series_key          TEXT,                -- filters.series_key: seriesSlug, else the stripped title
-    tags                TEXT,                -- JSON list of tag slugs
-    closed_ts           INTEGER,             -- closedTime of the main market (closed scan)
-    main_condition_id   TEXT,
-    other_condition_ids TEXT,                -- JSON list
-    type                TEXT,                -- filled later (AI type of the main market)
-    type_source         TEXT,                -- e.g. "ai:<model>" or "manual"
-    updated_at          INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS events_closed ON events(closed_ts);
-CREATE TABLE IF NOT EXISTS results (
-    condition_id                TEXT NOT NULL,
-    cutoff_variant              TEXT NOT NULL,
-    status                      TEXT NOT NULL,   -- ok | too_large | no_trades | unresolved
-    market_id                   TEXT,
-    event_id                    TEXT,
-    closed_ts                   INTEGER,
-    whale_count                 INTEGER,
-    whale_capital               REAL,
-    flagged_count               INTEGER,
-    flagged_capital             REAL,
-    flagged_pct                 REAL,
-    jump_ts                     INTEGER,
-    flagged_capital_before_jump REAL,
-    result_json                 TEXT NOT NULL,
-    analysed_at                 INTEGER NOT NULL,
-    PRIMARY KEY (condition_id, cutoff_variant)
-);
-CREATE INDEX IF NOT EXISTS results_event ON results(event_id);
-CREATE TABLE IF NOT EXISTS whales (
-    condition_id      TEXT NOT NULL,
-    cutoff_variant    TEXT NOT NULL,
-    user_id           TEXT NOT NULL,
-    wallet            TEXT,
-    position          REAL,
-    first_trade_ts    INTEGER,
-    prior_trade_count INTEGER,
-    prior_volume_usdc REAL,
-    concentration     REAL,
-    is_first_x        INTEGER,
-    is_percent        INTEGER,
-    flagged           INTEGER,
-    before_jump       INTEGER,
-    PRIMARY KEY (condition_id, cutoff_variant, user_id)
-);
 CREATE TABLE IF NOT EXISTS ai_labels (
     market_id    TEXT NOT NULL,
     rules_sha1   TEXT NOT NULL,
@@ -258,14 +146,6 @@ CREATE TABLE IF NOT EXISTS open_reviews (
     decided_at   INTEGER NOT NULL,
     PRIMARY KEY (story, headline_key)
 );
--- method results with their event's series and type (the track record's input)
-CREATE VIEW IF NOT EXISTS closed_results AS
-    SELECT r.condition_id, r.cutoff_variant, r.status, r.market_id, r.event_id, r.closed_ts, r.whale_count,
-           r.whale_capital, r.flagged_count, r.flagged_capital, r.flagged_pct, r.jump_ts,
-           r.flagged_capital_before_jump, r.analysed_at,
-           e.title AS event_title, e.slug AS event_slug, e.series_slug, e.series_key, e.type, e.type_source,
-           e.main_condition_id
-    FROM results r LEFT JOIN events e ON e.event_id = r.event_id;
 """
 
 
@@ -319,182 +199,6 @@ def _json(v):
     return json.dumps(v, separators=(",", ":"), default=str)
 
 
-# ── wallet look-ups ──────────────────────────────────────────────────────────
-
-def get_wallet_volume(conn, wallet, day):
-    """Cached /v2/user-volume answer for (wallet, UTC day), or None."""
-    with LOCK:
-        r = conn.execute("SELECT * FROM wallet_volume WHERE wallet=? AND day=?",
-                         (str(wallet).lower(), int(day))).fetchone()
-    return _row(r)
-
-
-def put_wallet_volume(conn, wallet, day, data, complete):
-    """Store one /v2/user-volume answer (`data` = its "data" object)."""
-    with transaction(conn):
-        conn.execute(
-            "INSERT OR REPLACE INTO wallet_volume (wallet, day, volume, volume_usdc, trade_count, fetched_at, complete) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (str(wallet).lower(), int(day), float(data.get("volume") or 0), float(data.get("volume_usdc") or 0),
-             int(data.get("trade_count") or 0), now_epoch(), 1 if complete else 0))
-
-
-def get_wallet_day_trades(conn, wallet, cutoff):
-    """Cached first-day activity count (net.day_trades) for (wallet, cutoff), or None."""
-    with LOCK:
-        r = conn.execute("SELECT * FROM wallet_day_trades WHERE wallet=? AND cutoff=?",
-                         (str(wallet).lower(), int(cutoff))).fetchone()
-    return _row(r)
-
-
-def put_wallet_day_trades(conn, wallet, cutoff, day_start, trade_count, tx_count, volume_usdc, capped, complete):
-    """Store one net.day_trades answer."""
-    with transaction(conn):
-        conn.execute(
-            "INSERT OR REPLACE INTO wallet_day_trades (wallet, cutoff, day_start, trade_count, tx_count, volume_usdc, "
-            "capped, fetched_at, complete) VALUES (?,?,?,?,?,?,?,?,?)",
-            (str(wallet).lower(), int(cutoff), int(day_start), int(trade_count), int(tx_count), float(volume_usdc),
-             1 if capped else 0, now_epoch(), 1 if complete else 0))
-
-
-# ── markets / events ─────────────────────────────────────────────────────────
-
-def save_market(conn, m, role, reason=None, winner=None):
-    """Record a Gamma market a scan has seen. `m` is the Gamma market dict."""
-    ev = filters.event_of(m)
-    with transaction(conn):
-        conn.execute(
-            "INSERT OR REPLACE INTO markets (condition_id, market_id, event_id, question, slug, closed_ts, end_ts, volume, "
-            "neg_risk, winner, tags, role, reason, seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (m.get("conditionId"), str(m.get("id") or ""), str(ev.get("id") or "") or None, m.get("question"),
-             m.get("slug"), to_epoch(m.get("closedTime")), to_epoch(m.get("endDate")),
-             float(m.get("volumeNum") or 0), 1 if m.get("negRisk") else 0, winner,
-             _json(sorted(filters.tag_slugs(m) | filters.tag_slugs(ev))), role, reason, now_epoch()))
-
-
-def get_market(conn, condition_id):
-    with LOCK:
-        return _row(conn.execute("SELECT * FROM markets WHERE condition_id=?", (condition_id,)).fetchone())
-
-
-def save_event(conn, event, main_condition_id=None, other_condition_ids=(), closed_ts=None, series_key=None):
-    """Record a Gamma event (a full event, or a market's events[0]). Keeps any
-    type / type_source already set (those are filled by a later step)."""
-    eid = str(event.get("id") or "")
-    if not eid:
-        raise ValueError("event without an id")
-    with transaction(conn):
-        old = conn.execute("SELECT type, type_source FROM events WHERE event_id=?", (eid,)).fetchone()
-        conn.execute(
-            "INSERT OR REPLACE INTO events (event_id, title, slug, series_slug, series_key, tags, closed_ts, "
-            "main_condition_id, other_condition_ids, type, type_source, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (eid, event.get("title"), event.get("slug"), event.get("seriesSlug") or None,
-             series_key or filters.series_key(event), _json(sorted(filters.tag_slugs(event))), closed_ts,
-             main_condition_id, _json(list(other_condition_ids)),
-             old["type"] if old else None, old["type_source"] if old else None, now_epoch()))
-
-
-def get_event(conn, event_id):
-    with LOCK:
-        r = _row(conn.execute("SELECT * FROM events WHERE event_id=?", (str(event_id),)).fetchone())
-    if r:
-        r["tags"] = json.loads(r["tags"] or "[]")
-        r["other_condition_ids"] = json.loads(r["other_condition_ids"] or "[]")
-    return r
-
-
-def set_event_type(conn, event_id, type_, source):
-    """Fill the type column of an event (e.g. from the AI label of its main market)."""
-    with transaction(conn):
-        conn.execute("UPDATE events SET type=?, type_source=?, updated_at=? WHERE event_id=?",
-                     (type_, source, now_epoch(), str(event_id)))
-
-
-def events_closed_between(conn, since_ts, until_ts):
-    """Event rows whose closed_ts is in [since_ts, until_ts), oldest first."""
-    with LOCK:
-        rows = conn.execute("SELECT * FROM events WHERE closed_ts >= ? AND closed_ts < ? ORDER BY closed_ts",
-                            (int(since_ts), int(until_ts))).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        d["tags"] = json.loads(d["tags"] or "[]")
-        d["other_condition_ids"] = json.loads(d["other_condition_ids"] or "[]")
-        out.append(d)
-    return out
-
-
-# ── method results ───────────────────────────────────────────────────────────
-
-def save_result(conn, result):
-    """Store a method result (method.analyze_market's dict) and its whale rows,
-    replacing any earlier result for the same (condition_id, cutoff_variant)."""
-    cid, variant = result["condition_id"], result["cutoff_variant"]
-    with transaction(conn):
-        conn.execute(
-            "INSERT OR REPLACE INTO results (condition_id, cutoff_variant, status, market_id, event_id, closed_ts, "
-            "whale_count, whale_capital, flagged_count, flagged_capital, flagged_pct, jump_ts, "
-            "flagged_capital_before_jump, result_json, analysed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (cid, variant, result["status"], result.get("market_id"), result.get("event_id"), result.get("closed_ts"),
-             result.get("whale_count"), result.get("whale_capital"), result.get("flagged_count"),
-             result.get("flagged_capital"), result.get("flagged_pct"), result.get("jump_ts"),
-             result.get("flagged_capital_before_jump"), _json(result), now_epoch()))
-        conn.execute("DELETE FROM whales WHERE condition_id=? AND cutoff_variant=?", (cid, variant))
-        conn.executemany(
-            "INSERT OR REPLACE INTO whales (condition_id, cutoff_variant, user_id, wallet, position, first_trade_ts, "
-            "prior_trade_count, prior_volume_usdc, concentration, is_first_x, is_percent, flagged, before_jump) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [(cid, variant, w["user_id"], w["wallet"], w["position"], w["first_trade_ts"], w["prior_trade_count"],
-              w["prior_volume_usdc"], w["concentration"], int(w["is_first_x"]), int(w["is_percent"]),
-              int(w["flagged"]), None if w.get("before_jump") is None else int(w["before_jump"]))
-             for w in result.get("whales") or []])
-
-
-def get_result(conn, condition_id, cutoff_variant):
-    """The stored result dict for (condition_id, cutoff_variant), or None."""
-    with LOCK:
-        r = conn.execute("SELECT result_json FROM results WHERE condition_id=? AND cutoff_variant=?",
-                         (condition_id, cutoff_variant)).fetchone()
-    return json.loads(r["result_json"]) if r else None
-
-
-def analysed_conditions(conn, cutoff_variant, statuses=("ok", "too_large", "no_trades", "unresolved")):
-    """Condition ids that already have a result for this variant (skip them on resume)."""
-    q = ",".join("?" * len(statuses))
-    with LOCK:
-        rows = conn.execute(f"SELECT condition_id FROM results WHERE cutoff_variant=? AND status IN ({q})",
-                            (cutoff_variant, *statuses)).fetchall()
-    return {r["condition_id"] for r in rows}
-
-
-def closed_results(conn, cutoff_variant, since_ts=None, until_ts=None, main_only=True, status="ok"):
-    """Rows of the closed_results view (headline numbers + event series_key
-    and type, no JSON) for one variant, optionally by closed_ts window;
-    main_only keeps results of each event's main market."""
-    q = "SELECT * FROM closed_results WHERE cutoff_variant=?"
-    args = [cutoff_variant]
-    if status:
-        q += " AND status=?"
-        args.append(status)
-    if since_ts is not None:
-        q += " AND closed_ts >= ?"
-        args.append(int(since_ts))
-    if until_ts is not None:
-        q += " AND closed_ts < ?"
-        args.append(int(until_ts))
-    if main_only:
-        q += " AND condition_id = main_condition_id"
-    with LOCK:
-        return [dict(r) for r in conn.execute(q + " ORDER BY closed_ts", args).fetchall()]
-
-
-def get_whales(conn, condition_id, cutoff_variant):
-    with LOCK:
-        rows = conn.execute("SELECT * FROM whales WHERE condition_id=? AND cutoff_variant=? ORDER BY position DESC",
-                            (condition_id, cutoff_variant)).fetchall()
-    return [dict(r) for r in rows]
-
-
 # ── AI labels ────────────────────────────────────────────────────────────────
 
 def get_ai_label(conn, market_id, rules_sha1):
@@ -529,7 +233,8 @@ def save_closed_check(conn, condition_id, version, check):
 # ── the open list ────────────────────────────────────────────────────────────
 
 def _day_of(epoch):
-    return iso(epoch)[:10]
+    from watchlist.common import local_day
+    return local_day(epoch)
 
 
 def get_pool_entry(conn, event_id):
@@ -598,29 +303,6 @@ def headlines_key(headlines):
     return hashlib.sha1("\x1e".join(lines).encode("utf-8")).hexdigest()
 
 
-def get_open_answer(conn, story, headlines_sha1, version, run=1):
-    """The model's checked answers for (story, headline set, prompt version,
-    reading), or None."""
-    with LOCK:
-        r = conn.execute("SELECT data FROM open_answers WHERE story=? AND headlines_sha1=? AND version=? AND run=?",
-                         (story, headlines_sha1, version, int(run))).fetchone()
-    return json.loads(r["data"]) if r else None
-
-
-def latest_open_answer(conn, story, version, run=1):
-    """The newest answers stored for a story under a prompt version and
-    reading, whatever headlines they were given: {"headlines_sha1", "data",
-    "model", "created_at"}, or None. A story with no new headlines keeps
-    these."""
-    with LOCK:
-        r = conn.execute("SELECT headlines_sha1, data, model, created_at FROM open_answers WHERE story=? AND version=? "
-                         "AND run=? ORDER BY created_at DESC, rowid DESC LIMIT 1", (story, version, int(run))).fetchone()
-    if not r:
-        return None
-    return {"headlines_sha1": r["headlines_sha1"], "data": json.loads(r["data"]), "model": r["model"],
-            "created_at": r["created_at"]}
-
-
 def open_answer_history(conn, story, version, since_ts=None):
     """Every reading stored for a story under a prompt version, both runs
     and every headline set, oldest first: [{"headlines_sha1", "run", "data",
@@ -644,6 +326,15 @@ def save_open_answer(conn, story, headlines_sha1, version, run, data, model=None
         conn.execute("INSERT OR REPLACE INTO open_answers (story, headlines_sha1, version, run, data, model, created_at) "
                      "VALUES (?,?,?,?,?,?,?)", (story, headlines_sha1, version, int(run), _json(data), model,
                                                 int(created_at) if created_at is not None else now_epoch()))
+
+
+def open_answered(conn):
+    """The stories an "already out" reading found answered (data "answered": the answer is public), under any
+    version: the open list never shows them again."""
+    with LOCK:
+        rows = conn.execute("SELECT DISTINCT story FROM open_answers WHERE version LIKE 'open-out-%' "
+                            "AND json_extract(data, '$.answered') = 1").fetchall()
+    return {r[0] for r in rows}
 
 
 _CARD_KEYS = ("id", "place", "label", "listed_since")
@@ -770,6 +461,22 @@ def open_listed_card(conn, idents):
                          f"WHERE l.ident IN ({','.join('?' * len(idents))}) ORDER BY l.day DESC LIMIT 1",
                          idents).fetchone()
     return json.loads(r["card"]) if r else None
+
+
+def open_story_idents(conn, story):
+    """(event ids, slugs) of every card a story had, oldest day first, each once: the events it was asked about
+    whole and the slugs of their markets, and the one market of each outcome split into its own story (its slug
+    alone; opennow.story_idents). ([], []) when it never had a card."""
+    with LOCK:
+        rows = conn.execute("SELECT card FROM open_cards WHERE story=? ORDER BY day", (story,)).fetchall()
+    ids, slugs = [], []
+    for r in rows:
+        card = json.loads(r["card"])
+        for key, out in (("event_ids", ids), ("slugs", slugs)):
+            for x in card.get(key) or []:
+                if x not in (None, "") and str(x) not in out:
+                    out.append(str(x))
+    return ids, slugs
 
 
 def open_listed_since(conn, event_id_or_slug):

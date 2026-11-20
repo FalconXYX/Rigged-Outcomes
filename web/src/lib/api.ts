@@ -1,15 +1,19 @@
 // The site's API (worker/: a Cloudflare Worker and its D1 database; the
-// shapes below are the contract it shares with watchlist/sync.py, and
-// docs/DEPLOY.md sets it up). Visitors write three things through it:
-// timeline markers, the site's one watchlist of open markets, and closed
-// markets added to the main page; the owner's review page (#/review) reads
-// them and decides the open list's queue. A build without VITE_API_URL and VITE_TURNSTILE_SITEKEY
-// makes no call at all, and an API that is down, over its free daily limit
-// or slow reads the same: every control still works and remembers what this browser did.
-// Nothing here throws.
+// shapes below are the contract it shares with watchlist/sync.py and
+// docs/BACKEND.md, and docs/DEPLOY.md sets it up). Visitors write three things
+// through it: timeline markers, the site's one watchlist of open markets, and
+// closed markets added to the main page; the owner's review page (#/review)
+// reads them, decides the open list's queue and sees the backend's runs and
+// budget. The site's own data that the backend publishes (the lists, the added
+// markets) is read through lib/data.ts. A build without VITE_API_URL and
+// VITE_TURNSTILE_SITEKEY makes no call at all, and an API that is down, over its
+// free daily limit or slow reads the same: every control still works and
+// remembers what this browser did. Nothing here throws.
 import { BotError, botToken, type BotAction } from "./turnstile";
 
 const API = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/+$/, "");
+/** The API's base URL ("" when the build has none): lib/data.ts reads the published files from it (/api/data/...). */
+export const API_BASE = API;
 const SITEKEY = (import.meta.env.VITE_TURNSTILE_SITEKEY ?? "").trim();
 /** false: no API in this build (no network calls; the controls keep what this browser did) */
 export const apiConfigured = !!API && !!SITEKEY;
@@ -49,9 +53,15 @@ export type Decision = {
   day: string;
   decided_at: number;
   applied_at: number | null;
+  /** the overview only: the card's question (a decision on a whole card has no headline) */
+  question?: string | null;
 };
-/** approved: the next run of the job adds it; added: it is on the main page; failed: the job couldn't add it (the review page says why) */
-export type RequestStatus = "approved" | "added" | "failed";
+/**
+ * approved: its add run (queued the moment it was added) is adding it; added: it is on the main page; failed: the
+ * add run couldn't add it (the review page says why; a visitor may add it again); removed: the owner took it off
+ * the main page
+ */
+export type RequestStatus = "approved" | "added" | "failed" | "removed";
 export type PublicRequest = { status: RequestStatus; name: string | null; decided_at: number | null; done_at: number | null };
 export type AddRequest = PublicRequest & {
   condition_id: string;
@@ -77,16 +87,61 @@ export type JobRun = {
   summary: string | null;
   url: string | null;
 };
+/** The backend's ledger of Vercel use (docs/BACKEND.md), as the cron last computed it. */
+export type BudgetLevel = "ok" | "tight" | "low" | "stop";
+export type Budget = {
+  level: BudgetLevel;
+  /** the last 30 Toronto days: CPU with its safety margin and each wake-up's share, memory time (GB-ms), calls */
+  cpu_ms_30d: number;
+  gb_ms_30d: number;
+  invocations_30d: number;
+  cpu_ms_today: number;
+  gb_ms_today: number;
+  /** epoch seconds; 0 before the first computation */
+  computed_at: number;
+};
+export type LaneName = "main" | "news" | "model" | "add";
+export type LaneState = {
+  lane: LaneName;
+  /** no step is claimed from it before this (epoch seconds; 0: not paused) */
+  paused_until: number;
+  /** wake-ups sent since its last claim */
+  unanswered: number;
+  last_wake_at: number;
+  last_claim_at: number;
+  /** the last wake-up Vercel didn't take ("HTTP 503", "no answer"), until one goes through */
+  wake_error: string | null;
+};
+export type RunKind = "daily" | "catchup" | "add" | "apply";
+export type RunState = "queued" | "running" | "done" | "partial" | "failed" | "cancelled" | "missed" | "skipped";
+export type BackendRun = {
+  id: string;
+  kind: RunKind;
+  slot: string;
+  state: RunState;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  deadline: number;
+  /** what its jobs reported: `left` (stories left unread), `problems` (one-line strings), `condition_id` (an add); JSON text from some answers */
+  meta: Record<string, unknown> | string | null;
+};
+export type FailedJob = { id: string; kind: string; error: string | null; updated_at: number };
+export type Backend = { budget: Budget; lanes: LaneState[]; runs: BackendRun[]; failed_jobs: FailedJob[] };
+
 export type Overview = {
   now: number;
   settings: { writes: "on" | "off" };
-  dispatch: boolean;
+  /** when the API last refused the job's token (epoch seconds) */
+  job_refused_at: number | null;
   queue: Queue | null;
   decisions: Decision[];
   requests: AddRequest[];
   markers: AdminMarker[];
   watched: Watched[];
   runs: JobRun[];
+  /** the queue's latest 15 runs, the failed steps of the last 14 days (latest 10), the lanes and the budget */
+  backend?: Backend;
 };
 
 /* ── Words ────────────────────────────────────────────────────────────── */
@@ -96,7 +151,7 @@ export type Overview = {
  * shown to visitors). Anything else, or no answer at all, reads `other`.
  */
 export const WORDS: Record<string, string> = {
-  limit: "You've reached today's limit. Try again tomorrow (UTC).",
+  limit: "You've reached today's limit. Try again tomorrow.",
   busy: "The site has taken all it can today. Try again tomorrow.",
   bot_check: "The bot check didn't pass. Try again.",
   bot_script: "Couldn't load the bot check. Allow challenges.cloudflare.com and try again.",
@@ -104,14 +159,15 @@ export const WORDS: Record<string, string> = {
   bad_label: "That label can't be used: plain words, no links, up to 40 characters.",
   bad_time: "Pick a time within this market's timeline.",
   full: "This timeline has as many markers as it can hold.",
-  timeline_busy: "This timeline can't take more new markers today. Try again tomorrow (UTC).",
+  timeline_busy: "This timeline can't take more new markers today. Try again tomorrow.",
   duplicate: "That marker is already on this timeline.",
   not_yours: "Markers can only be removed by whoever added them, within 24 hours.",
   unknown_story: "This market has left the list, so it can't be watched.",
   not_listed: "This market is no longer on the list.",
   on_main: "It's already on the main page.",
+  add_failed: "Couldn't add this market to the main page.",
   unauthorized: "That token was not accepted.",
-  locked: "Too many wrong tokens today. Try again tomorrow (UTC).",
+  locked: "Too many wrong tokens today. Try again tomorrow.",
   other: "Couldn't send right now. Try again later.",
 };
 
@@ -232,10 +288,12 @@ export async function ownerSend<T>(method: "POST" | "PUT" | "DELETE", path: stri
 }
 
 /* ── What this browser remembers ──────────────────────────────────────── */
-// The undo token for each marker this browser added (`ro-undo:<id>`, 24 hours)
-// and the watchlist as this browser last saw or set it (`ro-watch:<story>`).
-// Storage can be off (a private window, blocked site data): then this tab's
-// memory holds them.
+// The undo token for each marker this browser added (`ro-undo:<id>`, 24 hours),
+// the watchlist as this browser last saw or set it (`ro-watch:<story>`) and a
+// watch change it couldn't send yet (`ro-watch-send:<story>`), the closed
+// markets on their way to the main page as far as it knows (`ro-req:<cid>`),
+// and the markers it couldn't send yet (`ro-markers:<market>`). Storage can be
+// off (a private window, blocked site data): then this tab's memory holds them.
 
 const memory = new Map<string, string>();
 
@@ -296,11 +354,22 @@ export const dropUndo = (id: string) => writeKey(`ro-undo:${id}`, null);
 export const watchedHere = (story: string) => readKey(`ro-watch:${story}`) === "1";
 export const setWatchedHere = (story: string, on: boolean) => writeKey(`ro-watch:${story}`, on ? "1" : null);
 
-/** A closed market this browser added to the main page (kept when the API can't take it). */
-export const requestedHere = (cid: string) => readKey(`ro-req:${cid}`) === "1";
-export const setRequestedHere = (cid: string) => writeKey(`ro-req:${cid}`, "1");
+/** A watch change made here that the API couldn't take yet (true: watch, false: stop), or null. */
+export function watchToSend(story: string): boolean | null {
+  const v = readKey(`ro-watch-send:${story}`);
+  return v === "1" ? true : v === "0" ? false : null;
+}
+export const setWatchToSend = (story: string, on: boolean | null) =>
+  writeKey(`ro-watch-send:${story}`, on === null ? null : on ? "1" : "0");
 
-/** A market's markers added in this browser while the API can't take them. */
+/**
+ * A closed market on its way to the main page as far as this browser knows: added here (and kept when the API
+ * couldn't take it, so it is sent once the API answers), or one the API said was on its way.
+ */
+export const requestedHere = (cid: string) => readKey(`ro-req:${cid}`) === "1";
+export const setRequestedHere = (cid: string, on = true) => writeKey(`ro-req:${cid}`, on ? "1" : null);
+
+/** A market's markers added in this browser that the API hasn't taken yet. */
 export function localMarkers<T>(market: string): T[] {
   try {
     const v = JSON.parse(readKey(`ro-markers:${market}`) ?? "[]");

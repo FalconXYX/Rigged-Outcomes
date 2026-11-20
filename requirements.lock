@@ -1,5 +1,5 @@
-# The exact Python packages the two workflows install (deploy.yml and watchlist.yml), each with its sha256, so a
-# changed or hijacked release on PyPI can't be installed by a job that can push to this repository:
+# The exact Python packages, each with its sha256, so a changed or hijacked release on PyPI can't be
+# installed:
 #
 #   pip install --require-hashes -r requirements.lock
 #
@@ -7,10 +7,10 @@
 # Python 3.12. requirements.txt stays the short list for a local install. To update, edit the versions in the
 # command's input and run it again (uv: https://docs.astral.sh/uv/):
 #
-#   printf 'requests==2.33.1\npandas==3.0.1\nnumpy==2.4.4\ncertifi==2026.2.25\ncharset-normalizer==3.4.6\nidna==3.11\nurllib3==2.6.3\npython-dateutil==2.9.0.post0\nsix==1.17.0\n' \
+#   printf 'requests==2.33.1\npandas==3.0.1\nnumpy==2.4.4\ntzdata==2026.6\ncertifi==2026.2.25\ncharset-normalizer==3.4.6\nidna==3.11\nurllib3==2.6.3\npython-dateutil==2.9.0.post0\nsix==1.17.0\n' \
 #     | uv pip compile - --python-version 3.12 --python-platform x86_64-manylinux_2_28 --generate-hashes --no-header --no-annotate -o requirements.lock
 #
-# (then put this comment back on top).
+# (then put this comment back on top). requirements.txt pins the same versions for the Vercel step function.
 certifi==2026.2.25 \
     --hash=sha256:027692e4402ad994f1c42e52a4997a9763c646b73e4096e4d5d6db8af1d6f0fa \
     --hash=sha256:e887ab5cee78ea814d3472169153c2d12cd43b14bd03329a39a9c6e2e80bfba7
@@ -281,3 +281,5 @@ six==1.17.0 \
 urllib3==2.6.3 \
     --hash=sha256:1b62b6884944a57dbe321509ab94fd4d3b307075e0c2eae991ac71ee15ad38ed \
     --hash=sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4
+tzdata==2026.6 \
+    --hash=sha256:0a10eec6e13ef16b627fabed9a5f2ba61a62b1c67f327305f4e7e412a70b4aec

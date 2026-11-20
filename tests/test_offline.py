@@ -9,9 +9,7 @@ polymarket_api.get_json is replaced by a fake that serves scripted pages, so
 these cover the client's guards (what a stalled or malformed feed does), the
 whale scorer's address fallback, the empty-market _insiders.csv and
 export.py's handling of it, export_one matching what export.py writes, the
-correct_outcome guard, and that importing
-run.py does not run the pipeline. The live-endpoint checks are in
-tests/test_v2_parity.py.
+correct_outcome guard, and that the modules import in any order.
 """
 import contextlib
 import io
@@ -326,21 +324,6 @@ def test_failed_history_aborts_the_market_without_writing():
 
 # ── module hygiene ───────────────────────────────────────────────────────────
 
-def test_import_run_does_not_run_the_pipeline():
-    called = []
-    orig = polymarket_trades.main
-    polymarket_trades.main = lambda *a, **k: called.append(a)
-    try:
-        sys.modules.pop("run", None)
-        import run  # noqa: F401
-        assert hasattr(run, "main")
-        with contextlib.redirect_stdout(io.StringIO()):
-            assert run.main(["zzz-no-such-market"]) == 1
-    finally:
-        polymarket_trades.main = orig
-    assert called == []
-
-
 def test_raw_csv_schema_unchanged():
     cols = list(polymarket_trades.format_row({"proxyWallet": "", "timestamp": 0}, {}).keys())
     assert cols == ["user_id", "eoa_address", "side", "market_id", "market_title", "outcome", "odds", "contracts",
@@ -349,11 +332,10 @@ def test_raw_csv_schema_unchanged():
 
 
 def test_import_graph_has_no_cycle():
-    """Every module imports cleanly in a fresh interpreter, in either order,
-    and importing run does not touch the network or data/."""
+    """Every module imports cleanly in a fresh interpreter, in either order."""
     import subprocess
-    for order in ("run, polymarket_trades, scrape_insiders, export",
-                  "scrape_insiders, polymarket_trades, export, run"):
+    for order in ("polymarket_trades, scrape_insiders, export",
+                  "scrape_insiders, polymarket_trades, export"):
         code = f"import {order}; import polymarket_api; print('ok')"
         out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120)
         assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr

@@ -6,22 +6,21 @@ no git: no repository is made, not even in a temporary directory.
 
     python3 tests/test_watchlist_state.py
 
-Covers the dump and load round trip (identical rows, identical bytes when
-dumped twice), the manifest check (a wrong sha256 or row count, a missing
+Covers the state's files round trip (identical rows, identical bytes when
+made twice), the manifest check (a wrong sha256 or row count, a missing
 table, an empty state), unknown columns, pull and push (no API, no saved
 state, a push then a pull into a fresh store, a local store with newer data
 and --force with its backup, a state saved by another run since the pull,
 nothing changed and nothing sent, the lists sent only when they changed,
 --seed and --onto-head, the news cache never failing a run, the head's
-open_left and the open_list output the catch-up run reads), migrate (the
-branch's bytes kept, a saved state refused or replaced with --force, files
-that do not match their manifest), and prune (what it removes, and that the
-next day's cards are the same with or without it).
+open_left and the open_list output the catch-up run reads), and prune (what
+it removes, and that the next day's cards are the same with or without it).
 """
 import contextlib
 import importlib
 import io
 import json
+import re
 import os
 import sys
 import tempfile
@@ -29,7 +28,14 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import fake_api  # noqa: E402
 from fake_api import FakeApi  # noqa: E402
+from backend import contract as C  # noqa: E402
+
+# the fake API takes the backend's blob names (site:*, scratch:*) as the Worker does (CONTRACT.blob_names)
+fake_api.BLOB_NAME = re.compile("|".join(f"(?:{p})" for p in C.CONTRACT["blob_names"].values()))
+fake_api.HISTORY = re.compile(r"^(state|site:(index|closed|open)\.json)$")
+fake_api.PREFIX = re.compile(r"^[a-z0-9:._/-]{0,40}$")
 from watchlist import ai, blobs, state as S, store  # noqa: E402
 from watchlist.common import DAY, iso, to_epoch  # noqa: E402
 
@@ -85,15 +91,6 @@ def test_round_trip_and_same_bytes():
     # rows are in primary key order, keys sorted
     first = files["open_listed.jsonl"].decode().splitlines()
     assert first == sorted(first) and list(json.loads(first[0])) == sorted(json.loads(first[0]))
-    with tempfile.TemporaryDirectory() as tmp:
-        S.dump(a, tmp, made_at=NOW)
-        c = store.connect(":memory:")
-        S.load(c, tmp)
-        assert all(rows(a, t) == rows(c, t) for t in S.TABLES)
-        # a load replaces what the store had
-        store.save_review(c, "other", "k", "not a step", {"title": "k"})
-        S.load(c, tmp)
-        assert rows(c, "open_reviews") == rows(a, "open_reviews")
 
 
 def test_bad_state_is_refused():
@@ -178,7 +175,6 @@ def test_no_api():
     with place() as (kw, tmp):
         refused(lambda: S.pull(store.connect(":memory:"), None, db_path=":memory:", **kw), 2, "No API configured")
         refused(lambda: S.push(filled(), None, seed=True, now=NOW, **kw), 3, "No API configured")
-        refused(lambda: S.migrate(None, reader=lambda p: None), 3, "No API configured")
         api = FakeApi()
         refused(lambda: S.push(filled(), api, now=NOW, **kw), 3, "has not pulled")
         refused(lambda: S.push(filled(), api, onto_head=True, now=NOW, **kw), 3, "seed it")
@@ -189,10 +185,8 @@ def test_no_api():
         try:
             db = os.path.join(tmp, "cli.db")
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                assert S.main(["pull", "--db", db, "--site-dir", kw["site_dir"], "--news-cache",
-                               os.path.join(tmp, "n.json")]) == 2
-                assert S.main(["push", "--db", db, "--site-dir", kw["site_dir"], "--news-cache",
-                               os.path.join(tmp, "n.json")]) == 3
+                assert S.main(["pull", "--db", db, "--site-dir", kw["site_dir"]]) == 2
+                assert S.main(["push", "--db", db, "--site-dir", kw["site_dir"]]) == 3
             assert "No API configured" in err.getvalue()
         finally:
             ai.ENV_FILE = old[2]
@@ -238,8 +232,8 @@ def test_a_used_database_without_its_state_is_refused():
     """A list, the news cache or a replaced state version is saved only after a state: holding one without a
     state means the state was lost or API_URL points at another database. Starting fresh there would record every
     first-entry 99c check again, so the pull refuses, as the setup's problem, and loads nothing."""
-    for what, fill in (("list:closed", lambda api: blobs.put(api, "list:closed", b'{"days": []}', {"by": "mac"})),
-                       ("cache:news", lambda api: blobs.put(api, "cache:news", b"{}", {"by": "mac"})),
+    for what, fill in (("site:closed.json", lambda api: blobs.put(api, "site:closed.json", b'{"days": []}',
+                                                                  {"by": "mac"})),
                        ("replaced state version", lambda api: api.kept.setdefault("state", []).append(
                            {"name": "state", "version": "a" * 32, "parts": 1, "bytes": 1, "sha256": "0" * 64,
                             "meta": "{}", "updated_at": NOW, "replaced_at": NOW}))):
@@ -286,7 +280,7 @@ def test_push_then_pull_into_a_fresh_store():
         src = filled()
         with quiet():
             got = S.push(src, api, seed=True, by="mac", now=NOW, **a)
-        assert got["changed"] and got["lists"] == ["closed.json", "open.json"] and not got["news"]
+        assert got["changed"] and got["lists"] == ["closed.json", "open.json"]
         h = blobs.head(api, S.STATE)
         assert h["version"] == got["version"] and h["meta"]["by"] == "mac" and h["meta"]["open_day"] == "2026-11-13"
         assert h["meta"]["tables"]["open_reviews"]["rows"] == 1
@@ -307,7 +301,7 @@ def test_push_then_pull_into_a_fresh_store():
                           "tables": {t: v["sha256"] for t, v in m["tables"].items()}}
         assert saved_files(api) == S.dump_files(src, by="mac", made_at=NOW, site_dir=a["site_dir"])
         # a list missing from the database leaves the local file as it is
-        del api.blobs["list:open"]
+        del api.blobs["site:open.json"]
         with open(os.path.join(b["site_dir"], "open.json"), "w") as f:
             f.write("mine")
         with quiet():
@@ -355,7 +349,7 @@ def test_two_writers_and_the_guards():
         calls = dict(api.calls)
         with quiet():
             got = S.push(conn_b, api, now=NOW + 20, **b)
-        assert got == {"version": first, "changed": False, "lists": [], "news": False}
+        assert got == {"version": first, "changed": False, "lists": []}
         assert api.calls["PUT"] == calls.get("PUT", 0) and api.calls["POST"] == calls.get("POST", 0)
         assert json.loads(read(os.path.join(b["job_dir"], "state_pushed.json"))) == \
             {"ok": True, "version": first, "changed": False, "at": NOW + 20}
@@ -400,13 +394,13 @@ def test_lists_are_sent_only_when_they_changed():
         with quiet():
             got = S.push(conn, api, by="github", run_url="https://run/1", now=NOW + 2, **a)
         assert not got["changed"] and got["lists"] == ["closed.json"] and api.calls["PUT"] == puts + 1
-        assert blobs.head(api, "list:closed")["meta"] == {"by": "github", "made_at": iso(NOW + 2),
+        assert blobs.head(api, "site:closed.json")["meta"] == {"by": "github", "made_at": iso(NOW + 2),
                                                          "run_url": "https://run/1"}
-        assert json.loads(blobs.get(api, "list:closed")[1])["generated_at"].startswith("2026-11-15")
+        assert json.loads(blobs.get(api, "site:closed.json")[1])["generated_at"].startswith("2026-11-15")
         # a list the database refuses fails the push after the state was saved
         store.save_review(conn, "acme", "acme talks", "step", {"title": "Acme talks"}, at=NOW + 3)
         _site(a, generated="2026-11-16T04:20:00+00:00")
-        api.fail_next(400, "bad_request", method="POST", path="list:closed")
+        api.fail_next(400, "bad_request", method="POST", path="site:closed.json")
         refused(lambda: S.push(conn, api, now=NOW + 4, **a), 3, "the state was saved but the lists were not")
         assert json.loads(read(os.path.join(a["job_dir"], "state_pushed.json")))["ok"]
         fresh = store.connect(":memory:")
@@ -415,9 +409,9 @@ def test_lists_are_sent_only_when_they_changed():
         assert rows(fresh, "open_reviews") == rows(conn, "open_reviews")
 
 
-def test_the_catch_up_run_reads_the_head_and_deploys_only_a_changed_open_list():
-    # the saved state's head carries what the latest open-list day left unread (the catch-up run's check reads
-    # .meta.open_left with one request), and the push tells the job whether it sent open.json (the deploy waits on it)
+def test_the_head_says_what_the_latest_open_day_left():
+    # the saved state's head carries what the latest open-list day left unread (.meta.open_left: the catch-up's
+    # check reads it with one request)
     api = FakeApi()
     with place() as (a, tmp):
         _site(a)
@@ -432,148 +426,6 @@ def test_the_catch_up_run_reads_the_head_and_deploys_only_a_changed_open_list():
             S.push(conn, api, seed=True, now=NOW, **a)
             S.pull(conn, api, db_path=db, now=NOW + 1, **a)
         assert blobs.head(api, S.STATE)["meta"]["open_left"] == {"day": "2026-11-14", "unread": 3}
-        out = os.path.join(tmp, "github_output")
-        old = (S.sync.client, S.push, os.environ.get("GITHUB_OUTPUT"))
-        push = S.push
-        S.sync.client = lambda *x, **k: api
-        S.push = lambda *x, **k: push(*x, **dict(k, job_dir=a["job_dir"]))
-        os.environ["GITHUB_OUTPUT"] = out
-        args = ["push", "--db", db, "--site-dir", a["site_dir"], "--news-cache", os.path.join(tmp, "news.json")]
-        try:
-            # the catch-up read what was left, the list did not change: the state is saved, open.json is not sent
-            store.save_open_day(conn, "2026-11-14", "updated", NOW, [], version="open-step-1", info={})
-            with quiet():
-                assert S.main(args) == 0
-            assert read(out, "r").splitlines() == ["open_list=false"]
-            assert blobs.head(api, S.STATE)["meta"]["open_left"] == {"day": "2026-11-14", "unread": 0}
-            # it changed: sent, and the job deploys
-            with open(os.path.join(a["site_dir"], "open.json"), "w") as f:
-                json.dump({"days": [{"day": "2026-11-14", "run_at": "2026-11-14T04:17:00Z", "cards": [{}]}]}, f)
-            with quiet():
-                assert S.main(args) == 0
-            assert read(out, "r").splitlines() == ["open_list=false", "open_list=true"]
-        finally:
-            S.sync.client, S.push = old[0], old[1]
-            if old[2] is None:
-                os.environ.pop("GITHUB_OUTPUT", None)
-            else:
-                os.environ["GITHUB_OUTPUT"] = old[2]
-
-
-def test_the_news_cache_rides_along_and_never_fails_a_run():
-    api = FakeApi(now=NOW + 100)
-    with place() as (a, tmp), place() as (b, _):
-        news = os.path.join(tmp, "news.json")
-        with open(news, "w") as f:
-            json.dump({"q": ["headline é"]}, f)
-        _site(a)
-        conn = filled()
-        with quiet():
-            got = S.push(conn, api, seed=True, news_cache=news, now=NOW, **a)
-        assert got["news"] and blobs.get(api, S.NEWS)[1] == read(news)
-        mine = os.path.join(tmp, "mine.json")
-        with quiet():
-            S.pull(store.connect(":memory:"), api, db_path=":memory:", news_cache=mine, now=NOW + 200, **b)
-        assert read(mine) == read(news)
-        # a local cache newer than the saved one is kept
-        with open(mine, "w") as f:
-            f.write("{}")
-        os.utime(mine, (NOW + 500, NOW + 500))
-        with quiet():
-            S.pull(store.connect(":memory:"), api, db_path=":memory:", news_cache=mine, now=NOW + 600, **b)
-        assert read(mine) == b"{}"
-        # unchanged: not sent again; an API error on it only warns
-        with quiet():
-            S.pull(conn, api, db_path=":memory:", now=NOW + 700, **a)
-            puts = api.calls["PUT"]
-            assert not S.push(conn, api, news_cache=news, now=NOW + 710, **a)["news"] and api.calls["PUT"] == puts
-        with open(news, "w") as f:
-            f.write('{"q": []}')
-        api.fail_next(503, "server", method="PUT", path="cache:news")
-        with quiet() as out:
-            got = S.push(conn, api, news_cache=news, now=NOW + 720, **a)
-        assert not got["news"] and "news cache was not saved" in out.getvalue()
-        api.fail_next(None, "network", method="GET", path="cache:news")
-        os.remove(mine)
-        with quiet() as out:
-            S.pull(conn, api, db_path=":memory:", news_cache=mine, now=NOW + 730, **a)
-        assert "news cache was not pulled" in out.getvalue() and not os.path.exists(mine)
-
-
-def branch(conn=None, site=True):
-    """The watchlist-data branch's files, as migrate's reader serves them."""
-    files = {f"state/{k}": v for k, v in S.dump_files(conn or filled(), by="github", made_at=NOW,
-                                                       run_url="https://run/9").items()}
-    if site:
-        files["site/closed.json"] = b'{"generated_at": "2026-11-14T04:20:00+00:00", "days": []}\n'
-        files["site/open.json"] = b'{"days": []}\n'
-    return files
-
-
-def test_migrate_moves_the_branch_as_it_is():
-    real_run = S.subprocess.run
-    S.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("git ran"))    # no git at all
-    try:
-        api = FakeApi()
-        files = branch()
-        with quiet():
-            got = S.migrate(api, ref="origin/watchlist-data", reader=files.get)
-        manifest = json.loads(files["state/manifest.json"])
-        saved = saved_files(api)
-        assert saved == {k[len("state/"):]: v for k, v in files.items() if k.startswith("state/")}
-        for t in S.TABLES:
-            assert S._sha256(saved[f"{t}.jsonl"]) == manifest["tables"][t]["sha256"]
-        assert got["meta"] == dict(manifest, migrated_from="origin/watchlist-data")
-        assert blobs.get(api, "list:closed")[1] == files["site/closed.json"]
-        assert blobs.get(api, "list:open")[1] == files["site/open.json"]
-        with place() as (kw, _):                              # and a run pulls it like any saved state
-            conn = store.connect(":memory:")
-            with quiet():
-                S.pull(conn, api, db_path=":memory:", now=NOW, **kw)
-            assert all(rows(conn, t) == rows(filled(), t) for t in S.TABLES)
-            assert read(os.path.join(kw["site_dir"], "open.json")) == files["site/open.json"]
-        # a database that holds a state is refused, then replaced with --force
-        newer = filled()
-        store.save_review(newer, "acme", "acme talks", "step", {"title": "Acme talks"}, at=NOW + 5)
-        refused(lambda: S.migrate(api, reader=branch(newer).get), 3, "already holds a state")
-        assert saved_files(api) == saved
-        with quiet():
-            S.migrate(api, reader=branch(newer, site=False).get, force=True)
-        assert saved_files(api)["open_reviews.jsonl"] == branch(newer)["state/open_reviews.jsonl"]
-        assert blobs.get(api, "list:open")[1] == files["site/open.json"]          # no lists: the old ones stay
-        # files that do not match their manifest are refused, and nothing is sent
-        bad = dict(files, **{"state/open_runs.jsonl": files["state/open_runs.jsonl"] + b"{}\n"})
-        puts = api.calls["PUT"]
-        refused(lambda: S.migrate(FakeApi(), reader=bad.get), 2, "sha256")
-        refused(lambda: S.migrate(api, reader=bad.get, force=True), 2, "sha256")
-        assert api.calls["PUT"] == puts
-        # a state a run saved (not a migrate) may hold newer work than the branch: --force alone is refused
-        with place() as (kw, _):
-            conn = store.connect(":memory:")
-            with quiet():
-                S.pull(conn, api, db_path=":memory:", now=NOW, **kw)
-                store.save_review(conn, "acme", "acme later", "step", {"title": "Later"}, at=NOW + 9)
-                S.push(conn, api, by="mac", now=NOW + 10, **kw)
-            run_saved, puts = saved_files(api), api.calls["PUT"]
-            refused(lambda: S.migrate(api, reader=files.get, force=True), 3, "--replace-run-state")
-            assert saved_files(api) == run_saved and api.calls["PUT"] == puts
-            with quiet() as out:
-                S.migrate(api, reader=files.get, force=True, replace_run_state=True)
-            assert saved_files(api) == saved
-            assert f"made {json.loads(files['state/manifest.json'])['made_at']} by github" in out.getvalue()
-            assert blobs.versions(api, S.STATE)[0]["meta"]["by"] == "mac"           # the run's is kept, restorable
-    finally:
-        S.subprocess.run = real_run
-    # --dir reads a folder holding state/ and site/
-    with tempfile.TemporaryDirectory() as tmp:
-        for path, data in files.items():
-            os.makedirs(os.path.dirname(os.path.join(tmp, path)), exist_ok=True)
-            with open(os.path.join(tmp, path), "wb") as f:
-                f.write(data)
-        api = FakeApi()
-        with quiet():
-            S.migrate(api, from_dir=tmp)
-        assert saved_files(api) == saved and blobs.head(api, S.STATE)["meta"]["migrated_from"].startswith("dir ")
 
 
 def test_prune():

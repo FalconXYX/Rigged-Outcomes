@@ -53,14 +53,15 @@ TAIWAN_FALLBACK = ("If the results of any of the relevant 2026 Taiwanese local e
 
 @contextlib.contextmanager
 def fake_key(key=FAKE_KEY):
-    old = dict(ai._KEY)
-    ai._KEY.clear()
-    ai._KEY["key"] = key
+    old = os.environ.get("GEMINI_API_KEY")
+    os.environ["GEMINI_API_KEY"] = key
     try:
         yield
     finally:
-        ai._KEY.clear()
-        ai._KEY.update(old)
+        if old is None:
+            os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            os.environ["GEMINI_API_KEY"] = old
 
 
 def interaction(text, status="completed", model="gemini-3.5-flash-lite"):
@@ -570,25 +571,20 @@ def test_client_gives_up_and_never_leaks_the_key():
 
 def test_api_key_from_environment_or_env_file():
     old_env = os.environ.pop("GEMINI_API_KEY", None)
-    old_file, old_key = ai.ENV_FILE, dict(ai._KEY)
+    old_file = ai.ENV_FILE
     try:
-        ai._KEY.clear()
         with tempfile.TemporaryDirectory() as d:
             ai.ENV_FILE = os.path.join(d, ".env")
             with open(ai.ENV_FILE, "w") as f:
                 f.write("# comment\nOTHER=1\nGEMINI_API_KEY=\"from-file\"\n")
             assert ai.api_key() == "from-file"
-            ai._KEY.clear()
             os.environ["GEMINI_API_KEY"] = "from-env"
             assert ai.api_key() == "from-env"
-            ai._KEY.clear()
             del os.environ["GEMINI_API_KEY"]
             os.remove(ai.ENV_FILE)
             raises(ai.api_key, ai.GeminiError)
     finally:
         ai.ENV_FILE = old_file
-        ai._KEY.clear()
-        ai._KEY.update(old_key)
         if old_env is not None:
             os.environ["GEMINI_API_KEY"] = old_env
         else:

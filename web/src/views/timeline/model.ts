@@ -321,8 +321,6 @@ export function textWidth(s: string, font: string): number {
   return w;
 }
 
-export const clearTextCache = () => widthCache.clear();
-
 /**
  * Time ticks for a UTC scale, thinned so their (multi-scale) labels never
  * collide: ask d3 for ~one tick per `target` px, then keep every k-th.

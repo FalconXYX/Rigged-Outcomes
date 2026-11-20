@@ -1,5 +1,6 @@
 """
-What went wrong in a run of the daily job (.github/workflows/watchlist.yml), and whether the run fails for it.
+What went wrong in a run of the daily lists on a Mac (scripts/watchlist-mac.sh, the modules' commands), and
+whether the run fails for it.
 A run ends green unless a person must fix something:
 
   config   the setup: a secret or variable missing, the job token or the Gemini key refused, the saved state
@@ -18,16 +19,9 @@ or crashed, in JOB_DIR/job_run.json. An outside exception (what the services rai
 spent) becomes a recorded problem and exit 0, so the step's list keeps its last version and the other steps go
 on; anything else is printed with its traceback and recorded as a crash (exit 1). A step records its own
 problems with note() (threads too). The report (watchlist.sync push) puts this run's problems in its status and
-summary, and the job's last step fails the run only for a config or crash problem, one clear message each (the
-::error:: lines come from it alone; a step logs its own and annotates only the warnings):
-
-    python3 -m watchlist.problems verdict --started-at EPOCH [--outcome STEP=OUTCOME ...] [--broken STEP ...]
-
---broken names a step that ran no guarded Python and found the fault in this repository (the install, with PyPI
-answering): a crash, not an outside problem. Outside a guarded step (a test, a function called by hand) note()
-only logs. job_run.json keeps KEEP_DAYS of problems (it lasts between runs on the Mac).
+summary; a config or crash problem makes the run's status failure. Outside a guarded step (a test, a function
+called by hand) note() only logs. job_run.json keeps KEEP_DAYS of problems (it lasts between runs on the Mac).
 """
-import argparse
 import json
 import os
 import signal
@@ -45,7 +39,7 @@ SUMMARY_CHARS = 500               # the report's summary (the API keeps this man
 KEEP_DAYS = 7                     # problems older than this leave job_run.json when it is saved
 STATUSES = ("success", "partial", "failure")
 # the job's steps, as the workflow names them (its step ids) and as a person reads them
-LABELS = {"install": "installing the Python packages", "preflight": "the setup check",
+LABELS = {"install": "installing the Python packages",
           "pull": "restoring the state", "work": "fetching the work",
           "decide": "applying the decisions", "closed": "the closed list", "open": "the open list",
           "save": "saving the state", "add": "adding the markets", "report": "the report"}
@@ -108,20 +102,12 @@ def _one_line(text, n=MESSAGE_CHARS):
     return s if len(s) <= n else s[:n - 1].rstrip() + "…"
 
 
-def annotate(kind, message):
-    """A GitHub warning annotation for an outside problem, when running in Actions. A setup or code problem gets
-    its one ::error:: line from the verdict (the job's last step), not here."""
-    if kind == OUTSIDE and os.environ.get("GITHUB_ACTIONS"):
-        print(f"::warning::{message}", flush=True)
-
-
 def note(message, kind=OUTSIDE, step=None, echo=True):
-    """Record one of this run's problems (and log it, and annotate a warning in Actions). Outside a guarded step
+    """Record one of this run's problems (and log it). Outside a guarded step
     it is only logged. Safe from the step's threads. Returns the message as recorded."""
     msg = _one_line(message)
     if echo:
         log(f"  {'!' if kind == OUTSIDE else 'X'} {msg}")
-    annotate(kind, msg)
     step = step or _active["step"]
     if step is not None and _active["dir"] is not None:
         try:
@@ -281,7 +267,7 @@ def guard(step, fn, job_dir=None):
         _active.update(step=None, dir=None)
 
 
-# ── the run's problems, its status, the verdict ─────────────────────────────
+# ── the run's problems and its status ────────────────────────────────────────
 
 def collect(started_at, outcomes=None, job_dir=None, broken=()):
     """This run's problems ({step, kind, message}): the recorded ones, and one for each step whose outcome is
@@ -334,39 +320,6 @@ def summary_with(summary, problems, limit=SUMMARY_CHARS):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
-def step_summary(problems, path=None):
-    """The problems for the job's summary page ($GITHUB_STEP_SUMMARY)."""
-    path = path or os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        return
-    lines = ["", "#### Problems" if problems else "", ""]
-    for p in problems:
-        what = {OUTSIDE: "handled", CONFIG: "setup", CRASH: "code"}.get(p.get("kind"), p.get("kind"))
-        lines.append(f"- **{what}** ({label(p.get('step'))}): {p['message']}")
-    if problems:
-        with open(path, "a") as f:
-            f.write("\n".join(lines) + "\n")
-
-
-def verdict(started_at, outcomes, job_dir=None, broken=()):
-    """(exit code, problems): 1 when a person must fix something (each such problem printed as one ::error::),
-    0 otherwise."""
-    problems = collect(started_at, outcomes, job_dir, broken)
-    bad = red(problems)
-    for p in problems:
-        log(f"  {'X' if p in bad else '!'} {label(p.get('step'))}: {p['message']}")
-    for p in bad:
-        print(f"::error::{p['message']}", flush=True)
-    if bad:
-        log(f"The run failed: {len(bad)} problem(s) a person must fix (the setup or the code), "
-            f"{len(problems) - len(bad)} handled")
-    elif problems:
-        log(f"The run is green: {len(problems)} problem(s) outside the code were handled (see above and the report)")
-    else:
-        log("The run is green: no problem")
-    return (1 if bad else 0), problems
-
-
 def parse_outcomes(pairs):
     out = {}
     for pair in pairs or []:
@@ -374,24 +327,3 @@ def parse_outcomes(pairs):
         if step:
             out[step.strip()] = outcome.strip()
     return out
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="The daily job's problems: fail the run only when a person must "
-                                             "fix something.")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("verdict")
-    p.add_argument("--started-at", type=int, required=True)
-    p.add_argument("--outcome", action="append", default=[], metavar="STEP=OUTCOME",
-                   help="a step's outcome (success, failure, skipped, cancelled), by the workflow's step id")
-    p.add_argument("--broken", action="append", default=[], metavar="STEP",
-                   help="an unguarded step that found the fault in this repository (a crash, not an outage)")
-    args = ap.parse_args(argv)
-    code, problems = verdict(args.started_at, parse_outcomes(args.outcome),
-                             broken=[b.strip() for b in args.broken if b.strip()])
-    step_summary(problems)
-    return code
-
-
-if __name__ == "__main__":
-    sys.exit(main())

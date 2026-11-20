@@ -1,21 +1,19 @@
 import { Fragment, useEffect, useMemo, useRef, type CSSProperties, type MouseEvent } from "react";
 import type { ClosedData, ClosedDay, ClosedPick } from "../types";
-import { loadClosed, loadIndex, loadOpen, useAsync } from "../lib/data";
-import { fmtDay, fmtInt, fmtUSD } from "../lib/format";
+import { bareSlug, useClosed, useIndex, useOpen } from "../lib/data";
+import { calDate, fmtCalDay, fmtInt, fmtLongDate, fmtUSD, fmtWeekDay, torontoClock, torontoDay } from "../lib/format";
 import { closeSheet, setQuery, useQuery } from "../lib/router";
 import { ErrorNote, Loading, Select } from "../components/ui";
 import { OpenNow, isOpenKey } from "./watchlist/OpenNow";
 import { AddToMain, CardAdd } from "./watchlist/controls";
 import {
   Chevron,
-  DAY_MS,
   MoreButton,
   NewsList,
   Panel,
   colsFor,
   dateOnly,
-  dayOf,
-  hhmm,
+  daysBetween,
   ms,
   openPanel,
   panelId,
@@ -26,19 +24,19 @@ import "./watchlist.css";
 // The watchlist. On top, "Open now" (watchlist/OpenNow.tsx): open markets
 // where a few people will know the answer first and the news shows them
 // moving toward it. Below, the recently closed ones (watchlist/upsets.py):
-// one day at a time, that day's 3-5 markets worth a look as possible insider
+// one day at a time, that day's 3 markets worth a look as possible insider
 // cases, each a card under a rule in its verdict's colour. "Details" on a
 // card in either section opens the rest in a panel of its own under the
 // card's row (watchlist/shared.tsx), as a history step, so Back closes it. On
 // each card, beside "Details", and again in its panel, a visitor can add a
 // closed market to the main page, or put an open one on the site's watchlist
 // (watchlist/controls.tsx, through the site's API). Older days are a pick away.
-// `?day=` and `?open=` hold the state (one card open on the whole page). All times are UTC.
+// `?day=` and `?open=` hold the state (one card open on the whole page). Days
+// and times are Toronto's (the backend counts each Toronto day).
 
 const shortId = (p: ClosedPick) => p.condition_id.slice(0, 12);
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-const dayShort = (day: string) =>
-  new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+const dayShort = (day: string) => fmtWeekDay(calDate(day));
 
 /** The group's title, when it says something the question doesn't (ladder placeholders "… by...?", "by ___?" never do). */
 const groupOf = (p: ClosedPick) =>
@@ -54,8 +52,7 @@ const groupOf = (p: ClosedPick) =>
 const CLOCK = /,?\s+(?:(?:as\s+)?(?:first\s+)?(?:reported|published)(?:\s+in\s+headlines(?:\s+published)?)?\s+)?at\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:Z|UTC)\b/g;
 const STAMP_IN_BRACKETS = /\s*\((?:[^()]*?,\s*)?\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:Z|\+00:00)?\)/g;
 const STAMP = /\b(\d{4}-\d\d-\d\d)[T ]\d\d:\d\d(?::\d\d)?(?:\.\d+)?(?:Z|\+00:00)?/g;
-const longDate = (day: string) =>
-  new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+const longDate = (day: string) => fmtLongDate(calDate(day));
 const clean = (s: string) =>
   s.replace(STAMP_IN_BRACKETS, "").replace(CLOCK, "").replace(STAMP, (_, day: string) => longDate(day));
 
@@ -72,7 +69,7 @@ function broke(p: ClosedPick): string | null {
   if (!p.public_at) return null;
   const tail = "the market closed";
   if (dateOnly(p.public_at)) {
-    const d = Math.round((dayOf(ms(p.closed)) - dayOf(ms(p.public_at))) / DAY_MS);
+    const d = daysBetween(p.closed, p.public_at);
     if (d === 0) return `news broke the same day ${tail}`;
     if (Math.abs(d) === 1) return `news broke the day ${d > 0 ? "before" : "after"} ${tail}`;
     return `news broke ${plural(Math.abs(d), "day")} ${d > 0 ? "before" : "after"} ${tail}`;
@@ -268,7 +265,7 @@ function Details({ p, onMain, onClose }: { p: ClosedPick; onMain: string | null;
               {p.who_knows && <p className="wl-panel-text">{p.who_knows}</p>}
               {p.on_open_list_from && (
                 <p className="cl-onlist">
-                  On the open list from {fmtDay(new Date(`${p.on_open_list_from}T00:00:00Z`))}
+                  On the open list from {fmtCalDay(p.on_open_list_from)}
                 </p>
               )}
             </section>
@@ -357,7 +354,7 @@ function DayPicker({ data, day }: { data: ClosedData; day: ClosedDay }) {
     go(days[s === "before" ? i + 1 : i - 1]);
   };
   return (
-    <div className="cl-daypick" role="group" aria-label="Day (UTC)">
+    <div className="cl-daypick" role="group" aria-label="Day">
       <button
         type="button"
         ref={before}
@@ -372,11 +369,11 @@ function DayPicker({ data, day }: { data: ClosedData; day: ClosedDay }) {
       </button>
       <Select
         value={day.day}
-        label="Day (UTC)"
+        label="Day"
         options={days.map((d) => {
           const so = cutOf(data, d).short;
           // the chosen day shows just its date (the header has its counts); the others say if they hold a potential case
-          if (d === day) return { value: d.day, label: `${dayShort(d.day)} (UTC${so && `, ${so}`})` };
+          if (d === day) return { value: d.day, label: `${dayShort(d.day)}${so && ` (${so})`}` };
           const n = d.picks.filter((p) => p.verdict === "potential case").length;
           return { value: d.day, label: `${dayShort(d.day)}${so && ` (${so})`}${n ? ` · ${plural(n, "potential case")}` : ""}` };
         })}
@@ -400,12 +397,12 @@ function HowPicked({ data }: { data: ClosedData }) {
         <Chevron />
       </summary>
       <p>
-        Markets that closed on this UTC day with at least {fmtUSD(r.min_volume)} traded, leaving out games, prices, weather,
-        elections, public counts, mention markets and releases kept secret until a set time. A model reads each one with the
-        news about it, never prices or trades, and answers three questions: could a small group know first, was the outcome a
-        surprise, and was it kept quiet until it came out. Every potential or weaker case is shown, up to {fmtInt(r.per_day)},
-        topped up to {fmtInt(r.at_least)} with the closest of the rest, and a market that was on the Open now list is always
-        shown.
+        Markets that closed on this day (Toronto time) with at least {fmtUSD(r.min_volume)} traded, leaving out games,
+        prices, weather, elections, public counts, mention markets and releases kept secret until a set time. A model reads
+        each one with the news about it, never prices or trades, and answers three questions: could a small group know
+        first, was the outcome a surprise, and was it kept quiet until it came out. Each day shows {fmtInt(r.per_day)}: a
+        market added to the main page from the list or on the site's watchlist first, then the potential cases, the weaker
+        ones and the closest of the rest.
       </p>
     </details>
   );
@@ -428,7 +425,7 @@ const ClosedTitle = () => (
 /**
  * A day counted before it was over stops at the run that counted it: its
  * counted_at (in a file from before days carried one, the file's
- * generated_at) falls on the day itself. While that UTC day lasts its counts
+ * generated_at) falls on the day itself. While that day lasts in Toronto its counts
  * are "so far"; once it is over they say where they stop, "by 04:17" (the
  * run's time), so a partial count never reads as a whole day, the file's
  * last day or an older one whose next run failed. `short` goes in the day
@@ -439,10 +436,10 @@ type Cut = { short: string; long: string };
 function cutOf(data: ClosedData, d: ClosedDay): Cut {
   const run = d.counted_at ?? data.generated_at;
   // counted on a later day than its own: the whole day
-  if (!run || run.slice(0, 10) !== d.day) return { short: "", long: "" };
-  if (d.day === new Date().toISOString().slice(0, 10)) return { short: "so far", long: " so far" };
-  const by = hhmm(run);
-  return { short: `by ${by}`, long: ` by ${by} UTC` };
+  if (!run || torontoDay(run) !== d.day) return { short: "", long: "" };
+  if (d.day === torontoDay()) return { short: "so far", long: " so far" };
+  const by = torontoClock(run);
+  return { short: `by ${by}`, long: ` by ${by} ET` };
 }
 
 /**
@@ -495,7 +492,7 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs
             <li>
               <b>{fmtInt(day.closed_markets)}</b> markets closed{dayCut}
             </li>
-            <li>Times UTC</li>
+            <li>Times ET</li>
           </ul>
         </div>
         <DayPicker data={data} day={day} />
@@ -515,9 +512,7 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs
           })}
         </div>
       ) : (
-        <p className="cl-empty">
-          {day.candidates > 0 ? "The markets left on this day could not be checked yet." : "Nothing left to check on this day."}
-        </p>
+        <p className="cl-empty">No markets made the list on this day.</p>
       )}
 
       <HowPicked data={data} />
@@ -526,12 +521,15 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs
 }
 
 export function WatchlistPage() {
-  const data = useAsync(loadClosed, "closed");
-  const open = useAsync(loadOpen, "open");
-  const index = useAsync(loadIndex, "index");
-  // markets already on the main page, by slug (index.json keeps the slug)
+  // the lists and the index, each kept up to date while the page is open (lib/data.ts): a newly published day, an
+  // owner's decision or a market added to the main page shows without a reload
+  const data = useClosed();
+  const open = useOpen();
+  const index = useIndex();
+  // markets already on the main page, by slug (index.json keeps the slug); a market added while the page is open
+  // joins them once the site serves it
   const mainSlugs = useMemo(
-    () => new Map((index.data?.markets ?? []).map((m) => [m.slug.split("/").pop()!.split("#")[0], m.name] as const)),
+    () => new Map((index.data?.markets ?? []).map((m) => [bareSlug(m.slug), m.name] as const)),
     [index.data],
   );
   // with no open list, its placeholder's ghosts take the closed cards' columns, so the two rows line up

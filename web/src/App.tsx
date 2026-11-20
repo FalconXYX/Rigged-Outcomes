@@ -1,6 +1,6 @@
 import { Component, Suspense, lazy, useEffect, useLayoutEffect, useRef, useState, type ComponentType, type ErrorInfo, type ReactNode } from "react";
 import { href, redirectOldPaths, useRoute } from "./lib/router";
-import { loadIndex, useAsync } from "./lib/data";
+import { useIndex } from "./lib/data";
 import { SiteHeader } from "./components/SiteHeader";
 import { SiteFooter } from "./components/SiteFooter";
 import { ErrorNote, Loading } from "./components/ui";
@@ -119,8 +119,9 @@ class ViewBoundary extends Component<{ resetKey: string; children: ReactNode }, 
 
 export default function App() {
   const route = useRoute();
-  // Loaded once for the whole session: home grid, market header, titles.
-  const index = useAsync(loadIndex, "index");
+  // Loaded once for the whole session (newer once a market added from the Watchlist is up): home grid,
+  // market header, titles.
+  const index = useIndex();
 
   const page = route.page;
   const name = route.page === "market" ? route.name : null;

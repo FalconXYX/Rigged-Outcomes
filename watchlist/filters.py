@@ -336,3 +336,35 @@ def open_pool(events, now=None, min_volume=MIN_VOLUME, horizon_days=HORIZON_DAYS
             groups.append({"event_id": str(e.get("id")), "event": e,
                            "markets": sorted(kept, key=lambda m: -volume(m))})
     return groups, counts
+
+
+# What the scan keeps of a Gamma /markets object (the rest, image URLs,
+# fee schedules, CLOB fields, is ~70 % of the payload and unused). The
+# description is the rules text the AI labeller reads.
+MARKET_KEYS = ("id", "conditionId", "question", "slug", "description", "resolutionSource", "outcomes",
+               "outcomePrices", "volume", "volumeNum", "endDate", "startDate", "createdAt", "updatedAt",
+               "closedTime", "umaResolutionStatus", "negRisk", "negRiskMarketID", "closed", "active", "archived",
+               "groupItemTitle", "gameId", "sportsMarketType", "tags")
+EVENT_KEYS = ("id", "ticker", "slug", "title", "seriesSlug", "series", "tags", "sport", "gameId", "negRisk",
+              "startDate", "endDate", "creationDate")
+
+
+def slim_market(m):
+    """The fields of a Gamma market (and of its events[0]) the scan, the
+    method, the AI labeller and the store read; tags and series cut down
+    to id/slug/label."""
+    out = {k: m[k] for k in MARKET_KEYS if k in m}
+    if isinstance(out.get("tags"), list):
+        out["tags"] = [{k: t.get(k) for k in ("id", "slug", "label")} if isinstance(t, dict) else t
+                       for t in out["tags"]]
+    ev = event_of(m)
+    if ev:
+        e = {k: ev[k] for k in EVENT_KEYS if k in ev}
+        if isinstance(e.get("series"), list):
+            e["series"] = [{k: s.get(k) for k in ("id", "slug", "title", "recurrence")} if isinstance(s, dict) else s
+                           for s in e["series"]]
+        if isinstance(e.get("tags"), list):
+            e["tags"] = [{k: t.get(k) for k in ("id", "slug", "label")} if isinstance(t, dict) else t
+                         for t in e["tags"]]
+        out["events"] = [e]
+    return out

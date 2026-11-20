@@ -11,8 +11,11 @@ election keyword, markets settled by the same news, and the day's list
 counted once, checked or under one reason. And the approved factual changes
 (2026-11-13): embargoed releases dropped before any model call, a company's
 year-end list and a scripted speech's words checked, the "On the open list
-from" link to the open list, --since, the site's watchlist (--watched), and
-partial days (counted_at; one left partial is counted again the next run).
+from" link to the open list, --since, the site's watchlist (--watched),
+partial days (counted_at; one left partial is counted again the next run),
+and what a count keeps of a day's last version: a pick whose market could not
+be checked again stays as it was, and a market sent to the main page never
+leaves its day.
 """
 import json
 import os
@@ -109,7 +112,7 @@ def test_choose_at_least_three():
     shown = up.choose([p("not a case", "no"), p("weak"), p("not a case", "yes")])   # a short day is topped up to 3
     assert [x["verdict"] for x in shown] == ["weak", "not a case", "not a case"] and shown[1]["surprise"] == "yes"
     many = [p("potential case")] * 7
-    assert len(up.choose(many)) == 5
+    assert len(up.choose(many)) == 3                                      # 3 a day, never more
     assert up.choose([p("not a case")]) == [p("not a case")]
 
 
@@ -225,14 +228,14 @@ def test_on_the_open_list_from():
     assert up.open_idents([huang]) == ["e9", "ev-e9", "m-h"]
 
     def checks(ms, conn, client=None):
-        return {m["conditionId"]: {"verdict": "not a case" if m is huang else "potential case", "what_happened": "",
+        return {m["conditionId"]: {"verdict": "potential case" if m is huang else "weak", "what_happened": "",
                                    "surprise": "yes", "who_knew_first": "the board", "public_signals": "none",
                                    "reason": ""} for m in ms}
     with _Patch(ai__label_markets=lambda kept, conn=None, **k: {}, judge__check_markets=checks):
         d = up.run_day(to_epoch("2026-11-12T00:00:00Z"), [huang] + others, conn)
     shown = {p["condition_id"]: p for p in d["picks"]}
-    # 6 potential cases fill the 5 places, and the market that was on an open card is shown anyway, last
-    assert len(shown) == up.PER_DAY + 1 and d["picks"][-1]["condition_id"] == "h"
+    # the potential case first, then weak ones: 3 places
+    assert len(shown) == up.PER_DAY and d["picks"][0]["condition_id"] == "h"
     assert shown["h"]["on_open_list_from"] == "2026-11-09"                 # the first day it was listed
     assert all("on_open_list_from" not in p for k, p in shown.items() if k != "h")
     # a market counted under another (a later date, the same news) carries the link too
@@ -240,14 +243,19 @@ def test_on_the_open_list_from():
     assert store.open_listed_since(conn, up.open_idents(others)) is None
 
 
-def test_choose_keeps_open_listed_picks():
-    def p(v, s="unknown", sig="unknown", since=None):
-        out = {"verdict": v, "surprise": s, "public_signals": sig}
-        return dict(out, on_open_list_from=since) if since else out
-    listed = p("not a case", "no", since="2026-11-09")
-    shown = up.choose([p("weak", "yes"), p("not a case", "yes"), p("not a case", "somewhat"), p("not a case"), listed])
-    assert shown[-1] is listed and len(shown) == 4
-    assert up.choose([listed, p("weak")]) == [p("weak"), listed]           # sorted as usual
+def test_choose_three_sent_and_watched_first():
+    # exactly 3 a day, never more: a market sent to the main page from the day's list first, then a watched one,
+    # then the verdicts' order; a short day is topped up
+    def p(cid, v, s="unknown", sig="unknown", **kw):
+        return dict({"condition_id": cid, "verdict": v, "surprise": s, "public_signals": sig}, **kw)
+    picks = [p("a", "potential case", "yes", "none"), p("b", "potential case", "somewhat"), p("c", "weak", "yes"),
+             p("w", "not a case", "no", watched=True), p("s", "not a case", "no"),
+             p("o", "not a case", "yes", on_open_list_from="2026-11-09")]
+    assert [x["condition_id"] for x in up.choose(picks, requested=frozenset({"s"}))] == ["s", "w", "a"]
+    assert [x["condition_id"] for x in up.choose(picks)] == ["w", "a", "b"]       # no extra place for an open card
+    more = picks + [p(f"x{i}", "potential case", "yes", "none") for i in range(9)]
+    assert len(up.choose(more, requested=frozenset({"a", "b", "c", "s"}))) == 3
+    assert [x["condition_id"] for x in up.choose([p("n", "not a case")])] == ["n"]
 
 
 def test_days_since():
@@ -322,9 +330,9 @@ def test_partial_days_say_so_and_are_finished_later():
     seen = []
     saved = (up.net.install, up.net.closed_markets, up.run_day)
 
-    def run_day(day_ts, markets, conn, client=None, watched=None):
-        seen.append(up.iso(day_ts)[:10])
-        return {"day": up.iso(day_ts)[:10], "closed_markets": 0, "candidates": 0, "checked": 0, "verdicts": {},
+    def run_day(day, markets, conn, client=None, watched=None, **kw):
+        seen.append(day)
+        return {"day": day, "closed_markets": 0, "candidates": 0, "checked": 0, "verdicts": {},
                 "dropped": {}, "picks": []}
     up.net.install, up.net.closed_markets, up.run_day = (lambda: None), (lambda since, now, min_volume=0: []), run_day
     try:
@@ -340,20 +348,20 @@ def test_partial_days_say_so_and_are_finished_later():
             assert not up.partial(day("2026-11-13"), "2026-11-14T06:09:00+00:00")
             assert not up.partial(day("2026-11-13")) and not up.partial({"day": "x", "counted_at": "2026-11-14"})
             # Nov 15's run fails; Nov 16's run, with --days 2, counts Nov 14 again too, oldest first
-            doc = up.build(days=2, now=to_epoch("2026-11-16T04:20:00Z"), conn=store.connect(":memory:"), out_path=out)
+            doc = up.build(days=2, now=to_epoch("2026-11-16T09:20:00Z"), conn=store.connect(":memory:"), out_path=out)
             assert seen == ["2026-11-14", "2026-11-15", "2026-11-16"], seen
             got = {d["day"]: d for d in doc["days"]}
-            assert all(got[d]["counted_at"] == "2026-11-16T04:20:00+00:00" for d in seen)
+            assert all(got[d]["counted_at"] == "2026-11-16T04:20:00-05:00" for d in seen)
             assert "counted_at" not in got["2026-11-13"] and not up.partial(got["2026-11-13"], doc["generated_at"])
             assert up.partial(got["2026-11-16"]) and not up.partial(got["2026-11-15"])
             # the next day's run is back to the last 2 days; a partial day older than the kept days is left
             seen.clear()
-            up.build(days=2, now=to_epoch("2026-11-17T04:20:00Z"), conn=store.connect(":memory:"), out_path=out)
+            up.build(days=2, now=to_epoch("2026-11-17T09:20:00Z"), conn=store.connect(":memory:"), out_path=out)
             assert seen == ["2026-11-16", "2026-11-17"], seen
             # a partial day older than the kept days is left; the days no run counted since are counted, within
             # the last week (CATCH_UP_DAYS)
-            assert up.unfinished_since({"2026-10-01": day("2026-10-01")}, "2026-10-01T05:00:00+00:00",
-                                       to_epoch("2026-11-17T00:00:00Z"), 14) == to_epoch("2026-11-10T00:00:00Z")
+            assert up.unfinished_since({"2026-10-01": day("2026-10-01")}, "2026-10-01T10:00:00+00:00",
+                                       "2026-11-17", 14) == "2026-11-10"
     finally:
         up.net.install, up.net.closed_markets, up.run_day = saved
 
@@ -364,9 +372,9 @@ def test_days_with_markets_not_checked_or_never_counted_are_counted_again():
     seen = []
     saved = (up.net.install, up.net.closed_markets, up.run_day)
 
-    def run_day(day_ts, markets, conn, client=None, watched=None):
-        seen.append(up.iso(day_ts)[:10])
-        return {"day": up.iso(day_ts)[:10], "closed_markets": 0, "candidates": 0, "checked": 0, "verdicts": {},
+    def run_day(day, markets, conn, client=None, watched=None, **kw):
+        seen.append(day)
+        return {"day": day, "closed_markets": 0, "candidates": 0, "checked": 0, "verdicts": {},
                 "dropped": {}, "picks": []}
     up.net.install, up.net.closed_markets, up.run_day = (lambda: None), (lambda since, now, min_volume=0: []), run_day
 
@@ -377,28 +385,148 @@ def test_days_with_markets_not_checked_or_never_counted_are_counted_again():
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "closed.json")
             with open(out, "w") as f:
-                json.dump({"generated_at": "2026-11-16T04:20:00+00:00",
-                           "days": [day("2026-11-16", "2026-11-16T04:20:00+00:00"),
-                                    day("2026-11-15", "2026-11-16T04:20:00+00:00", unchecked=9),
-                                    day("2026-11-14", "2026-11-15T04:20:00+00:00")]}, f)
+                json.dump({"generated_at": "2026-11-16T09:20:00+00:00",
+                           "days": [day("2026-11-16", "2026-11-16T09:20:00+00:00"),
+                                    day("2026-11-15", "2026-11-16T09:20:00+00:00", unchecked=9),
+                                    day("2026-11-14", "2026-11-15T09:20:00+00:00")]}, f)
             assert up.unchecked(day("2026-11-15", "x", unchecked=9)) == 9 and up.unchecked(day("x", "x")) == 0
-            up.build(days=2, now=to_epoch("2026-11-17T04:20:00Z"), conn=store.connect(":memory:"), out_path=out)
+            up.build(days=2, now=to_epoch("2026-11-17T09:20:00Z"), conn=store.connect(":memory:"), out_path=out)
             assert seen == ["2026-11-15", "2026-11-16", "2026-11-17"], seen
             # a week later it is left as it is
-            old = {"2026-11-01": day("2026-11-01", "2026-11-02T04:20:00+00:00", unchecked=3)}
-            old.update({f"2026-11-{n:02d}": day(f"2026-11-{n:02d}", f"2026-11-{n + 1:02d}T04:20:00+00:00")
+            old = {"2026-11-01": day("2026-11-01", "2026-11-02T09:20:00+00:00", unchecked=3)}
+            old.update({f"2026-11-{n:02d}": day(f"2026-11-{n:02d}", f"2026-11-{n + 1:02d}T09:20:00+00:00")
                         for n in range(2, 17)})
-            assert up.unfinished_since(old, None, to_epoch("2026-11-17T00:00:00Z"), 14) is None
+            assert up.unfinished_since(old, None, "2026-11-17", 14) is None
             # a catch-up its budget stopped part way: Nov 10 and 11 counted, Nov 12 to 15 never were (and Nov 16 a
             # run counted later): the next run starts from Nov 12
-            gaps = {d: day(d, "2026-11-16T05:00:00+00:00") for d in ("2026-11-10", "2026-11-11", "2026-11-16")}
-            assert up.unfinished_since(gaps, None, to_epoch("2026-11-17T00:00:00Z"), 14) == \
-                to_epoch("2026-11-12T00:00:00Z")
+            gaps = {d: day(d, "2026-11-16T10:00:00+00:00") for d in ("2026-11-10", "2026-11-11", "2026-11-16")}
+            assert up.unfinished_since(gaps, None, "2026-11-17", 14) == "2026-11-12"
             # a first file (two days) has no gap before it
-            first = {d: day(d, "2026-11-17T04:20:00+00:00") for d in ("2026-11-16", "2026-11-17")}
-            assert up.unfinished_since(first, None, to_epoch("2026-11-17T00:00:00Z"), 14) is None
+            first = {d: day(d, "2026-11-17T09:20:00+00:00") for d in ("2026-11-16", "2026-11-17")}
+            assert up.unfinished_since(first, None, "2026-11-17", 14) is None
     finally:
         up.net.install, up.net.closed_markets, up.run_day = saved
+
+
+
+def _check(verdict, said, surprise="yes"):
+    return {"verdict": verdict, "what_happened": said, "surprise": surprise, "who_knew_first": "the board",
+            "public_signals": "none", "reason": said}
+
+
+def test_a_pick_whose_market_could_not_be_checked_again_stays_as_it_was():
+    # the day's last version showed five picks; this count's model is busy for some of its markets. Only a check
+    # that went through changes or removes a pick: the others stay as they were, verdict and words
+    conn = store.connect(":memory:")
+    busy = _market("b", "Will Project Orion ship by November 12, 2026?", "Project Orion ships", "eb")
+    again = _market("a", "Will Project Vega ship by November 12, 2026?", "Project Vega ships", "ea")
+    gone = _market("g", "Will Project Lyra ship by November 12, 2026?", "Project Lyra ships", "eg")
+    fresh = _market("n", "Will Project Hydra ship by November 12, 2026?", "Project Hydra ships", "en")
+    # a date ladder whose shorter date closed after the last count: the old pick (its later date) is now counted
+    # under a market whose check failed (the harness's "add during the add step"), and in another ladder under one
+    # whose check went through
+    under_busy = _ladder("u", "eu", "Project Cygnus launched")
+    under_ok = _ladder("w", "ew", "Project Draco launched")
+    old = {"day": "2026-11-12", "picks": [up.pick(m, None, [], _check("weak", f"last count: {m['question']}"))
+                                          for m in (busy, again, gone, under_busy[1], under_ok[1])]}
+    new = {"a": _check("potential case", "this count: Vega shipped"), "g": _check("not a case", "this count: no"),
+           "n": _check("not a case", "this count: Hydra shipped"), "w0": _check("not a case", "this count: Draco")}
+
+    def checks(ms, conn, client=None):                    # the model did not answer for b and u0
+        return {m["conditionId"]: new[m["conditionId"]] for m in ms if m["conditionId"] in new}
+    with _Patch(ai__label_markets=lambda kept, conn=None, **k: {}, judge__check_markets=checks):
+        d = up.run_day(to_epoch("2026-11-12T00:00:00Z"), [busy, again, gone, fresh] + under_busy + under_ok, conn,
+                       before=old)
+    shown = {p["condition_id"]: p for p in d["picks"]}
+    # the kept ones compete for the day's 3 with the new checks: the potential case, then the two weak ones kept
+    assert set(shown) == {"a", "b", "u1"}, sorted(shown)
+    assert shown["b"] == old["picks"][0] and shown["u1"] == old["picks"][3]          # as they were, all of them
+    assert shown["a"]["verdict"] == "potential case" and shown["a"]["what_happened"] == "this count: Vega shipped"
+    assert "g" not in shown and "w1" not in shown           # a check that went through removed them
+    assert d["dropped"]["could not be checked"] == 2 and d["checked"] == 4
+    assert d["picks"][0]["verdict"] == "potential case"
+    # with no last version (a day's first count) nothing is kept
+    with _Patch(ai__label_markets=lambda kept, conn=None, **k: {}, judge__check_markets=checks):
+        d = up.run_day(to_epoch("2026-11-12T00:00:00Z"), [busy, again, gone, fresh] + under_busy + under_ok, conn)
+    got = {p["condition_id"] for p in d["picks"]}
+    assert len(got) == 3 and "a" in got and not got & {"b", "u0", "u1"}, got
+    # a pick from an older vocabulary stays too, ranked last
+    odd = dict(old["picks"][0], verdict="maybe")
+    assert up.kept_picks({"picks": [odd]}, [], set()) == [odd]
+    assert sorted([odd, shown["a"]], key=up._rank)[-1] is odd
+
+
+def test_markets_sent_to_the_main_page_never_leave_their_day():
+    # the daily run's work.json: the markets waiting to be added ("requests", approved) and the ones added
+    # ("added"). Their picks stay on their day whatever the count finds; any other pick a check removes goes
+    conn = store.connect(":memory:")
+    top = [_market(f"p{i}", f"Will Project{i} Alpha ship by November 12, 2026?", f"Project{i} Alpha ships", f"ep{i}")
+           for i in range(3)]
+    approved = _market("0xaa1", "Will Project Orion ship by November 12, 2026?", "Project Orion ships", "eb")
+    added = _market("0xaa2", "Will Project Vega ship by November 12, 2026?", "Project Vega ships", "ea")
+    plain = _market("0xaa3", "Will Project Lyra ship by November 12, 2026?", "Project Lyra ships", "eg")
+    ladder = _ladder("l", "el", "Project Draco launched")          # l1, added, now counted under l0
+    markets = top + [approved, added, plain] + ladder
+    old_picks = [up.pick(m, None, [], _check("weak", f"last count: {m['question']}"))
+                 for m in (approved, added, plain, ladder[1])]
+    verdicts = {"p0": "potential case", "p1": "potential case", "p2": "potential case", "l0": "weak"}
+
+    def checks(ms, conn, client=None):                      # every check goes through this time
+        return {m["conditionId"]: _check(verdicts.get(m["conditionId"], "not a case"), f"this count: {m['question']}")
+                for m in ms}
+    saved = (up.net.install, up.net.closed_markets)
+    up.net.install, up.net.closed_markets = (lambda: None), (lambda since, now, min_volume=0: list(markets))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "work.json")
+            with open(work, "w") as f:
+                json.dump({"decisions": [], "watched": [],
+                           "requests": [{"condition_id": "0xAA1", "status": "approved", "day": "2026-11-12"}],
+                           "added": [{"condition_id": "0xaa2", "day": "2026-11-12"},
+                                     {"condition_id": "l1", "day": "2026-11-12"}, {"day": "2026-11-12"}]}, f)
+            requested = up.load_requested(work)
+            assert requested == {"0xaa1", "0xaa2", "l1"}
+            assert up.load_requested(os.path.join(tmp, "missing.json")) == frozenset()
+            out = os.path.join(tmp, "closed.json")
+            with open(out, "w") as f:                       # Nov 12 counted before it was over
+                json.dump({"generated_at": "2026-11-12T23:00:00+00:00",
+                           "days": [{"day": "2026-11-12", "counted_at": "2026-11-12T23:00:00+00:00", "closed_markets": 9,
+                                     "candidates": 4, "checked": 4, "verdicts": {"weak": 4}, "dropped": {},
+                                     "picks": old_picks}]}, f)
+            with _Patch(ai__label_markets=lambda kept, conn=None, **k: {}, judge__check_markets=checks):
+                doc = up.build(days=1, now=to_epoch("2026-11-13T09:20:00Z"), conn=conn, out_path=out,
+                               requested=requested)
+                got = {d["day"]: d for d in doc["days"]}["2026-11-12"]
+                shown = {p["condition_id"]: p for p in got["picks"]}
+                # the 3 sent to the main page take the day's 3 places, ahead of the potential cases
+                assert set(shown) == {"0xaa1", "0xaa2", "l1"}, sorted(shown)
+                # checked again: the new verdict and words, still on the list; counted under another: as it was
+                assert shown["0xaa1"]["verdict"] == "not a case" and shown["0xaa1"]["what_happened"].startswith("this count")
+                assert shown["0xaa2"]["verdict"] == "not a case"
+                assert shown["l1"] == old_picks[3]
+                assert "0xaa3" not in shown                 # not sent: the check that went through removed it
+                with open(out) as f:
+                    assert {p["condition_id"] for p in json.load(f)["days"][1]["picks"]} == set(shown)
+                # with nothing sent to the main page, the same count leaves them out
+                with open(out, "w") as f:
+                    json.dump({"generated_at": "2026-11-12T23:00:00+00:00",
+                               "days": [{"day": "2026-11-12", "counted_at": "2026-11-12T23:00:00+00:00",
+                                         "closed_markets": 9, "candidates": 4, "checked": 4, "verdicts": {},
+                                         "dropped": {}, "picks": old_picks}]}, f)
+                doc = up.build(days=1, now=to_epoch("2026-11-13T09:20:00Z"), conn=conn, out_path=out)
+                assert {p["condition_id"] for p in doc["days"][1]["picks"]} == {"p0", "p1", "p2"}
+    finally:
+        up.net.install, up.net.closed_markets = saved
+
+
+def test_a_day_published_with_more_than_three_keeps_its_first_three():
+    # a day an older count published with extra picks: the list never shows more than 3 a day
+    days = {"2026-11-18": {"day": "2026-11-18", "checked": 5, "picks": [{"condition_id": f"0x{i}"} for i in range(5)]},
+            "2026-11-19": {"day": "2026-11-19", "checked": 2, "picks": [{"condition_id": "0xa"}, {"condition_id": "0xb"}]}}
+    doc = up.make_doc(days, to_epoch("2026-11-19T15:00:00Z"))
+    got = {d["day"]: [p["condition_id"] for p in d["picks"]] for d in doc["days"]}
+    assert got == {"2026-11-18": ["0x0", "0x1", "0x2"], "2026-11-19": ["0xa", "0xb"]}, got
+    assert len(days["2026-11-18"]["picks"]) == 5            # the day docs it was given are left as they were
 
 
 if __name__ == "__main__":

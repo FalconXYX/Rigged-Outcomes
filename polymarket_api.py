@@ -6,12 +6,11 @@ Polymarket retired the Data API v1 (`/activity?user=…`, HTTP 410 "Data API v1
 has been retired") and the Goldsky orderbook subgraph (429 "paused and
 deprecated") in November 2026. Everything that fetches from Polymarket now
 goes through this module: polymarket_trades.py (raw trades), scrape_insiders.py
-(prior history) and the watchlist package (watchlist.net, watchlist.method)
-import from here, and nothing here imports them, so there is no import cycle.
+(prior history) and the watchlist package (watchlist.net) import from here,
+and nothing here imports them, so there is no import cycle.
 
 Endpoints and the fields observed on 2026-11-05 (full spec:
-https://data-api.polymarket.com/v2/openapi.json, saved alongside the parity
-test's scratch output):
+https://data-api.polymarket.com/v2/openapi.json):
 
 Gamma  GET https://gamma-api.polymarket.com/markets/slug/<slug>
     One market object. Used fields: conditionId, question, closed, outcomes
@@ -73,12 +72,21 @@ turns an error into "no data". A row/page cap is reported on stdout and
 returned as `capped`, never applied silently, and a feed that stops making
 progress (missing pagination, has_more without a cursor, a repeated cursor,
 or empty pages that claim more) raises instead of ending the walk quietly.
+
+Inside a step of the Vercel function (backend.outcomes.DEADLINE set), every
+request's timeout is cut to the time left and a request or a back-off that
+cannot end before the deadline raises backend.outcomes.OutOfTime instead, so
+the step stops at a checkpoint. v2_pages walks a feed page by page with a
+state the caller can save and resume from; history_totals adds a wallet's
+prior history up page by page, never holding its rows.
 """
 import re
 import time
 from urllib.parse import quote
 
 import requests
+
+from backend import outcomes
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 DATA_API_V2 = "https://data-api.polymarket.com/v2"
@@ -156,14 +164,16 @@ def _backoff(resp, attempt):
 def get_json(url, params=None, timeout=30, retry=RETRY):
     """GET and decode JSON. Raises PolymarketAPIError on any error payload or
     HTTP error, RetiredEndpointError on 410/"retired", and retries 429/5xx and
-    network failures with backoff. Never returns an error payload as data."""
+    network failures with backoff. Never returns an error payload as data.
+    Inside a step, OutOfTime when the request or a back-off would pass the
+    step's deadline."""
     last = None
     for attempt in range(retry):
         try:
-            resp = SESSION.get(url, params=params, timeout=timeout)
+            resp = SESSION.get(url, params=params, timeout=outcomes.clamp(timeout))
         except requests.RequestException as e:
             last = e
-            time.sleep(min(MAX_BACKOFF, 1.0 + attempt))
+            outcomes.sleep(min(MAX_BACKOFF, 1.0 + attempt))
             continue
         status = resp.status_code
         try:
@@ -179,7 +189,7 @@ def get_json(url, params=None, timeout=30, retry=RETRY):
         if status == 429 or status >= 500 or (retryable and not resp.ok):
             last = PolymarketAPIError(f"HTTP {status} from {url}: {err or resp.text[:200]}",
                                       status=status, payload=payload, url=url)
-            time.sleep(_backoff(resp, attempt))
+            outcomes.sleep(_backoff(resp, attempt))
             continue
         if not resp.ok:
             raise PolymarketAPIError(f"HTTP {status} from {url}: {err or resp.text[:200]}",
@@ -189,11 +199,61 @@ def get_json(url, params=None, timeout=30, retry=RETRY):
                                      status=status, payload=payload, url=url)
         if payload is None:
             last = PolymarketAPIError(f"{url} answered with non-JSON: {resp.text[:200]}", status=status, url=url)
-            time.sleep(min(MAX_BACKOFF, 1.0 + attempt))
+            outcomes.sleep(min(MAX_BACKOFF, 1.0 + attempt))
             continue
         return payload
     raise PolymarketAPIError(f"gave up on {url} after {retry} attempts: {last}",
                              status=getattr(last, "status", None), url=url)
+
+
+def v2_pages(path, params, state=None):
+    """Each page's rows of a v2 cursor feed, newest first, until a page says
+    has_more is false. `state` (a dict, made empty when None) is updated
+    BEFORE each page is handed over: {"cursor", "pages", "rows", "seen",
+    "empty_run", "done"}, JSON-ready. A caller that stops between pages saves
+    it and later passes it back to carry on from the next page, so every
+    page is handed over exactly once. state["done"] is true with the last
+    page. A feed that stops making progress raises PolymarketAPIError, as
+    v2_walk documents."""
+    st = state if state is not None else {}
+    for k, v in (("cursor", None), ("pages", 0), ("rows", 0), ("seen", []), ("empty_run", 0), ("done", False)):
+        st.setdefault(k, v)
+    seen = set(st["seen"])
+    while not st["done"]:
+        p = dict(params)
+        if st["cursor"]:
+            p["cursor"] = st["cursor"]
+        payload = get_json(f"{DATA_API_V2}/{path}", p)
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise PolymarketAPIError(f"/v2/{path}: unexpected response shape: {str(payload)[:200]}", payload=payload)
+        page = payload["data"]
+        pages, rows = st["pages"] + 1, st["rows"] + len(page)
+
+        pagination = payload.get("pagination")
+        if not isinstance(pagination, dict):
+            raise PolymarketAPIError(f"/v2/{path}: page {pages} carries no pagination object; cannot tell whether the "
+                                     f"feed is complete ({rows:,} rows so far)", payload=payload)
+        has_more = pagination.get("has_more")
+        next_cursor = pagination.get("next_cursor") or None
+        if has_more is False or (has_more is None and next_cursor is None):
+            st.update(pages=pages, rows=rows, done=True)
+            yield page
+            return
+        if has_more is not True:
+            raise PolymarketAPIError(f"/v2/{path}: page {pages} has an unreadable has_more={has_more!r}", payload=payload)
+        if not next_cursor:
+            raise PolymarketAPIError(f"/v2/{path}: page {pages} says has_more but sent no next_cursor "
+                                     f"({rows:,} rows so far)", payload=payload)
+        if next_cursor in seen or next_cursor == st["cursor"]:
+            raise PolymarketAPIError(f"/v2/{path}: page {pages} repeated an earlier cursor; the feed is not advancing "
+                                     f"({rows:,} rows so far)", payload=payload)
+        seen.add(next_cursor)
+        empty_run = st["empty_run"] + 1 if not page else 0
+        if empty_run >= MAX_EMPTY_PAGES:
+            raise PolymarketAPIError(f"/v2/{path}: {empty_run} consecutive empty pages that still claim has_more "
+                                     f"({rows:,} rows so far)", payload=payload)
+        st.update(cursor=next_cursor, pages=pages, rows=rows, empty_run=empty_run, seen=st["seen"] + [next_cursor])
+        yield page
 
 
 def v2_walk(path, params, max_rows=None, max_pages=None, on_progress=None, announce=True):
@@ -213,42 +273,14 @@ def v2_walk(path, params, max_rows=None, max_pages=None, on_progress=None, annou
     without a pagination object, has_more true without a next_cursor, a
     cursor the feed already served, or MAX_EMPTY_PAGES consecutive empty
     pages that still claim more."""
-    rows, cursor, pages, seen, empty_run = [], None, 0, set(), 0
-    while True:
-        p = dict(params)
-        if cursor:
-            p["cursor"] = cursor
-        payload = get_json(f"{DATA_API_V2}/{path}", p)
-        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            raise PolymarketAPIError(f"/v2/{path}: unexpected response shape: {str(payload)[:200]}", payload=payload)
-        page = payload["data"]
+    rows, st = [], {}
+    for page in v2_pages(path, params, st):
         rows.extend(page)
-        pages += 1
+        pages = st["pages"]
         if on_progress:
             on_progress(len(rows), pages)
-
-        pagination = payload.get("pagination")
-        if not isinstance(pagination, dict):
-            raise PolymarketAPIError(f"/v2/{path}: page {pages} carries no pagination object; cannot tell whether the "
-                                     f"feed is complete ({len(rows):,} rows so far)", payload=payload)
-        has_more = pagination.get("has_more")
-        next_cursor = pagination.get("next_cursor") or None
-        if has_more is False or (has_more is None and next_cursor is None):
+        if st["done"]:
             return rows, False
-        if has_more is not True:
-            raise PolymarketAPIError(f"/v2/{path}: page {pages} has an unreadable has_more={has_more!r}", payload=payload)
-        if not next_cursor:
-            raise PolymarketAPIError(f"/v2/{path}: page {pages} says has_more but sent no next_cursor "
-                                     f"({len(rows):,} rows so far)", payload=payload)
-        if next_cursor in seen or next_cursor == cursor:
-            raise PolymarketAPIError(f"/v2/{path}: page {pages} repeated an earlier cursor; the feed is not advancing "
-                                     f"({len(rows):,} rows so far)", payload=payload)
-        seen.add(next_cursor)
-        empty_run = empty_run + 1 if not page else 0
-        if empty_run >= MAX_EMPTY_PAGES:
-            raise PolymarketAPIError(f"/v2/{path}: {empty_run} consecutive empty pages that still claim has_more "
-                                     f"({len(rows):,} rows so far)", payload=payload)
-
         if max_rows and len(rows) >= max_rows:
             if announce:
                 log(f"  ! /v2/{path}: capped at {max_rows:,} rows after {pages} pages; the oldest rows were NOT fetched")
@@ -261,7 +293,7 @@ def v2_walk(path, params, max_rows=None, max_pages=None, on_progress=None, annou
             log(f"  ! /v2/{path}: hit the {WALK_MAX_PAGES:,}-page safety net ({len(rows):,} rows); "
                 f"the oldest rows were NOT fetched")
             return rows, True
-        cursor = next_cursor
+    return rows, False
 
 
 # ── Gamma ────────────────────────────────────────────────────────────────────
@@ -349,6 +381,37 @@ def fetch_user_history_up_to(user_address, cutoff_ts, max_pages=HISTORY_MAX_PAGE
     # counted as a prior bet and its size added to the lifetime stake).
     return [as_v1(r) for r in rows
             if (r.get("type") or "TRADE") == "TRADE" and int(r.get("timestamp") or 0) <= cutoff]
+
+
+def history_totals(user_address, cutoff_ts, max_pages=HISTORY_MAX_PAGES):
+    """fetch_user_history_up_to added up page by page as it arrives, never
+    holding the rows: {"stake": the rows' usdcSize summed in the feed's order
+    (scrape_insiders.analyze_whale's sum, to the last bit), "txs": unique
+    transaction hashes (its prior_bet_count), "trades": rows counted,
+    "capped"}. The same cap, filter and errors as fetch_user_history_up_to.
+    A few MB whatever the wallet, where the rows of a busy one are hundreds."""
+    user = str(user_address or "").strip().lower()
+    if not _ADDRESS.match(user):
+        raise ValueError(f"not a wallet address: {user_address!r}")
+    cutoff = int(cutoff_ts)
+    params = {"user": user, "type": "TRADE", "start": 1, "end": cutoff, "limit": PAGE_SIZE}
+    stake, txs, n, capped, st = 0.0, set(), 0, False, {}
+    for page in v2_pages("activity", params, st):
+        for r in page:
+            if (r.get("type") or "TRADE") == "TRADE" and int(r.get("timestamp") or 0) <= cutoff:
+                h = as_v1(r)
+                stake += float(h.get("usdcSize", 0))
+                txs.add(h.get("transactionHash", ""))
+                n += 1
+        if st["done"]:
+            break
+        if (max_pages and st["pages"] >= max_pages) or st["pages"] >= WALK_MAX_PAGES:
+            capped = True
+            break
+    if capped:
+        log(f"  ! prior history of {user} capped at {st['rows']:,} trades ({st['pages']} pages) before {cutoff}; "
+            f"older trades not counted, so its prior count is a floor")
+    return {"stake": stake, "txs": len(txs), "trades": n, "capped": capped}
 
 
 # ── v2 -> v1 row adapter ─────────────────────────────────────────────────────

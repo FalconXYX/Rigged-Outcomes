@@ -9,23 +9,26 @@ it was called a surprise.
 
 A headline is {"title", "source", "published" (ISO UTC), "url"}, in Google's
 relevance order. after / before (epoch seconds or ISO) become Google's own
-after:YYYY-MM-DD / before:YYYY-MM-DD operators. Requests are spaced
-MIN_INTERVAL apart across threads; errors raise NewsError (transient for a
+after:YYYY-MM-DD / before:YYYY-MM-DD operators, on Toronto days. Requests
+are spaced MIN_INTERVAL apart by the job's Spacer (SPACING, set per job: no
+state is kept at module level); errors raise NewsError (transient for a
 network error, a 429 or a 5xx: the caller may ask again), and so does an
 answer that is not a news feed at all (a consent or captcha page, an empty
 body: what a refusing Google sends with status 200), so it is never read as
-"no news".
+"no news". Inside a step the request's timeout is clamped to the step's
+deadline, and one that cannot end in time raises OutOfTime instead.
 """
+import contextvars
 import html
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import timezone
 from email.utils import parsedate_to_datetime
 
 import requests
 
-from watchlist.common import to_epoch
+from watchlist.common import clamp_timeout, local_day, to_epoch
 
 URL = "https://news.google.com/rss/search"
 LIMIT = 15
@@ -33,8 +36,23 @@ MIN_INTERVAL = 1.0      # seconds between requests: a public feed, used gently
 TIMEOUT = 30
 
 _ITEM = re.compile(r"<item>(.*?)</item>", re.S)
-_lock = threading.Lock()
-_last = [0.0]
+
+
+class Spacer:
+    """MIN_INTERVAL between one job's requests, across its threads."""
+
+    def __init__(self, interval=MIN_INTERVAL):
+        self.interval, self._last, self._lock = interval, 0.0, threading.Lock()
+
+    def wait(self):
+        with self._lock:
+            wait = self._last + self.interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last = time.monotonic()
+
+
+SPACING = contextvars.ContextVar("news_spacing", default=None)    # the job's Spacer (None: requests unspaced)
 
 
 class NewsError(Exception):
@@ -75,7 +93,7 @@ def parse(xml):
 
 
 def _day(ts):
-    return datetime.fromtimestamp(to_epoch(ts), timezone.utc).strftime("%Y-%m-%d")
+    return local_day(to_epoch(ts))
 
 
 def build_query(query, after=None, before=None):
@@ -89,13 +107,12 @@ def build_query(query, after=None, before=None):
 
 def search(query, after=None, before=None, limit=LIMIT, session=requests):
     q = build_query(query, after, before)
-    with _lock:
-        wait = _last[0] + MIN_INTERVAL - time.monotonic()
-        if wait > 0:
-            time.sleep(wait)
-        _last[0] = time.monotonic()
+    timeout = clamp_timeout(TIMEOUT, "a news search")
+    spacer = SPACING.get()
+    if spacer is not None:
+        spacer.wait()
     try:
-        resp = session.get(URL, params={"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=TIMEOUT)
+        resp = session.get(URL, params={"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"}, timeout=timeout)
     except requests.RequestException as e:
         raise NewsError(f"news search failed: {type(e).__name__}", transient=True) from e
     if resp.status_code != 200:

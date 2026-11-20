@@ -1,14 +1,18 @@
 // Timeline markers ("at this time, this happened") beyond the ones export.py
 // takes from markets.json. Any visitor can add one: the site's API keeps it
-// (lib/api.ts) and everyone sees it at once. Whoever added a marker can remove
-// it for 24 hours (this browser keeps its undo token); the site's owner can
-// remove any on the review page. A model may add them later (source "ai").
-// With no API in the build, or the API down, there is no editor and the chart
-// keeps its markets.json markers; on the local dev server without an API the
-// editor keeps markers in memory until the page reloads, as before.
+// (lib/api.ts) and everyone sees it. Whoever added a marker can remove it for
+// 24 hours (this browser keeps its undo token); the site's owner can remove
+// any on the review page. A model may add them later (source "ai"). A page
+// left open asks for the market's markers again every minute while it is in
+// view (and when it comes back into view), so others' markers and removals
+// show by themselves. A marker the API can't take right now (it doesn't
+// answer, or the owner has paused visitors' changes) shows at once and is kept
+// in this browser, then sent once the API takes it (when the page asks again,
+// every half minute while one waits, or when the browser is back online). With
+// no API in the build the editor keeps markers in this browser.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { AddedEvent, MarketData, MarketEvent } from "../../types";
-import { fmtT } from "../../lib/format";
+import { dayAfter, fmtT, torontoDay } from "../../lib/format";
 import { OFFLINE, WORDS, apiConfigured, apiGet, apiSend, dropUndo, localMarkers, saveUndo, setLocalMarkers, undoOf, type Marker } from "../../lib/api";
 
 const MAX_LABEL = 40;
@@ -27,25 +31,40 @@ export function withAddedEvents(market: MarketData, added: AddedEvent[], bounds:
   return { ...market, timeline: { ...market.timeline, events } };
 }
 
-/**
- * "off": the markers are kept in this browser (no API in the build, or the
- * API doesn't answer for this market); "loading"; "ready": the API's markers.
- */
+/** "off": no API in the build (the markers are kept in this browser); "loading"; "ready": the API has answered. */
 export type MarkerStatus = "off" | "loading" | "ready";
 
 type MarkersReply = { listed: boolean; writes: boolean; markers: Marker[] };
 type Kept = { events: AddedEvent[]; writes: boolean };
+/** A marker added here that the API hasn't taken yet ("ev_" id); `after`: a Toronto day before which it isn't sent again (a daily limit). */
+type Waiting = AddedEvent & { after?: string };
 
-/** This page's markers per market, so switching views doesn't ask again (the dev server's only copy without an API). */
+/** This page's markers per market as the API last gave them, so switching views shows them at once (the dev server's only copy without an API). */
 const session = new Map<string, Kept>();
+
+/** how often a page in view asks for its market's markers again; every PENDING_MS while one of its own waits to be sent */
+const REFRESH_MS = 60_000;
+const PENDING_MS = 30_000;
+/** Refusals after which a kept marker can never be added (it is dropped); any other leaves it waiting. */
+const NEVER = new Set(["duplicate", "bad_label", "bad_time", "bad_request", "full", "unknown_market", "too_large"]);
+/** Refusals that last the day (the API's daily limits count Toronto days): the marker waits for the next one. */
+const TODAY = new Set(["limit", "busy", "timeline_busy"]);
 
 const byTime = (a: AddedEvent, b: AddedEvent) => a.t - b.t;
 const fromMarker = (m: Marker): AddedEvent => ({ id: m.id, t: m.t, label: m.label, source: m.source, created_at: m.created_at });
+const waiting = (name: string) => localMarkers<Waiting>(name).filter((e) => typeof e?.id === "string" && e.id.startsWith("ev_"));
+const shown = ({ id, t, label, source, created_at }: Waiting): AddedEvent => ({ id, t, label, source, created_at });
+
+/** The API's markers and this browser's waiting ones (one the API already has, the same words within a minute, once). */
+function merged(api: AddedEvent[], mine: Waiting[]): AddedEvent[] {
+  const same = (a: AddedEvent, b: AddedEvent) => Math.abs(a.t - b.t) <= 60 && a.label.toLowerCase() === b.label.toLowerCase();
+  return [...api, ...mine.filter((e) => !api.some((m) => same(m, e))).map(shown)].sort(byTime);
+}
 
 export type AddedEvents = {
   events: AddedEvent[];
   status: MarkerStatus;
-  /** false while the owner has paused visitors' changes (adds are then kept in this browser) */
+  /** false while the owner has paused visitors' changes (adds are then kept in this browser and sent once allowed) */
   writes: boolean;
   /** add a marker; an error in words, or null once it is added */
   add: (t: number, label: string, slot?: HTMLElement | null) => Promise<string | null>;
@@ -56,69 +75,137 @@ export type AddedEvents = {
 };
 
 export function useAddedEvents(name: string): AddedEvents {
-  const [state, setState] = useState<{ name: string; status: MarkerStatus } & Kept>(() => {
+  const first = (): { name: string; status: MarkerStatus } & Kept => {
+    if (!apiConfigured) return { name, status: "off", events: session.get(name)?.events ?? localMarkers<AddedEvent>(name), writes: true };
     const kept = session.get(name);
-    if (!apiConfigured) return { name, status: "off", events: kept?.events ?? localMarkers<AddedEvent>(name), writes: true };
-    return kept ? { name, status: "ready", ...kept } : { name, status: "loading", events: [], writes: true };
-  });
-  // a new market's first render, before the effect below has caught up
-  const fresh = { name, status: (apiConfigured ? "loading" : "off") as MarkerStatus, events: [] as AddedEvent[], writes: true };
-  const current = state.name === name ? state : fresh;
+    return { name, status: kept ? "ready" : "loading", events: merged(kept?.events ?? [], waiting(name)), writes: kept?.writes ?? true };
+  };
+  const [state, setState] = useState(first);
+  const current = state.name === name ? state : first();
+  // the API's markers for this market as last given, which the waiting ones join
+  const api = useRef<AddedEvent[]>(session.get(name)?.events ?? []);
+
+  /** Show the API's markers (`next`, or the last ones) with this browser's waiting ones. */
+  const show = (next?: Kept) => {
+    if (next) {
+      session.set(name, next);
+      api.current = next.events;
+    }
+    setState((s) => ({
+      name,
+      status: "ready",
+      events: merged(api.current, waiting(name)),
+      writes: next?.writes ?? (s.name === name ? s.writes : true),
+    }));
+  };
 
   useEffect(() => {
-    const kept = session.get(name);
     if (!apiConfigured) {
-      setState({ name, status: "off", events: kept?.events ?? localMarkers<AddedEvent>(name), writes: true });
+      setState({ name, status: "off", events: session.get(name)?.events ?? localMarkers<AddedEvent>(name), writes: true });
       return;
     }
-    if (kept) {
-      setState({ name, status: "ready", ...kept });
-      return;
-    }
+    api.current = session.get(name)?.events ?? [];
+    setState(first());
     let live = true;
-    apiGet<MarkersReply>(`/api/markers?market=${encodeURIComponent(name)}`).then((r) => {
-      if (!live) return;
-      if (!r || r.listed !== true || !Array.isArray(r.markers)) {
-        setState({ name, status: "off", events: localMarkers<AddedEvent>(name), writes: true });
-        return;
+    let asked = 0;
+    let sending = false;
+
+    /** Send this browser's waiting markers, oldest first; one the API can't take now leaves the rest waiting too. */
+    const send = async () => {
+      const today = torontoDay();
+      for (const e of waiting(name)) {
+        if (!live) return;
+        if (e.after && e.after > today) continue;
+        const r = await apiSend<{ marker: Marker; undo: string }>("POST", "/api/markers", { market: name, t: e.t, label: e.label }, { bot: "marker" });
+        const rest = waiting(name).filter((x) => x.id !== e.id);
+        if (r.ok && r.data?.marker) {
+          if (typeof r.data.undo === "string") saveUndo(r.data.marker.id, r.data.undo);
+          setLocalMarkers(name, rest);
+          const m = fromMarker(r.data.marker);
+          api.current = [...api.current.filter((x) => x.id !== m.id), m].sort(byTime);
+          session.set(name, { events: api.current, writes: true });
+        } else if (!r.ok && NEVER.has(r.code)) setLocalMarkers(name, rest);
+        else {
+          if (!r.ok && TODAY.has(r.code)) setLocalMarkers(name, [...rest, { ...e, after: dayAfter(today) }]);
+          break;
+        }
+        if (live) show();
       }
-      const next: Kept = { events: r.markers.map(fromMarker).sort(byTime), writes: r.writes !== false };
-      session.set(name, next);
-      setState({ name, status: "ready", ...next });
-    });
+    };
+
+    const load = async () => {
+      asked = Date.now();
+      const r = await apiGet<MarkersReply>(`/api/markers?market=${encodeURIComponent(name)}`);
+      // no answer (or not listed): what shows stays, and the next ask tries again
+      if (!live || !r || r.listed !== true || !Array.isArray(r.markers)) return;
+      show({ events: r.markers.map(fromMarker).sort(byTime), writes: r.writes !== false });
+      if (r.writes !== false && !sending && waiting(name).length) {
+        sending = true;
+        await send().finally(() => (sending = false));
+      }
+    };
+
+    void load();
+    const due = () => (waiting(name).length ? PENDING_MS : REFRESH_MS) - 1000;
+    const tick = () => {
+      if (!document.hidden && Date.now() - asked >= due()) void load();
+    };
+    const back = () => {
+      if (!document.hidden && Date.now() - asked >= 5000) void load();
+    };
+    const timer = window.setInterval(tick, 5000);
+    document.addEventListener("visibilitychange", back);
+    window.addEventListener("online", back);
+    window.addEventListener("focus", back);
     return () => {
       live = false;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", back);
+      window.removeEventListener("online", back);
+      window.removeEventListener("focus", back);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name]);
 
-  const keep = (update: (k: Kept) => Kept, here = false) =>
-    setState((s) => {
-      if (s.name !== name) return s;
-      const next = update({ events: s.events, writes: s.writes });
-      session.set(name, next);
-      if (here || s.status === "off") setLocalMarkers(name, next.events.filter((e) => e.id.startsWith("ev_")));
-      return { ...s, ...next, status: here ? "off" : s.status };
-    });
+  /** A marker kept in this browser: with no API, its only copy; else one waiting to be sent. */
+  const keepHere = (t: number, label: string) => {
+    const e: Waiting = { id: `ev_${Date.now().toString(36)}`, t, label, source: "manual" };
+    if (current.status === "off") {
+      const events = [...current.events, e].sort(byTime);
+      session.set(name, { events, writes: true });
+      setLocalMarkers(name, events.filter((x) => x.id.startsWith("ev_")));
+      setState((s) => (s.name === name ? { ...s, events } : s));
+    } else {
+      setLocalMarkers(name, [...waiting(name), e]);
+      show();
+    }
+    return null;
+  };
 
   const add = async (t: number, label: string, slot?: HTMLElement | null): Promise<string | null> => {
-    const here = () => {
-      const e: AddedEvent = { id: `ev_${Date.now().toString(36)}`, t, label, source: "manual" };
-      keep((k) => ({ ...k, events: [...k.events, e].sort(byTime) }), true);
-      return null;
-    };
-    if (current.status === "off") return here();
+    if (current.status === "off") return keepHere(t, label);
     const r = await apiSend<{ marker: Marker; undo: string }>("POST", "/api/markers", { market: name, t, label }, { bot: "marker", slot });
-    if (!r.ok) return OFFLINE.has(r.code) ? here() : r.words;
+    if (!r.ok) return OFFLINE.has(r.code) ? keepHere(t, label) : r.words;
     if (!r.data?.marker) return WORDS.other;
     if (typeof r.data.undo === "string") saveUndo(r.data.marker.id, r.data.undo);
     const m = fromMarker(r.data.marker);
-    keep((k) => ({ ...k, events: [...k.events.filter((e) => e.id !== m.id), m].sort(byTime) }));
+    api.current = [...api.current.filter((e) => e.id !== m.id), m].sort(byTime);
+    session.set(name, { events: api.current, writes: current.writes });
+    show();
     return null;
   };
 
   const remove = async (id: string): Promise<string | null> => {
-    if (current.status === "off" || id.startsWith("ev_")) {
-      keep((k) => ({ ...k, events: k.events.filter((e) => e.id !== id) }), true);
+    if (current.status === "off") {
+      const events = current.events.filter((e) => e.id !== id);
+      session.set(name, { events, writes: true });
+      setLocalMarkers(name, events.filter((x) => x.id.startsWith("ev_")));
+      setState((s) => (s.name === name ? { ...s, events } : s));
+      return null;
+    }
+    if (id.startsWith("ev_")) {
+      setLocalMarkers(name, waiting(name).filter((e) => e.id !== id));
+      show();
       return null;
     }
     const undo = undoOf(id);
@@ -126,7 +213,9 @@ export function useAddedEvents(name: string): AddedEvents {
     const r = await apiSend<null>("DELETE", `/api/markers/${encodeURIComponent(id)}`, undefined, { headers: { "x-undo": undo } });
     if (!r.ok && r.code !== "not_found") return r.words;
     dropUndo(id);
-    keep((k) => ({ ...k, events: k.events.filter((e) => e.id !== id) }));
+    api.current = api.current.filter((e) => e.id !== id);
+    session.set(name, { events: api.current, writes: current.writes });
+    show();
     return null;
   };
 

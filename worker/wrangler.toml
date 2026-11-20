@@ -1,10 +1,17 @@
-# Rigged Outcomes API: one Worker and one D1 database, both on Cloudflare's free plan (docs/DEPLOY.md).
-# Local runs read .dev.vars (copied from .dev.vars.example), whose values replace [vars] below.
+# Rigged Outcomes API: one Worker and one D1 database, both on Cloudflare's free plan (docs/DEPLOY.md), and the
+# backend's clock and job queue (docs/BACKEND.md). Local runs read .dev.vars (copied from .dev.vars.example),
+# whose values replace [vars] below.
 name = "rigged-outcomes-api"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 send_metrics = false
+
+# One Cron Trigger, every minute (Cloudflare runs it in UTC): each tick works out Toronto time and does what is
+# due, the daily run from 04:00 Toronto, the catch-up, the prune, the budget, and the watchdog (src/cron.ts).
+[triggers]
+crons = ["* * * * *"]
 
 [observability]
 enabled = true
@@ -22,12 +29,12 @@ database_name = "rigged-outcomes"
 database_id = "fefb90bc-c205-4628-b9b3-bd164ef93fba"
 migrations_dir = "migrations"
 
-# Production values. Secrets (wrangler secret put): TURNSTILE_SECRET, OWNER_TOKEN, JOB_TOKEN, VISITOR_SALT,
-# and optionally GITHUB_DISPATCH_TOKEN (the review page's "Apply decisions now").
+# Production values. Secrets (wrangler secret put): TURNSTILE_SECRET, OWNER_TOKEN, JOB_TOKEN, VISITOR_SALT, and
+# WAKE_SECRET (it signs the wake-ups sent to STEP_URL; the Vercel project holds the same value), and WAKE_GATE
+# (sent as x-ro-gate; Vercel's firewall rule lets /api/step through only with it, docs/DEPLOY.md).
 [vars]
 ALLOWED_ORIGINS = "https://parthjain.ca"
 TURNSTILE_HOSTNAMES = "parthjain.ca"
 TURNSTILE_STRICT = "on"
-GITHUB_REPO = "FalconXYX/Rigged-Outcomes"
-GITHUB_WORKFLOW = "watchlist.yml"
+STEP_URL = "https://rigged-outcomes.vercel.app/api/step"
 DEV = "off"

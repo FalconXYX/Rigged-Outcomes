@@ -1,25 +1,14 @@
 // The owner's endpoints, behind OWNER_TOKEN, for the private review page (#/review): one overview (which
-// also lists the markets sent to the main page and the site's watchlist), the open list's decisions,
-// deleting markers, the pause switch, and "Apply decisions now" (a GitHub workflow dispatch, when a token for
-// it is set). All work while paused.
+// also lists the markets sent to the main page, the site's watchlist and the backend's runs, failures and
+// budget), the open list's decisions, deleting markers, the pause switch, and "Apply decisions now" (an apply
+// run queued and the main lane woken). All work while paused.
 
-import {
-  BODY,
-  type Ctx,
-  DAY,
-  DAY_TEXT,
-  counter,
-  fail,
-  json,
-  log,
-  noContent,
-  now,
-  oneOf,
-  readBody,
-  text,
-  utcDay,
-} from "./lib";
+import { CONTRACT } from "./contract";
+import { readBudget } from "./ledger";
+import { APPLIES_A_DAY, BODY, type Ctx, DAY, DAY_TEXT, counter, fail, json, limitDay, noContent, now, oneOf, readBody, text } from "./lib";
 import { forgetMarkers } from "./public";
+import { makeRun, runId } from "./queue";
+import { wakeReady } from "./wake";
 
 const DECISIONS = ["step", "not a step", "card approved"] as const;
 
@@ -39,14 +28,23 @@ export function decision(row: unknown) {
 
 export const MARKER_COLUMNS = "id, market, t, label, source, created_at, deleted_at, deleted_by";
 
-/** Everything the review page shows, in one batch of reads. */
-export async function overview({ env }: Ctx): Promise<Response> {
-  const at = now();
-  const [settings, queue, decisions, requests, markers, watched, runs] = await env.DB.batch([
-    env.DB.prepare("SELECT value FROM settings WHERE key = 'writes'"),
+/**
+ * Everything the review page shows, in one batch of reads. Besides the lists: the newest queue day (settings.queue_day:
+ * an empty one reads as empty), when the job's token was last refused (job_refused_at, lib.authorize), and the
+ * backend (docs/BACKEND.md): the budget, each lane's pause and wake-ups, the latest 15 runs and the
+ * latest 10 failed jobs of the last 14 days. A decision on a whole card carries the card's question (its
+ * headline is null).
+ */
+export async function overview({ env, clock }: Ctx): Promise<Response> {
+  const at = await clock();
+  const [settings, queue, decisions, requests, markers, watched, runs, lanes, backendRuns, failed] = await env.DB.batch([
+    env.DB.prepare("SELECT key, value FROM settings WHERE key IN ('writes', 'queue_day', 'job_refused', 'budget')"),
     env.DB.prepare("SELECT day, run_at, steps_by, item FROM open_queue WHERE day = (SELECT max(day) FROM open_queue) ORDER BY n"),
     env.DB.prepare(
-      "SELECT * FROM open_decisions WHERE decision != 'withdrawn' AND (applied_at IS NULL OR applied_at >= ?) ORDER BY decided_at DESC",
+      `SELECT d.*, coalesce(
+         (SELECT json_extract(q.item, '$.question') FROM open_queue q WHERE q.story = d.story ORDER BY q.day DESC LIMIT 1),
+         (SELECT json_extract(c.data, '$.question') FROM catalog c WHERE c.kind = 'open' AND c.id = d.story)) AS question
+       FROM open_decisions d WHERE d.decision != 'withdrawn' AND (d.applied_at IS NULL OR d.applied_at >= ?) ORDER BY d.decided_at DESC`,
     ).bind(at - 14 * DAY),
     env.DB.prepare("SELECT * FROM requests WHERE status != 'added' OR done_at >= ? ORDER BY requested_at DESC LIMIT 200").bind(
       at - 30 * DAY,
@@ -57,14 +55,35 @@ export async function overview({ env }: Ctx): Promise<Response> {
        LEFT JOIN catalog c ON c.kind = 'open' AND c.id = w.story ORDER BY w.created_at DESC LIMIT 200`,
     ),
     env.DB.prepare("SELECT * FROM job_runs ORDER BY id DESC LIMIT 10"),
+    env.DB.prepare("SELECT lane, paused_until, unanswered, last_wake_at, last_claim_at, wake_error FROM lanes ORDER BY lane"),
+    env.DB.prepare(
+      "SELECT id, kind, slot, state, created_at, started_at, finished_at, deadline, meta FROM runs ORDER BY created_at DESC, id DESC LIMIT 15",
+    ),
+    env.DB.prepare("SELECT id, kind, error, updated_at FROM jobs WHERE state = 'failed' AND updated_at >= ? ORDER BY updated_at DESC LIMIT 10").bind(
+      at - 14 * DAY,
+    ),
   ]);
+  const kept = Object.fromEntries((settings.results as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+  const parsed = <T>(v: string | undefined): T | null => {
+    try {
+      return v ? (JSON.parse(v) as T) : null;
+    } catch {
+      return null;
+    }
+  };
   const q = queue.results as { day: string; run_at: string; steps_by: string; item: string }[];
+  const latest = parsed<{ day: string; run_at: string; steps_by: string }>(kept.queue_day);
   return json({
     now: at,
-    settings: { writes: (settings.results[0] as { value?: string } | undefined)?.value === "off" ? "off" : "on" },
-    dispatch: !!env.GITHUB_DISPATCH_TOKEN,
-    queue: q.length ? { day: q[0].day, run_at: q[0].run_at, steps_by: q[0].steps_by, items: q.map((r) => JSON.parse(r.item)) } : null,
-    decisions: decisions.results.map(decision),
+    settings: { writes: kept.writes === "off" ? "off" : "on" },
+    job_refused_at: kept.job_refused ? Number(kept.job_refused) : null,
+    queue:
+      q.length && !(latest && latest.day > q[0].day)
+        ? { day: q[0].day, run_at: q[0].run_at, steps_by: q[0].steps_by, items: q.map((r) => JSON.parse(r.item)) }
+        : latest
+          ? { ...latest, items: [] }
+          : null,
+    decisions: decisions.results.map((r) => ({ ...decision(r), question: (r as { question?: string | null }).question ?? null })),
     requests: requests.results,
     markers: markers.results,
     watched: (watched.results as { story: string; since: number; data: string | null }[]).map((w) => {
@@ -72,6 +91,12 @@ export async function overview({ env }: Ctx): Promise<Response> {
       return { story: w.story, since: w.since, question: c.question ?? null, url: c.url ?? null };
     }),
     runs: runs.results,
+    backend: {
+      budget: readBudget(kept.budget),
+      lanes: lanes.results,
+      runs: (backendRuns.results as { meta: string }[]).map((r) => ({ ...r, meta: parsed<Record<string, unknown>>(r.meta) ?? {} })),
+      failed_jobs: failed.results,
+    },
   });
 }
 
@@ -178,60 +203,23 @@ export async function putSettings({ req, env }: Ctx): Promise<Response> {
   return json({ settings: { writes } });
 }
 
-const DISPATCH_GAP = 120;
-const DISPATCHES_A_DAY = 30;
-
 /**
- * "Apply decisions now": start the Watchlist workflow in apply mode (GITHUB_DISPATCH_TOKEN, a fine-grained
- * token for this repository with Actions: read and write). At most one every 2 minutes and 30 a day.
+ * "Apply decisions now": an apply run (apply.decide: decisions into the state, the reviewed day rebuilt, the open
+ * list saved) queued and the main lane woken after the answer. A press while an apply run is still queued joins
+ * it (nothing more is spent); otherwise it makes one, 30 a Toronto day (429 limit after that).
  */
-export async function apply({ req, env }: Ctx): Promise<Response> {
-  if (!env.GITHUB_DISPATCH_TOKEN) fail(501, "no_dispatch", "No GITHUB_DISPATCH_TOKEN is set, so the next daily run applies decisions.");
-  const at = now();
-  const prev = (await env.DB.prepare("SELECT value FROM settings WHERE key = 'last_dispatch'").first<string>("value")) ?? "0";
-  const claimed = await env.DB.prepare(
-    `INSERT INTO settings (key, value, updated_at) VALUES ('last_dispatch', ?1, ?2)
-     ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?2 WHERE CAST(settings.value AS INTEGER) <= ?3
-     RETURNING value`,
-  )
-    .bind(String(at), at, at - DISPATCH_GAP)
-    .first();
-  if (!claimed) fail(429, "limit", "The update job was started less than 2 minutes ago.");
-  const giveBack = () =>
-    env.DB.prepare("UPDATE settings SET value = ? WHERE key = 'last_dispatch' AND value = ?").bind(prev, String(at)).run();
-  if (!(await counter(env, utcDay(req, env), "dispatch", "*", DISPATCHES_A_DAY).first())) {
-    await giveBack();
-    fail(429, "limit", `The update job has been started ${DISPATCHES_A_DAY} times today.`);
+export async function apply({ req, env, waitUntil, clock }: Ctx): Promise<Response> {
+  const at = await clock();
+  const waiting = await env.DB.prepare("SELECT id FROM runs WHERE kind = 'apply' AND state = 'queued' ORDER BY created_at DESC LIMIT 1").first<string>("id");
+  if (waiting) {
+    waitUntil(wakeReady(env, at, { only: ["main"], handler: true }));
+    return json({ queued: true, run: waiting }, 202);
   }
-
-  let status = 0;
-  let detail = "";
-  try {
-    const api = (env.DEV === "on" && env.GITHUB_API) || "https://api.github.com";
-    const res = await fetch(
-      `${api}/repos/${env.GITHUB_REPO}/actions/workflows/${encodeURIComponent(env.GITHUB_WORKFLOW)}/dispatches`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-          "User-Agent": "rigged-outcomes-api",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ ref: "main", inputs: { mode: "apply" } }),
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
-    status = res.status;
-    if (status !== 204) detail = ((await res.json<{ message?: string }>().catch(() => ({}))) as { message?: string }).message ?? "";
-  } catch (e) {
-    detail = String(e);
+  if (!(await counter(env, limitDay(req, env, at), "apply", "*", APPLIES_A_DAY).first())) {
+    fail(429, "limit", `Decisions have been applied ${APPLIES_A_DAY} times today. Try again tomorrow.`);
   }
-  if (status !== 204) {
-    await giveBack();
-    log({ event: "dispatch_failed", status, detail: detail.slice(0, 200) });
-    fail(502, "github", `GitHub didn't start the job (${status || "no answer"}${detail ? `: ${detail.slice(0, 200)}` : ""}).`);
-  }
-  return json({ dispatched: true }, 202);
+  const slot = String(at);
+  await env.DB.batch(makeRun(env, { kind: "apply", slot, at, deadline: at + CONTRACT.schedule.apply_run_s }));
+  waitUntil(wakeReady(env, at, { only: ["main"], handler: true }));
+  return json({ queued: true, run: runId("apply", slot) }, 202);
 }

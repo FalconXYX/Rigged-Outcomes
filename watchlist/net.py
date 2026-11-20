@@ -8,14 +8,22 @@ request is throttled, or answered 429 with Retry-After), so this module
 handles both: a token bucket per endpoint family keeps each process at
 SHARE (40 %) of the documented limit, and polymarket_api.get_json already
 honours Retry-After / backs off on 429 and 5xx. The buckets are shared by
-all threads of the process.
+all threads of the process; inside a step of the Vercel function each job
+has its own (backend.outcomes.per_job), since several calls can share one
+process.
+
+Inside a step (backend.outcomes.DEADLINE set) nothing here waits longer than
+the step can: requests are cut to the deadline (polymarket_api.get_json),
+thread pools carry the step's deadline into their threads, and patiently()
+does not sleep through an outage but raises backend.outcomes.Later
+("polymarket_down", CONTRACT.retry.polymarket_down_s), so the job comes back
+later instead of holding a Vercel call while Polymarket is down.
 
 Every request goes through get_json() here. install() additionally routes
 polymarket_api.get_json through the buckets, so the legacy fetchers this
-package reuses (polymarket_api.fetch_trades -> v2_walk) are limited too;
-method.py calls it before a trade download and day_trades before its
-/v2/activity walk. (Offline tests that fake polymarket_api.get_json patch
-install() too, or install() would capture the fake.)
+package reuses (polymarket_api.fetch_trades -> v2_walk) are limited too.
+(Offline tests that fake polymarket_api.get_json patch install() too, or
+install() would capture the fake.)
 
 Endpoint facts (verified 2026-11-09/10):
 
@@ -53,34 +61,17 @@ Endpoint facts (verified 2026-11-09/10):
       measured 2026-11-10, 10 pages / 4 s and the same 1,569 open $100k
       markets as the unfiltered walk (192 pages, 20 s, 1.7 GB). Events
       also hold their closed markets; filters.pool_reason drops those.
-  Trades          GET {DATA_V2}/trades?condition=…&taker_only=false
-      &limit=1000[&cursor=…], newest first; start/end are ignored for the
-      condition shape, so a window walk pages until a row is older than
-      the window start.
-  User volume     GET {DATA_V2}/user-volume?user=<0x40hex>&start=1&end=E
-      -> {"data": {"volume" (shares), "volume_usdc", "trade_count"}}. The
-      bounds are floored to whole UTC days and the end day is INCLUDED:
-      every E on one UTC day gives the same answer, E one second before
-      that day's midnight gives the previous day's. A malformed address is
-      answered 200 with zeros (so addresses are validated here first); a
-      protocol contract address is a 400. A null or non-numeric field
-      raises (parse_user_volume): only a real 0 is a zero.
-  First-day fills GET {DATA_V2}/activity?user=…&type=TRADE&start=<00:00 UTC>
-      &end=<cutoff>&limit=1000 (bounds inclusive, to the second): the part
-      of the cutoff's day user-volume cannot cut. exact_prior = user-volume
-      to the day before + these fills = the activity crawl at the exact
-      cutoff, counting fills, for ~1 page instead of the whole history.
 """
-import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import polymarket_api
-from polymarket_api import DATA_API_V2, GAMMA_API, OPERATORS, PAGE_SIZE, PolymarketAPIError
+from backend import outcomes
+from backend.contract import RETRY
+from polymarket_api import DATA_API_V2, GAMMA_API, PolymarketAPIError
 
-from watchlist import problems, store
-from watchlist.common import DAY, log, now_epoch, to_epoch, utc_day
+from watchlist import problems
+from watchlist.common import log, now_epoch, to_epoch
 
 # Documented requests per 10 s per IP, by endpoint family.
 LIMITS_PER_10S = {
@@ -93,14 +84,7 @@ LIMITS_PER_10S = {
 }
 SHARE = 0.40
 
-# A user-volume answer for a day that is not over yet can still change;
-# such rows are re-fetched once they are older than this.
-INCOMPLETE_MAX_AGE = 600
-# A day counts as over (its answer final) this long after its UTC midnight.
-SETTLE_SECONDS = 3600
-
 MAX_PAGES = 5000          # safety net on any keyset walk here
-_ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
 
 
 class TokenBucket:
@@ -131,7 +115,17 @@ class TokenBucket:
             time.sleep(wait)
 
 
-BUCKETS = {name: TokenBucket(limit * SHARE / 10.0) for name, limit in LIMITS_PER_10S.items()}
+def new_buckets():
+    """A token bucket per endpoint family."""
+    return {name: TokenBucket(limit * SHARE / 10.0) for name, limit in LIMITS_PER_10S.items()}
+
+
+BUCKETS = new_buckets()             # a command's (outside a step)
+
+
+def buckets():
+    """The buckets requests go through: the job's own while a step runs, else the process's."""
+    return outcomes.per_job("net_buckets", new_buckets, default=BUCKETS)
 
 
 def family(url):
@@ -168,7 +162,7 @@ def _upstream():
 
 def get_json(url, params=None, timeout=30, retry=polymarket_api.RETRY):
     """polymarket_api.get_json behind the family's token bucket."""
-    BUCKETS[family(url)].acquire()
+    buckets()[family(url)].acquire()
     return _upstream()(url, params=params, timeout=timeout, retry=retry)
 
 
@@ -180,23 +174,16 @@ def install():
     orig = polymarket_api.get_json
 
     def limited(url, params=None, timeout=30, retry=polymarket_api.RETRY):
-        BUCKETS[family(url)].acquire()
+        buckets()[family(url)].acquire()
         return orig(url, params=params, timeout=timeout, retry=retry)
 
     _INSTALLED["orig"] = orig
     polymarket_api.get_json = limited
 
 
-def uninstall():
-    """Undo install() (tests)."""
-    orig = _INSTALLED.pop("orig", None)
-    if orig is not None:
-        polymarket_api.get_json = orig
-
-
 def bucket_stats():
     """{family: {"requests", "waited_s"}} since import (for run summaries)."""
-    return {k: {"requests": b.taken, "waited_s": round(b.waited, 1)} for k, b in BUCKETS.items() if b.taken}
+    return {k: {"requests": b.taken, "waited_s": round(b.waited, 1)} for k, b in buckets().items() if b.taken}
 
 
 # A whole walk asked again after each of these waits when Polymarket still fails it once get_json's own retries
@@ -208,7 +195,8 @@ def patiently(fn, what="the walk", waits=None, sleep=time.sleep):
     """fn() asked again after each of waits (default WALK_WAITS) while it raises PolymarketAPIError. An error
     waiting will not cure raises at once: an endpoint retired, or a status that says the request is wrong (a
     400 or a 404: problems.polymarket_kind). A feed that came back in a shape the code does not know is asked
-    again (a glitch passes; a change raises after the waits). The last error raises."""
+    again (a glitch passes; a change raises after the waits). The last error raises. Inside a step there are no
+    waits: an error waiting could cure raises Later("polymarket_down") at once."""
     waits = WALK_WAITS if waits is None else tuple(waits)
     for attempt in range(len(waits) + 1):
         try:
@@ -217,6 +205,10 @@ def patiently(fn, what="the walk", waits=None, sleep=time.sleep):
             raise
         except PolymarketAPIError as e:
             wrong = getattr(e, "status", None) is not None and problems.polymarket_kind(e) == problems.CRASH
+            if not wrong and outcomes.left() is not None:
+                log(f"  ! {what}: Polymarket did not answer ({str(e)[:160]}); the job comes back in "
+                    f"{RETRY['polymarket_down_s']} s")
+                raise outcomes.Later.after(RETRY["polymarket_down_s"], "polymarket_down") from e
             if attempt == len(waits) or wrong:
                 raise
             log(f"  ! {what}: Polymarket did not answer ({str(e)[:160]}); asking again in {waits[attempt]} s")
@@ -360,224 +352,3 @@ def markets_by_condition(condition_ids, closed="any"):
             raise PolymarketAPIError(f"/markets?condition_ids: unexpected response shape: {str(page)[:200]}")
         out.extend(page)
     return out
-
-
-# ── Data API v2: recent trades ───────────────────────────────────────────────
-
-def recent_trades(condition_id, since, until=None, taker_only=False, max_rows=None):
-    """(rows, capped): the market's v2 trade rows with since <= timestamp <
-    until (epoch or ISO), newest first, CLOB operator rows dropped (like
-    polymarket_api.fetch_trades). Pages newest-first and stops at the first
-    page whose oldest row is older than `since`, so the cost is the window's
-    trade count, not the market's. max_rows caps the rows kept (announced)."""
-    lo, hi = to_epoch(since), to_epoch(until) if until is not None else None
-    if lo is None:
-        raise ValueError(f"recent_trades: unreadable since={since!r}")
-    cid = str(condition_id or "").strip()
-    if not re.fullmatch(r"0x[0-9a-fA-F]{64}", cid):
-        raise ValueError(f"not a condition id: {condition_id!r}")
-    params = {"condition": cid, "taker_only": "true" if taker_only else "false", "limit": PAGE_SIZE}
-    rows, cursor, seen, pages = [], None, set(), 0
-    while True:
-        p = dict(params)
-        if cursor:
-            p["cursor"] = cursor
-        payload = get_json(f"{DATA_API_V2}/trades", p)
-        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-            raise PolymarketAPIError(f"/v2/trades: unexpected response shape: {str(payload)[:200]}", payload=payload)
-        page = payload["data"]
-        pages += 1
-        oldest = None
-        for r in page:
-            ts = int(r.get("timestamp") or 0)
-            oldest = ts if oldest is None else min(oldest, ts)
-            if ts < lo or (hi is not None and ts >= hi):
-                continue
-            w = str(r.get("proxy_wallet") or "").lower()
-            if w and w not in OPERATORS:
-                rows.append(r)
-        if max_rows and len(rows) >= max_rows:
-            log(f"  ! /v2/trades {cid[:10]}…: window capped at {max_rows:,} rows; older rows in the window NOT fetched")
-            return rows[:max_rows], True
-        pagination = payload.get("pagination")
-        if not isinstance(pagination, dict):
-            raise PolymarketAPIError(f"/v2/trades: page {pages} carries no pagination object")
-        if oldest is not None and oldest < lo:
-            return rows, False
-        if pagination.get("has_more") is not True:
-            return rows, False
-        cursor = pagination.get("next_cursor") or None
-        if not cursor:
-            raise PolymarketAPIError(f"/v2/trades: page {pages} says has_more but sent no next_cursor")
-        if cursor in seen:
-            raise PolymarketAPIError(f"/v2/trades: page {pages} repeated an earlier cursor")
-        seen.add(cursor)
-        if pages >= MAX_PAGES:
-            raise PolymarketAPIError(f"/v2/trades: {pages} pages inside one window; giving up (safety net)")
-
-
-# ── Data API v2: prior history in one call ───────────────────────────────────
-
-def _day_settled(day, now):
-    return now >= (day + 1) * DAY + SETTLE_SECONDS
-
-
-def _amount(data, key, integral=False):
-    """data[key] as a finite number >= 0 (an int when integral), or None when
-    it is missing, null, a bool, non-numeric, negative or fractional where a
-    count is expected. Numeric strings are accepted (the value, not the JSON
-    type, is what counts)."""
-    v = data.get(key)
-    if v is None or isinstance(v, bool):
-        return None
-    try:
-        x = float(v)
-    except (TypeError, ValueError):
-        return None
-    if x != x or x in (float("inf"), float("-inf")) or x < 0:
-        return None
-    if integral:
-        return int(x) if x == int(x) else None
-    return x
-
-
-def parse_user_volume(payload, wallet=""):
-    """{"volume", "volume_usdc", "trade_count"} from a /v2/user-volume answer.
-    Raises PolymarketAPIError unless all three are present and numeric: only
-    a real 0 is a zero. A null, a string or a missing field is an error, and
-    must never become a "new wallet" (0 prior trades flags every whale)."""
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, dict):
-        raise PolymarketAPIError(f"/v2/user-volume: unexpected response shape for {wallet}: {str(payload)[:200]}",
-                                 payload=payload)
-    out = {"volume": _amount(data, "volume"), "volume_usdc": _amount(data, "volume_usdc"),
-           "trade_count": _amount(data, "trade_count", integral=True)}
-    bad = [k for k, v in out.items() if v is None]
-    if bad:
-        raise PolymarketAPIError(f"/v2/user-volume: {', '.join(bad)} null, missing or not a number for {wallet}: "
-                                 f"{str(payload)[:200]}", payload=payload)
-    return out
-
-
-def user_volume(wallet, end_epoch, conn=None, refresh=False):
-    """The wallet's lifetime trading up to and including the UTC day of
-    end_epoch: {"volume" (shares), "volume_usdc", "trade_count", "day",
-    "cached"}. Answers are cached in the store per (wallet, day); a settled
-    day is never fetched twice. Raises on a malformed address (the endpoint
-    would answer zeros) and on any API error or null/non-numeric field
-    (parse_user_volume: never a silent zero)."""
-    w = str(wallet or "").strip().lower()
-    if not _ADDRESS.match(w):
-        raise ValueError(f"not a wallet address: {wallet!r}")
-    end = int(end_epoch)
-    day = utc_day(end)
-    conn = conn or store.default_conn()
-    now = now_epoch()
-    if not refresh:
-        row = store.get_wallet_volume(conn, w, day)
-        if row and (row["complete"] or now - row["fetched_at"] < INCOMPLETE_MAX_AGE):
-            return {"volume": row["volume"], "volume_usdc": row["volume_usdc"], "trade_count": row["trade_count"],
-                    "day": day, "cached": True}
-    payload = get_json(f"{DATA_API_V2}/user-volume", {"user": w, "start": 1, "end": end})
-    data = parse_user_volume(payload, w)
-    store.put_wallet_volume(conn, w, day, data, complete=_day_settled(day, now))
-    return {**data, "day": day, "cached": False}
-
-
-def user_volumes(pairs, conn=None, workers=10):
-    """user_volume for many (wallet, end_epoch) pairs in parallel. Returns a
-    list in the input order; the first error raises (after the pool stops)."""
-    conn = conn or store.default_conn()
-    pairs = list(pairs)
-    if not pairs:
-        return []
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(pairs)))) as pool:
-        futures = [pool.submit(user_volume, w, e, conn) for w, e in pairs]
-        try:
-            return [f.result() for f in futures]
-        except BaseException:
-            for f in futures:
-                f.cancel()
-            raise
-
-
-# ── the exact cutoff: user-volume to the day before + the first day's fills ──
-
-# Page cap of the first-day walk: polymarket_api.fetch_user_history_up_to's
-# own cap (50 x 1000 fills), so a capped wallet is a floor exactly where
-# scrape_insiders' crawl would be one.
-DAY_MAX_PAGES = polymarket_api.HISTORY_MAX_PAGES
-
-
-def day_trades(wallet, cutoff, conn=None, refresh=False, max_pages=DAY_MAX_PAGES):
-    """The wallet's TRADE fills from 00:00 UTC of cutoff's day up to and
-    including cutoff (the bound scrape_insiders' crawl uses):
-    {"trade_count" (fills), "tx_count" (unique transaction hashes),
-    "volume_usdc", "capped", "day_start", "cached", "requests"}.
-
-    One /v2/activity?type=TRADE&start=<midnight>&end=<cutoff> walk, usually
-    one page; cached in the store per (wallet, cutoff) once the cutoff is
-    SETTLE_SECONDS old. Rows are re-checked for type TRADE and the bounds,
-    as fetch_user_history_up_to does. A capped walk (more than max_pages x
-    1000 fills that day) gives floors and says so. Errors raise. Goes through
-    the rate-limit buckets (install())."""
-    w = str(wallet or "").strip().lower()
-    if not _ADDRESS.match(w):
-        raise ValueError(f"not a wallet address: {wallet!r}")
-    cut = int(cutoff)
-    d0 = utc_day(cut) * DAY
-    conn = conn or store.default_conn()
-    now = now_epoch()
-    if not refresh:
-        row = store.get_wallet_day_trades(conn, w, cut)
-        if row and (row["complete"] or now - row["fetched_at"] < INCOMPLETE_MAX_AGE):
-            return {"trade_count": row["trade_count"], "tx_count": row["tx_count"], "volume_usdc": row["volume_usdc"],
-                    "capped": bool(row["capped"]), "day_start": d0, "cached": True, "requests": 0}
-    install()
-    raw, capped = polymarket_api.v2_walk("activity", {"user": w, "type": "TRADE", "start": d0, "end": cut,
-                                                      "limit": PAGE_SIZE}, max_pages=max_pages, announce=False)
-    rows = [polymarket_api.as_v1(r) for r in raw
-            if (r.get("type") or "TRADE") == "TRADE" and d0 <= int(r.get("timestamp") or 0) <= cut]
-    if capped:
-        log(f"  ! first-day fills of {w} capped at {len(rows):,} ({max_pages} pages) before {cut}; counts are floors")
-    out = {"trade_count": len(rows), "tx_count": len({h["transactionHash"] for h in rows}),
-           "volume_usdc": round(sum(h["usdcSize"] for h in rows), 6), "capped": bool(capped), "day_start": d0,
-           "cached": False, "requests": max(1, -(-len(raw) // PAGE_SIZE))}
-    store.put_wallet_day_trades(conn, w, cut, d0, out["trade_count"], out["tx_count"], out["volume_usdc"], capped,
-                                complete=now >= cut + SETTLE_SECONDS)
-    return out
-
-
-def exact_prior(wallet, first_ts, conn=None):
-    """The wallet's prior history at the exact cutoff (its first trade,
-    inclusive), counting fills: /v2/user-volume up to the day before the
-    first trade + day_trades for the first-trade day up to the trade.
-    {"trade_count", "volume_usdc", "day_rows", "day_tx", "day_usdc",
-    "base_trade_count", "base_volume_usdc", "capped", "cached", "requests"}
-    (the keys of the former parity.hybrid_prior, plus the parts)."""
-    first_ts = int(first_ts)
-    base = user_volume(wallet, first_ts - DAY, conn=conn)
-    day = day_trades(wallet, first_ts, conn=conn)
-    return {"trade_count": int(base["trade_count"]) + day["trade_count"],
-            "volume_usdc": round(float(base["volume_usdc"]) + day["volume_usdc"], 4),
-            "day_rows": day["trade_count"], "day_tx": day["tx_count"], "day_usdc": round(day["volume_usdc"], 4),
-            "base_trade_count": int(base["trade_count"]), "base_volume_usdc": round(float(base["volume_usdc"]), 4),
-            "capped": day["capped"], "cached": bool(base["cached"] and day["cached"]),
-            "requests": (0 if base["cached"] else 1) + day["requests"]}
-
-
-def exact_priors(pairs, conn=None, workers=4):
-    """exact_prior for many (wallet, first_ts) pairs in parallel, in input
-    order; the first error raises (after the pool stops)."""
-    conn = conn or store.default_conn()
-    pairs = list(pairs)
-    if not pairs:
-        return []
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(pairs)))) as pool:
-        futures = [pool.submit(exact_prior, w, t, conn) for w, t in pairs]
-        try:
-            return [f.result() for f in futures]
-        except BaseException:
-            for f in futures:
-                f.cancel()
-            raise

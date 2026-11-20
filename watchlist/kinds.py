@@ -1135,3 +1135,95 @@ def match_copy(copy, headlines):
         if c == t or (src and c == f"{full} - {src}".strip(" \"'")):
             return h
     return None
+
+
+# ── answers already public: a released work (the user, 2026-11-19) ──────────
+# A market about what happens in a work (a game, a film, a show, an album, a book) is answered once the work is
+# out: what happens in it is public then ("Will Jason or Lucia die in GTA VI?" with GTA VI playable). The open
+# list drops such a story for good (opennow, its "already out" check). The rule reads the market's own words and
+# the story's headlines; it never asks a model.
+_WORK_END = re.compile(r"\b(?:in|on|from)\s+(?:the\s+)?((?:[A-Z0-9][\w'’.:&-]*)(?:\s+(?:[A-Z0-9][\w'’.:&-]*|of|the|"
+                       r"and|&))*)\s*\??\s*$")
+_WORK_CONTENT = re.compile(r"\b(die|dies|death|killed|kills?|survives?|appears?|returns?|cameos?|features?|"
+                           r"ending|ends? with|kiss(es)?|marr(y|ies)|revealed|villain|show up|be (?:in|the))\b", re.I)
+_WORK_KIND = re.compile(r"\b(video ?game|game|film|movie|tv series|season \d+|episode|album|book|novel|sequel|finale)\b",
+                        re.I)
+_WORK_NUMBER = re.compile(r"\b(\d+|ii|iii|iv|v|vi|vii|viii|ix|x|part)\b", re.I)
+RELEASED = re.compile(r"\b(out now|(?:is|are|now) out|(?:is |now )?released|launched|launches today|now available|"
+                      r"available (?:now|today)|now playable|playable now|hits (?:shelves|stores|theaters|theatres)|"
+                      r"in (?:theaters|theatres) now|premiered|aired|debuted|reviews?|reviewed|spoilers?|"
+                      r"ending explained|launch day|release day|day one|sales?|sold|copies|patch(?:es|ed)?|"
+                      r"players (?:are|have|say|discover\w*|find|found|report\w*)|walkthrough|playthrough)\b", re.I)
+# still to come, wherever it is in the headline
+PRE_RELEASE = re.compile(r"\b(trailer|teaser|delay(?:ed|s)?|postpone[sd]?|pushed back|pre-?orders?|release date|"
+                         r"countdown|leaks?|leaked|rumou?rs?|ahead of|before|until|upcoming|when (?:does|is|will))\b",
+                         re.I)
+# still to come only next to the work's name ("GTA 6 will ...", "not without flaws" further on is a review)
+PRE_RELEASE_NEAR = frozenset("will could might may expected not isn won wait waiting set coming soon track planned".split())
+NEAR_WORDS = 3
+_ROMAN = {"ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10"}
+
+
+def _work_words(text):
+    """Lower-case words, a Roman numeral as its number (GTA VI and GTA 6 are one name)."""
+    return [_ROMAN.get(w, w) for w in re.findall(r"[a-z0-9]+", str(text or "").lower())]
+
+
+def released_work(question, title=None, rules=""):
+    """The work a market asks what happens in ("GTA VI" for "Will Jason or Lucia die in GTA VI?"), or None: the
+    capitalised name its question (or its event's title) ends on, after "in", "on" or "from", in a question about
+    what happens in it, when the name is numbered like a sequel or the market's words say it is a game, a film, an
+    episode, an album or a book."""
+    for text in (question, title):
+        t = " ".join(str(text or "").split())
+        m = _WORK_END.search(t)
+        if not (m and _WORK_CONTENT.search(t)):
+            continue
+        work = m.group(1).strip(" .:")
+        if len(" ".join(_work_words(work))) < 3:
+            continue
+        if _WORK_NUMBER.search(work) or _WORK_KIND.search(f"{question} {title or ''} {rules or ''}"):
+            return work
+    return None
+
+
+def _initials(words):
+    return "".join(w[0] for w in words)
+
+
+def _name_end(want, words, i):
+    """Where the work's name ends in words when it starts at words[i], else None: word for word, or initials
+    either way ("GTA" for "Grand Theft Auto", in the question or in the headline)."""
+    j, k = i, 0
+    while k < len(want):
+        if j >= len(words):
+            return None
+        w, h = want[k], words[j]
+        if h == w:
+            j, k = j + 1, k + 1
+        elif w.isalpha() and 2 <= len(w) <= 6 and _initials(words[j:j + len(w)]) == w:
+            j, k = j + len(w), k + 1
+        elif h.isalpha() and 2 <= len(h) <= 6 and _initials(want[k:k + len(h)]) == h:
+            j, k = j + 1, k + len(h)
+        else:
+            return None
+    return j
+
+
+def released_headline(work, headlines):
+    """The first headline that reports the work is out (it names the work, by its words or their initials, and
+    says it is out, played, aired, reviewed, sold or patched, with nothing that says it is still to come: a
+    trailer, a delay, a release date anywhere, or "will", "not", "expected" next to the name), or None."""
+    want = _work_words(work)
+    if not want:
+        return None
+    for h in headlines or []:
+        title = str(h.get("title") or "")
+        words = _work_words(title)
+        spans = [(i, e) for i in range(len(words)) if (e := _name_end(want, words, i)) is not None]
+        if not spans or not RELEASED.search(title) or PRE_RELEASE.search(title):
+            continue
+        near = {w for i, e in spans for w in words[max(0, i - NEAR_WORDS):i] + words[e:e + NEAR_WORDS]}
+        if not near & PRE_RELEASE_NEAR:
+            return h
+    return None

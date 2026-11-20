@@ -19,6 +19,14 @@ returned whatever it had on a rate limit or an error, which scored busy
 wallets as "0 prior trades / 100 % concentrated / suspicious"; the v2 fetcher
 raises instead, so a failed fetch aborts the run rather than inventing a
 new account.
+
+Each history is added up page by page as it arrives (polymarket_api.
+history_totals), so ten wallets at once take a few MB, not the hundreds that
+holding every row took. score_frame scores a clean frame in memory, whales in
+the clean file's order (the order once depended on which history came back
+first); score_market is the same over files. add_market's steps call
+select_whales, whale_cutoff and score_whale on their own, a batch of whales
+per step.
 """
 import json
 import os
@@ -28,6 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
 import polymarket_api
+from backend import outcomes
 
 MARKETS_FILE = "markets.json"
 WORKERS = 10
@@ -90,6 +99,12 @@ def fetch_user_history_up_to(user_address, cutoff_ts):
     Raises on an API error; never returns a partial history silently."""
     return polymarket_api.fetch_user_history_up_to(user_address, cutoff_ts)
 
+
+def history_totals(user_address, cutoff_ts):
+    """What analyze_whale needs of that history, added up page by page:
+    {"stake", "txs", "trades", "capped"} (polymarket_api.history_totals)."""
+    return polymarket_api.history_totals(user_address, cutoff_ts)
+
 def wallet_for(row):
     """The address whose history is scored: the clean row's eoa_address when
     it holds one, else the proxy wallet (user_id). cleandata.py writes an
@@ -101,40 +116,33 @@ def wallet_for(row):
         return eoa.strip().lower()
     return str(row["user_id"]).strip().lower()
 
-def analyze_whale(row):
-    user_id = wallet_for(row)
+def whale_cutoff(row):
+    """The epoch second of a clean row's first trade: its history is read up to and including it."""
+    return int(pd.to_datetime(row["first_trade"]).timestamp())
 
+
+def score_whale(row, totals):
+    """A whale's _insiders.csv row from its clean row and its history's totals (history_totals)."""
     target_pos = float(row["dollar_amount"])
-    
+
     # Extract the temporal element for the CSV
     trade_time = str(row["first_trade"])
-    
-    cutoff_dt = pd.to_datetime(row["first_trade"])
-    cutoff_ts = int(cutoff_dt.timestamp())
-    
-    history = fetch_user_history_up_to(user_id, cutoff_ts)
-    
-    api_historical_stake = 0.0
-    unique_txs = set()
-    
-    for h in history:
-        api_historical_stake += float(h.get("usdcSize", 0))
-        unique_txs.add(h.get("transactionHash", ""))
-        
-    prior_bet_count = len(unique_txs)
-    
+
+    api_historical_stake = float(totals["stake"])
+    prior_bet_count = int(totals["txs"])
+
     lifetime_portfolio = max(api_historical_stake, target_pos)
-    
+
     is_first_x = prior_bet_count <= FIRST_X_TRADES
     is_percent = False
-    
+
     concentration = (target_pos / lifetime_portfolio) * 100 if lifetime_portfolio > 0 else 100.0
-    
+
     if concentration >= PERCENT_VOLUME:
         is_percent = True
-        
+
     return {
-        "user_id": row["user_id"], 
+        "user_id": row["user_id"],
         "market_position": target_pos,
         "lifetime_portfolio": lifetime_portfolio,
         "prior_bet_count": prior_bet_count,
@@ -144,6 +152,10 @@ def analyze_whale(row):
         "is_suspicious": is_first_x or is_percent,
         "target_trade_time": trade_time
     }
+
+
+def analyze_whale(row):
+    return score_whale(row, history_totals(wallet_for(row), whale_cutoff(row)))
 
 def select_market(markets, keyword=None, name=None):
     """The markets.json entry to score. name= is an exact match on the entry's
@@ -181,19 +193,9 @@ def main(keyword=None, name=None):
     score_market(m, clean_csv, out_csv)
 
 
-def score_market(m, clean_csv, out_csv):
-    """Score the whales of market entry `m` (a markets.json dict) from
-    clean_csv into out_csv. Paths are explicit, so a caller working on
-    another checkout never depends on the cwd.
-    The file is written whole (temp file + rename), so an interrupted run
-    never leaves a truncated _insiders.csv that looks finished."""
-    if not os.path.exists(clean_csv):
-        raise FileNotFoundError(f"Clean data missing: {clean_csv}")
-
-    print(f"\nAnalyzing whales for: {m['name']}")
-
-    df = pd.read_csv(clean_csv)
-
+def select_whales(m, df, quiet=False):
+    """(whales, market_title): the clean frame's rows to score for market entry `m`, in the frame's order, and
+    the market's title. Adds is_winner to df. Raises ValueError when correct_outcome contradicts win_status."""
     market_title = df["market_title"].iloc[0] if "market_title" in df.columns else m["name"]
     highlighted = m.get("highlightedUsers", {})
 
@@ -214,47 +216,76 @@ def score_market(m, clean_csv, out_csv):
 
     whales = df[whale_mask | hi_mask].copy()
 
-    if sweeps.any():
-        print(f"  left out {int(sweeps.sum())} near-certain position(s) (average price >= {NEAR_CERTAIN_ODDS:.2f}, "
-              f"${df.loc[sweeps, 'dollar_amount'].sum():,.0f}): resolution sweeps, not informed bets")
-    if exits.any():
-        print(f"  left out {int(exits.sum())} SELL row(s) of the winning outcome (${df.loc[exits, 'dollar_amount'].sum():,.0f}): "
-              f"exits or bets on the other side, not winning bets")
-    print(f"Found {len(whales)} whales matching criteria. Fetching historical API data...")
+    if not quiet:
+        if sweeps.any():
+            print(f"  left out {int(sweeps.sum())} near-certain position(s) (average price >= {NEAR_CERTAIN_ODDS:.2f}, "
+                  f"${df.loc[sweeps, 'dollar_amount'].sum():,.0f}): resolution sweeps, not informed bets")
+        if exits.any():
+            print(f"  left out {int(exits.sum())} SELL row(s) of the winning outcome "
+                  f"(${df.loc[exits, 'dollar_amount'].sum():,.0f}): exits or bets on the other side, not winning bets")
+        if whales.empty:
+            print(f"  ! no whale met the ${threshold:,.0f} threshold on the {correct_outcome or 'winning'} side "
+                  f"(below {NEAR_CERTAIN_ODDS:.2f}); writing the header only")
+    return whales, market_title
 
-    results = []
+
+def insiders_frame(results, market_title):
+    """The _insiders.csv frame of scored whales (score_whale's rows, in order); the full header when there are
+    none, so export.py and the site treat a small market as "no whales" instead of crashing on a file with a lone
+    market_title column."""
+    if results:
+        out_df = pd.DataFrame(results)
+        out_df["market_title"] = market_title
+    else:
+        out_df = pd.DataFrame(columns=INSIDER_COLS)
+    return out_df[INSIDER_COLS]
+
+
+def score_frame(m, df, totals_for=None, workers=WORKERS):
+    """The _insiders.csv frame of market entry `m` from its clean frame (not changed). totals_for(wallet,
+    cutoff) -> history_totals' dict (default: fetched, `workers` at a time). Whales in the frame's order. A
+    history that cannot be fetched raises: a whale is never scored without it."""
+    df = df.copy()
+    whales, market_title = select_whales(m, df)
+    print(f"Found {len(whales)} whales matching criteria. Fetching historical API data...")
+    totals_for = totals_for or history_totals
+    rows = [row for _, row in whales.iterrows()]
+    found = [None] * len(rows)
     done = 0
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(analyze_whale, row): row for _, row in whales.iterrows()}
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {outcomes.submit(pool, totals_for, wallet_for(row), whale_cutoff(row)): i
+                   for i, row in enumerate(rows)}
         for future in as_completed(futures):
-            row = futures[future]
+            i = futures[future]
             try:
-                results.append(future.result())
+                found[i] = score_whale(rows[i], future.result())
             except Exception as e:
                 # Never score a whale whose history could not be fetched (that
                 # is how the v1 run manufactured "new account" rows); abort
                 # the market and say which wallet failed.
                 pool.shutdown(wait=False, cancel_futures=True)
-                raise RuntimeError(f"prior history of {wallet_for(row)} (first trade {row['first_trade']}) "
+                raise RuntimeError(f"prior history of {wallet_for(rows[i])} (first trade {rows[i]['first_trade']}) "
                                    f"could not be fetched; no _insiders.csv written for {m['name']}: "
                                    f"{type(e).__name__}: {e}") from e
             done += 1
-            print(f"Processed {done}/{len(whales)} whales", end="\r", flush=True)
+            print(f"Processed {done}/{len(rows)} whales", end="\r", flush=True)
+    return insiders_frame(found, market_title)
+
+
+def score_market(m, clean_csv, out_csv):
+    """Score the whales of market entry `m` (a markets.json dict) from
+    clean_csv into out_csv. Paths are explicit, so a caller working on
+    another checkout never depends on the cwd.
+    The file is written whole (temp file + rename), so an interrupted run
+    never leaves a truncated _insiders.csv that looks finished."""
+    if not os.path.exists(clean_csv):
+        raise FileNotFoundError(f"Clean data missing: {clean_csv}")
+
+    print(f"\nAnalyzing whales for: {m['name']}")
+
+    out_df = score_frame(m, pd.read_csv(clean_csv))
 
     print("\nSaving results...")
-    if results:
-        out_df = pd.DataFrame(results)
-        out_df["market_title"] = market_title
-    else:
-        # A market with no winning position above the threshold (a small
-        # market): write the full header so export.py
-        # and the site treat it as "no whales" instead of crashing on a
-        # file with a lone market_title column.
-        print(f"  ! no whale met the ${threshold:,.0f} threshold on the {correct_outcome or 'winning'} side "
-              f"(below {NEAR_CERTAIN_ODDS:.2f}); writing the header only")
-        out_df = pd.DataFrame(columns=INSIDER_COLS)
-    out_df = out_df[INSIDER_COLS]
-
     tmp_csv = f"{out_csv}.tmp"
     out_df.to_csv(tmp_csv, index=False)
     os.replace(tmp_csv, out_csv)

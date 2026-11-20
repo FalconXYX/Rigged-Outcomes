@@ -3,9 +3,9 @@ import { useRoute } from "../lib/router";
 import "./shell.css";
 
 /**
- * One ruled strip: brand · caveat · data note · author + repo. The caveat and
- * the data note are about the market pages' statistics (times in ET); the
- * watchlist has no statistics and gives its times in UTC, so it leaves them out.
+ * One ruled strip: brand · data note · author + repo. The data note is about
+ * the market pages' data (times in ET); the watchlist reads the news as well
+ * as Polymarket and gives its own sources, so it leaves it out.
  */
 export function SiteFooter() {
   const stats = useRoute().page !== "watchlist";
@@ -17,12 +17,7 @@ export function SiteFooter() {
           Rigged Outcomes
         </span>
         <div className="footer-meta">
-          {stats && (
-            <>
-              <span>Flags are statistical signals, not proof of wrongdoing.</span>
-              <span>Data: Polymarket Data API v2 + Gamma · times ET</span>
-            </>
-          )}
+          {stats && <span>Data: Polymarket Data API v2 + Gamma · times ET</span>}
           <span className="footer-links">
             <span>
               Built by{" "}

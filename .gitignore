@@ -3,14 +3,12 @@ __pycache__/
 
 .env
 
-# raw trade dumps (tracked v1 CSVs stay; new raw dumps never get swept up)
-data/*.csv
-!data/*_clean.csv
-!data/*_insiders.csv
+# local data: trade CSVs, the watchlist's sqlite store, caches, logs, demo JSON (the site's data is in the
+# database; the original CSVs are on the original-project branch)
+data/
 
-# watchlist: sqlite store, caches, logs, demo JSON (all regenerable)
-data/watchlist/
-
-# macOS folder files and pytest's cache (tests/test_v2_parity.py also runs under pytest)
+# macOS folder files and pytest's cache
 .DS_Store
 .pytest_cache/
+.vercel
+.env*

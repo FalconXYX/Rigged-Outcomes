@@ -1,7 +1,9 @@
 // What every endpoint shares: responses and errors, bodies, the visitor hash, token checks, the daily
-// limits, the bot check (Cloudflare Turnstile) and the label and slug rules. The shapes, codes and limits
-// are the contract the site (web/src/lib/api.ts) and the job (watchlist/sync.py, whose docstring lists the
-// shapes) share with this Worker.
+// limits (counted per Toronto day), the Worker's clock, the bot check (Cloudflare Turnstile) and the label and
+// slug rules. The shapes, codes and limits are the contract the site (web/src/lib/api.ts), the step function
+// (backend/, docs/BACKEND.md) and the daily lists (watchlist/sync.py) share with this Worker.
+
+import { toronto } from "./contract";
 
 export interface Env {
   DB: D1Database;
@@ -10,28 +12,58 @@ export interface Env {
   OWNER_TOKEN: string;
   JOB_TOKEN: string;
   VISITOR_SALT: string;
-  GITHUB_DISPATCH_TOKEN?: string;
+  /** Signs the wake-ups sent to the step function (wake.ts); Vercel holds the same value. */
+  WAKE_SECRET?: string;
+  /** Sent as x-ro-gate with each wake-up: Vercel's firewall lets /api/step through only with it (docs/DEPLOY.md). */
+  WAKE_GATE?: string;
   // vars (wrangler.toml)
   ALLOWED_ORIGINS: string;
   TURNSTILE_HOSTNAMES: string;
   TURNSTILE_STRICT: string;
-  GITHUB_REPO: string;
-  GITHUB_WORKFLOW: string;
   DEV: string;
-  /** DEV=on only: where "Apply decisions now" sends its dispatch (the test's stand-in for api.github.com). */
-  GITHUB_API?: string;
+  /** The step function: https://<vercel project>/api/step (with DEV=on, a local one may stand in). */
+  STEP_URL?: string;
 }
 
-/** One request as a handler sees it: params are the route's captured path segments. */
+/**
+ * One request as a handler sees it: params are the route's captured path segments; waitUntil keeps work going
+ * after the answer is sent (the Worker's ctx.waitUntil); clock is the Worker's time (clockOf).
+ */
 export interface Ctx {
   req: Request;
   env: Env;
   url: URL;
   params: string[];
+  waitUntil: (task: Promise<unknown>) => void;
+  clock: () => Promise<number>;
 }
 
 export const DAY = 86_400;
 export const now = () => Math.floor(Date.now() / 1000);
+
+/**
+ * The Worker's clock in epoch seconds, which every decision of the queue, the schedule and the daily limits uses:
+ * the real time, or with DEV=on the real time moved by settings.dev_offset (POST /api/dev/clock), so a test can
+ * jump to 04:00 Toronto and time keeps running from there.
+ */
+export async function clockOf(env: Env): Promise<number> {
+  if (!dev(env)) return now();
+  const offset = await env.DB.prepare("SELECT value FROM settings WHERE key = 'dev_offset'").first<string>("value");
+  return now() + (Number(offset) || 0);
+}
+
+/** A clock read once, on first use (one D1 read with DEV=on, none otherwise). */
+export function lazyClock(env: Env): () => Promise<number> {
+  let at: Promise<number> | null = null;
+  return () => (at ??= clockOf(env));
+}
+
+/** The Toronto day n days before a "YYYY-MM-DD" day (calendar arithmetic, no time zone involved). */
+export function daysBefore(day: string, n: number): string {
+  const d = new Date(`${day}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
 
 /** Body caps: a visitor's write, the owner's review page, the daily job. */
 export const BODY = { visitor: 4 * 1024, owner: 64 * 1024, job: 1024 * 1024 } as const;
@@ -194,7 +226,7 @@ export async function safeEqual(a: string, b: string): Promise<boolean> {
   return crypto.subtle.timingSafeEqual(x, y);
 }
 
-const dev = (env: Env) => env.DEV === "on";
+export const dev = (env: Env) => env.DEV === "on";
 
 /**
  * The address a visitor counts under: an IPv4 address as it is, and an IPv6 one as its /64 network
@@ -245,45 +277,60 @@ export async function visitorOf(req: Request, env: Env): Promise<string> {
   return hex(await crypto.subtle.sign("HMAC", key, enc.encode(addressKey(ip)))).slice(0, 32);
 }
 
-/** Today's UTC date, which the daily limits count under. With DEV=on, X-Test-Day stands in (fresh counters per test run). */
-export function utcDay(req?: Request, env?: Env): string {
-  if (req && env && dev(env)) {
+/**
+ * Today's Toronto day, which the daily limits count under (they reset at midnight in Toronto). With DEV=on,
+ * X-Test-Day stands in (fresh counters per test run).
+ */
+export function limitDay(req: Request, env: Env, at: number): string {
+  if (dev(env)) {
     const test = req.headers.get("x-test-day");
     if (test && /^[\w-]{1,24}$/.test(test)) return test;
   }
-  return new Date().toISOString().slice(0, 10);
+  return toronto(at).day;
 }
 
 const AUTH_FAILS = 10;
 
+/** The User-Agent the daily job sends (watchlist/sync.py, and the workflow's curl calls). */
+export const JOB_AGENT = "rigged-outcomes-job";
+
 /**
  * Owner and job sign-in: one bearer token each. The token is compared first, so the right one always gets
  * in (one shared network's wrong guesses can't lock the owner out). Wrong ones are counted per visitor; after
- * 10 in a UTC day that visitor's wrong tokens are answered 429 locked and no longer counted (which keeps the
- * writes down; guessing a 256-bit token is hopeless anyway).
+ * 10 in a Toronto day that visitor's wrong tokens are answered 429 locked and no longer counted (which keeps the
+ * writes down; guessing a 256-bit token is hopeless anyway). A job token refused from the job itself (its
+ * User-Agent) is kept as settings.job_refused, for the review page: the job's secret no longer matches.
  */
 export async function authorize(req: Request, env: Env, who: "owner" | "job"): Promise<void> {
   const m = /^Bearer (\S{1,512})$/.exec(req.headers.get("authorization") ?? "");
   const secret = who === "owner" ? env.OWNER_TOKEN : env.JOB_TOKEN;
   if (m && secret && (await safeEqual(m[1], secret))) return;
+  const at = await clockOf(env);
+  if (who === "job" && req.headers.get("user-agent") === JOB_AGENT) {
+    await env.DB.prepare(
+      "INSERT INTO settings (key, value, updated_at) VALUES ('job_refused', ?1, ?1) ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?1",
+    )
+      .bind(String(at))
+      .run();
+  }
   const visitor = await visitorOf(req, env);
-  const day = utcDay(req, env);
+  const day = limitDay(req, env, at);
   if (!(await counter(env, day, "auth_fail", visitor, AUTH_FAILS).first())) {
-    fail(429, "locked", "Too many wrong tokens today. Try again tomorrow (UTC).");
+    fail(429, "locked", "Too many wrong tokens today. Try again tomorrow.");
   }
   fail(401, "unauthorized", "That token was not accepted.");
 }
 
 // ---------- daily limits ----------
 
-/** [per visitor, whole site] per UTC day. */
+/** [per visitor, whole site] per Toronto day. */
 export const LIMITS = {
   marker: [10, 300],
   watch: [30, 1000],
   request: [5, 50],
 } as const;
 
-/** New markers one market's timeline takes a UTC day, from everyone together (so no one fills it in a day). */
+/** New markers one market's timeline takes a Toronto day, from everyone together (so no one fills it in a day). */
 export const MARKERS_A_DAY_PER_MARKET = 20;
 
 /** One counter, one statement: it counts the attempt and returns the new n, or returns nothing (and writes nothing) at the cap. */
@@ -303,10 +350,17 @@ export type SharedLimit = { kind: string; cap: number; code: string; message: st
  * ones allowed it, so one visitor at their limit can't use up everyone's; a visitor turned away by a later
  * cap loses that one count.
  */
-export async function quota(req: Request, env: Env, kind: keyof typeof LIMITS, visitor: string, also: SharedLimit[] = []): Promise<void> {
-  const day = utcDay(req, env);
+export async function quota(
+  req: Request,
+  env: Env,
+  kind: keyof typeof LIMITS,
+  visitor: string,
+  also: SharedLimit[] = [],
+  at?: number,
+): Promise<void> {
+  const day = limitDay(req, env, at ?? (await clockOf(env)));
   const [mine, site] = LIMITS[kind];
-  if (!(await counter(env, day, kind, visitor, mine).first())) fail(429, "limit", `Today's limit of ${mine} ${kind} writes is reached.`);
+  if (!(await counter(env, day, kind, visitor, mine).first())) fail(429, "limit", `Today's limit of ${mine} ${kind} writes is reached. Try again tomorrow.`);
   for (const a of also) if (!(await counter(env, day, a.kind, "*", a.cap).first())) fail(429, a.code, a.message);
   if (!(await counter(env, day, kind, "*", site).first())) fail(429, "busy", `The site's limit of ${site} ${kind} writes today is reached.`);
 }
@@ -321,6 +375,11 @@ export async function writesOn(env: Env): Promise<boolean> {
 export async function requireWrites(env: Env): Promise<void> {
   if (!(await writesOn(env))) fail(503, "paused", "Visitors' changes are paused.");
 }
+
+// ---------- "Apply decisions now" ----------
+
+/** Apply runs the review page's "Apply decisions now" may make a Toronto day (quota.kind 'apply'). */
+export const APPLIES_A_DAY = 30;
 
 // ---------- the bot check ----------
 

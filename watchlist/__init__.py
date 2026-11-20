@@ -1,43 +1,41 @@
 """
-watchlist — the two lists on the site's Watchlist page (#/watchlist), and
-the earlier statistical scans they replaced.
+watchlist — the two lists on the site's Watchlist page (#/watchlist).
 
-The site's lists, each written to web/public/data/ (gitignored):
+The site's lists, published to the site's data (site:closed.json and
+site:open.json in the database, served by the Worker at /api/data/):
 
-  upsets   the Recently closed list (closed.json): each UTC day's closed
-           markets worth a look as possible insider cases, from word rules
-           (kinds), AI labels (ai) and a check against the news (judge).
+  upsets   the Recently closed list (closed.json): each Toronto day's
+           closed markets worth a look as possible insider cases, 3 a day,
+           from word rules (kinds), AI labels (ai) and a check against the
+           news (judge).
   judge    that check: a news query per market, Google News headlines
            (news) and a model's verdict. No prices, trades or wallets.
   opennow  the Open now list (open.json): open markets where a few people
            will know the answer first and the news shows them moving
            toward it.
-  deep     the trade-data look at one closed market, kept for later; not
-           used by either list yet.
 
-The daily job that runs them (.github/workflows/watchlist.yml, or
-scripts/watchlist-mac.sh; docs/DEPLOY.md):
+The daily run that makes them (docs/BACKEND.md): queued jobs in the
+Worker's D1 database, run in steps on Vercel from 04:00 Toronto time:
 
+  steps    one handler per job kind: the work, the watched markets, the
+           closed list's scan, labels, queries, news, checks and publish,
+           the open list's walk, names, news, readings and publish, the
+           report, and "Apply decisions now". Each step works to its own
+           deadline and resumes where it stopped.
   state    the job's memory between runs: the store tables the lists read
-           and write, saved in the site's database with the published lists
-           and the news cache. Nothing of the job's is kept in git.
+           and write, saved in the site's database. Nothing of the job's is
+           kept in git.
   blobs    how the job saves a document there: gzip-compressed, in parts,
            through the API's job endpoints (worker/src/blobs.ts).
   sync     the job's side of the site's API (worker/): the owner's decisions
-           on the open list's queue, approved "Add to main page" requests
-           (add_market.py at the repo root builds each one's page, saved in
-           the database), watch counts, and the run's report.
-  publish  the site deploy's step: the saved lists and added markets into
-           the data the site is built from.
-
-The earlier statistical scans (closed_scan, open_scan, track_record,
-backtest, parity; built on method) are not used by the site. Their demo
-JSON goes to data/watchlist/demo/.
+           on the open list's queue, the watched markets that closed (sent
+           to the main page), the catalog, and the run's report.
+  publish  a list published to the site's data (site:<name>.json).
 
 Run modules from the repo root as `python3 -m watchlist.<module>`. Other
 generated data lives only under data/watchlist/ (gitignored): the sqlite
-store (data/watchlist/watchlist.db), caches and raw/clean trade CSVs
-(data/watchlist/cache/) and logs.
+store (data/watchlist/watchlist.db), the news cache (data/watchlist/cache/)
+and logs.
 
 Layers, bottom up (each imports only the ones above it):
 
@@ -45,25 +43,23 @@ Layers, bottom up (each imports only the ones above it):
   filters  pure functions on Gamma objects: exclusions (games, prices,
            weather), resolution, event grouping, main-market choice, the
            open pool, series keys. No network.
-  store    sqlite: wallet look-up cache, scanned markets/events, method
-           results, whale rows, AI labels, meta (cursors, run notes).
+  store    sqlite: AI labels, the closed list's checks, the open list's
+           pool, filings, readings, days, cards and reviews, meta.
   net      every Polymarket call the watchlist makes, behind one token
            bucket per endpoint family (<= 40 % of the documented limits):
-           open-event walk, closed-market window, recent trades,
-           user_volume (cached in the store).
-  method   THE USER'S METHOD (scrape_insiders) on one resolved market, with
-           prior history from one /v2/user-volume call per whale.
+           the open-event walk and the closed-market window.
   kinds    the one vocabulary of the closed and the open list: embargoed
            releases, the kinds and their three groups, the dated place, the
            card sentences, step / leak / odds words, source ranks. Pure; it
            imports nothing from the package, so any module can use it.
 
-The legacy pipeline modules (polymarket_api, polymarket_trades, cleandata,
-scrape_insiders) are reused, never copied.
+The legacy pipeline modules (polymarket_api, and add_market for a market
+added to the main page) are reused, never copied.
 
-Public API (what the scan/rank/AI scripts build on):
+Public API (what the lists build on):
 
   common.to_epoch(v) / iso(epoch) / utc_day(epoch) / day_str(day)
+  common.local_day(epoch) / local_bounds(day) / local_iso(epoch)   Toronto days and stamps
   common.Budget(seconds)               .expired(reserve) / .left()
   filters.exclusion(market, event=None) -> (category, detail) | None
   filters.winning_outcome(market)      -> (index, name) | None
@@ -73,16 +69,8 @@ Public API (what the scan/rank/AI scripts build on):
   filters.series_key(event) / title_key(title)
   net.walk_open_events(min_volume=100_000)          -> [event]
   net.closed_markets(since, until=None, min_volume=100_000) -> [market] (closedTime in window)
-  net.recent_trades(condition_id, since, until=None) -> (v2 rows, capped)
-  net.user_volume(wallet, end_epoch, conn=None)     -> {volume, volume_usdc, trade_count, day, cached}
-  net.user_volumes([(wallet, end)], conn=None)      -> [same], in order
-  net.exact_prior(wallet, first_ts, conn=None)      -> prior at the exact cutoff (user-volume + first-day fills)
   net.fetch_event(id) / markets_by_condition(ids) / get_json(url, params) / install()
-  method.analyze_market(market, cutoff_variant="exact"|"same_day"|"day_before", ...) -> result dict
-      (VARIANTS; DEFAULT_VARIANT "exact"; CUTOFF_VARIANTS = the two one-call variants)
-  method.analyze_slug(slug, ...) / brief(result) / flag_whale / price_jump / RESULT_FIELDS
-  store.connect(path) / default_conn() and the get_/save_/set_ helpers per table;
-  store.closed_results(conn, variant, since_ts, until_ts) for the track record.
+  store.connect(path) / default_conn() and the get_/save_/set_ helpers per table.
 """
 
 from watchlist import common as _common  # noqa: F401,E402  (puts the repo root on sys.path)

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": { "deploymentEnabled": false },
+  "functions": {
+    "api/step.py": {
+      "maxDuration": 300,
+      "includeFiles": "{backend/**,watchlist/**,markets.json,add_market.py,cleandata.py,export.py,polymarket_api.py,polymarket_trades.py,scrape_insiders.py}"
+    }
+  },
+  "routes": [
+    { "src": "^/api/step$", "missing": [{ "type": "header", "key": "x-ro-wake", "value": "^v1,[0-9]{9,11},(main|news|model|add),[0-9a-f]{16},[0-9a-f]{64}$" }], "mitigate": { "action": "deny" } },
+    { "src": "^/(?!api/step$).*", "mitigate": { "action": "deny" } }
+  ]
+}

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-The job's own client (watchlist/blobs.py, watchlist/state.py) against a real
-local Worker, where the offline tests use a stand-in (tests/fake_api.py): its
-HTTP, its JSON, the ":" kept in a blob's path, a save in many parts, expect,
-and the state's seed, push, pull, kept versions and restore. test/run.mjs runs
-it on its throwaway database, after the smoke test. Exits 1 on any failed
-check.
+The job's own client (watchlist/blobs.py, watchlist/state.py, watchlist/sync.py)
+against a real local Worker, where the offline tests use a stand-in
+(tests/fake_api.py): its HTTP, its JSON, the ":" kept in a blob's path (and an
+added market's page, whose "/" goes as %2F), a save in many parts, expect, and
+the state's seed, push, pull, kept versions and restore; and a watched market
+from a visitor's Watch to its add run, the market added and the story off the
+watchlist. test/run.mjs runs it on its throwaway database, after the smoke
+test (SKIP_CLIENT=1 leaves it out). Exits 1 on any failed check.
 
     python3 test/client.py http://127.0.0.1:8799
 """
@@ -20,8 +22,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
+import requests  # noqa: E402
+
 from test_watchlist_state import NOW, filled, rows  # noqa: E402
 from watchlist import blobs, state as S, store, sync  # noqa: E402
+
+SITE_LISTS = ("site:closed.json", "site:open.json")
 
 passed, failed = 0, []
 
@@ -65,12 +71,18 @@ def main(base):
     check("client: a market keeps no versions", blobs.versions(c, name) == [])
     check("client: removed", blobs.delete(c, name) and blobs.head(c, name) is None and not blobs.delete(c, name))
 
+    # an added market's page: its name holds a "/", sent as %2F
+    page = f"site:markets/py-{secrets.token_hex(4)}.json"
+    h = blobs.put(c, page, b'{"name": "py"}\n', {}, expect=None)
+    check("client: a page under site:markets/ saves and reads back", h["name"] == page and blobs.get(c, page)[1] == b'{"name": "py"}\n', h)
+    check("client: ...and goes", blobs.delete(c, page) and blobs.head(c, page) is None)
+
     # the state: seed, a fresh runner's pull, an unchanged push sending nothing, a save, a restore
     if blobs.head(c, S.STATE) is not None:
         check("client: the state checks need a database with no state (npm test's)", False)
         return
-    for name in S.SITE_FILES:                       # the smoke test leaves made-up lists, not gzip: real ones over them
-        blobs.put(c, S._list_name(name), b'{"days": []}\n', {"by": "client"})
+    for name in SITE_LISTS:                         # the smoke test leaves made-up lists, not gzip: real ones over them
+        blobs.put(c, name, b'{"days": []}\n', {"by": "client"})
     # lists but no state: a used database that lost its state, never a fresh start (the real
     # Worker's listing of every blob and the state's kept versions, which it answers for a state never saved)
     refusal = None
@@ -117,9 +129,44 @@ def main(base):
               [second["version"]])
 
 
+def watched(base):
+    """A visitor watches an open card; the daily run's watch.check finds its market closed with a result and sends
+    it (POST /api/job/requests), which makes its add run at once; the add reports it added, and the story leaves
+    the watchlist once Open now no longer lists it."""
+    c = sync.Client(base, "dev-job-token", retry_waits=())
+    tag = secrets.token_hex(4)
+    story, cid = f"client watched {tag}", "0x" + secrets.token_hex(32)
+    visitor = {"x-test-visitor": f"client-{tag}", "x-test-day": f"client-{tag}"}
+    c.request("PUT", "/api/job/catalog", {"open": [{"story": story, "question": "Will Acme be sold?",
+                                                    "url": "https://polymarket.com/event/acme"}]})
+    r = requests.post(f"{base}/api/watch", json={"story": story, "token": "XXXX.DUMMY.TOKEN.XXXX"}, headers=visitor,
+                      timeout=20)
+    check("watched: a visitor puts it on the site's watchlist", r.status_code == 200 and r.json()["watching"], r.text)
+    pick = {"condition_id": cid, "slug": f"acme-{tag}", "question": "Will Acme be sold?",
+            "url": f"https://polymarket.com/event/acme-{tag}", "winner": "Yes", "closed": "2026-11-14T17:58:37+00:00",
+            "day": "2026-11-14"}
+    sent = c.request("POST", "/api/job/requests", {"requests": [pick]})["requests"]
+    run_id = sent[0].get("run_id") if sent else None
+    check("watched: sent, it is approved with its own add run", [x["status"] for x in sent] == ["approved"] and
+          (run_id or "").startswith(f"add:{cid}:"), sent)
+    run = c.request("GET", f"/api/job/run?id={run_id}")
+    check("watched: ...whose add.fetch is queued", any(j["kind"] == "add.fetch" and j["state"] == "queued"
+                                                       for j in run["jobs"]), run)
+    c.request("POST", "/api/job/done", {"requests": [{"condition_id": cid, "status": "added", "name": f"acme-{tag}",
+                                                      "note": None}]})
+    on = requests.get(f"{base}/api/request", params={"cid": cid}, timeout=20).json()["request"]
+    check("watched: the add's report marks it added, under its page name", on["status"] == "added" and
+          on["name"] == f"acme-{tag}", on)
+    c.request("PUT", "/api/job/catalog", {"open": []})            # its card is no longer on Open now
+    c.request("POST", "/api/job/done", {"watched": [story]})
+    left = requests.get(f"{base}/api/watch", params={"story": story}, timeout=20).json()
+    check("watched: ...and the story leaves the watchlist", left["watching"] is False, left)
+
+
 if __name__ == "__main__":
     try:
         main(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8788")
+        watched(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8788")
     except Exception as e:                                        # noqa: BLE001
         import traceback
         traceback.print_exc()

@@ -1,13 +1,13 @@
 import { Fragment, type CSSProperties } from "react";
 import type { OpenCard, OpenData } from "../../types";
-import { fmtDate, fmtDay, fmtInt } from "../../lib/format";
+import { fmtDate, fmtDay, fmtDayAt, fmtInt, fmtStamp, torontoDay } from "../../lib/format";
 import { closeSheet, useQuery } from "../../lib/router";
-import { Chevron, MoreButton, NewsList, Panel, colsFor, hhmm, ms, openPanel, panelId, plural } from "./shared";
+import { Chevron, MoreButton, NewsList, Panel, colsFor, ms, openPanel, panelId, plural } from "./shared";
 import { CardWatch, WatchControl } from "./controls";
 
 // "Open now": markets still open where a few people will know the answer
 // before the public, and this week's news shows them moving toward it
-// (watchlist/opennow.py → data/open.json). The latest list's 3-5 cards, in the
+// (watchlist/opennow.py → open.json, served by the API). The latest list's 3-5 cards, in the
 // closed cards' grid, each under the section's indigo rule: the plain
 // question, the headline that put it on the list as a quote (a dated card
 // with no headline shows its date there instead: when the answer comes out
@@ -33,14 +33,12 @@ export const isOpenKey = (v: string | undefined) => v?.startsWith("o-") ?? false
 
 const moreId = (k: string) => `op-more-${k}`;
 
-/** a list made longer ago than this missed a day's run (they run daily, and GitHub often starts one hours late) */
+/** a list made longer ago than this missed a day's run (the daily run starts at 04:00 Toronto time) */
 const STALE_MS = 40 * 36e5;
 
 const dayDate = (day: string) => new Date(`${day}T00:00:00Z`);
 /** "Dec 31", or "Mar 31, 2027" outside the list's own year */
 const onDay = (day: string, ref: string) => (day.slice(0, 4) === ref.slice(0, 4) ? fmtDay : fmtDate)(dayDate(day));
-/** "Nov 13, 04:00 UTC" */
-const stamp = (iso: string) => `${fmtDay(new Date(iso))}, ${hhmm(iso)} UTC`;
 
 /** "Jan 31, Feb 28, Jun 30 and Dec 31, 2027": a year once, after the last date in it, when it isn't the list's own; a date never breaks across lines. */
 function dateList(days: string[], ref: string): string {
@@ -126,7 +124,7 @@ function Quote({ c, day }: { c: OpenCard; day: string }) {
       <span className="op-quote-text">{h.title}</span>
       <span className="op-quote-src">
         {h.source}
-        {h.published && <> ·&nbsp;{fmtDay(new Date(h.published))}</>}
+        {h.published && <> ·&nbsp;{fmtDayAt(h.published)}</>}
       </span>
     </a>
   );
@@ -245,7 +243,7 @@ function Details({ c, day }: { c: OpenCard; day: string }) {
           )}
           {c.checked_at && (
             <p className="op-checked">
-              No report yet that {done} (checked {fmtDay(new Date(c.checked_at))})
+              No report yet that {done} (checked {fmtDayAt(c.checked_at)})
             </p>
           )}
         </section>
@@ -278,8 +276,8 @@ function HowPicked({ data }: { data: OpenData }) {
         search for a candidate, as read by a model that never sees prices or trading
         {r.steps_by !== "model" && " and confirmed by a person"}. One of the {fmtInt(r.per_day)} places goes to a market whose
         last step is {fmtInt(r.fresh_days + 1)} to {fmtInt(r.live_days)} days old, and one to an answer decided in advance
-        that comes out within {plural(r.dated_days, "day")}. A market is held back while recent headlines suggest its answer
-        is already out.
+        that comes out within {plural(r.dated_days, "day")}. A market leaves the list once its answer is public, which
+        includes the game, film, show, album or book it is about coming out.
       </p>
     </details>
   );
@@ -336,8 +334,8 @@ export function OpenNow({ data, cols }: { data: OpenData | null | undefined; col
   // missed today's run: the pipeline said so, or no run since yesterday's
   const stale = !!day && (day.status === "not updated today" || Date.now() - ms(day.run_at) > STALE_MS);
   const lastRun = data?.days.find((d) => d.status === "updated")?.run_at ?? day?.run_at;
-  // "today" only while the list's UTC day lasts; after midnight it names its day ("3 new on Nov 13")
-  const current = !!day && !stale && day.day === new Date().toISOString().slice(0, 10);
+  // "today" only while the list's day lasts in Toronto; after midnight it names its day ("3 new on Nov 13")
+  const current = !!day && !stale && day.day === torontoDay();
   const onItsDay = day && !stale && !current ? ` on ${onDay(day.day, day.day)}` : "";
   const few = stale
     ? `${n === 1 ? "Only 1 market qualifies" : `Only ${fmtInt(n)} markets qualify`}.`
@@ -365,14 +363,14 @@ export function OpenNow({ data, cols }: { data: OpenData | null | undefined; col
                   <b>{fmtInt(day.new_today)}</b> new {current ? "today" : `on ${onDay(day.day, day.day)}`}
                 </li>
               )}
-              <li>Updated {stamp(stale ? (lastRun ?? day.run_at) : day.run_at)}</li>
+              <li>Updated {fmtStamp(stale ? (lastRun ?? day.run_at) : day.run_at)}</li>
             </ul>
           )}
         </div>
       </header>
 
       {day && (
-        <p className="op-lede">Open markets with the potential for insider trading; none of it is confirmed.</p>
+        <p className="op-lede">Open markets with the potential for insider trading.</p>
       )}
 
       {data === null || (data && !day) ? (

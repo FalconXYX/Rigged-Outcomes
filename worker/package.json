@@ -7,6 +7,7 @@
     "dev": "wrangler dev --port 8788 --ip 127.0.0.1 --persist-to \"${WRANGLER_STATE:-.wrangler/state}\"",
     "migrate:local": "wrangler d1 migrations apply rigged-outcomes --local --persist-to \"${WRANGLER_STATE:-.wrangler/state}\"",
     "typecheck": "tsc --noEmit",
+    "unit": "node test/unit.mjs",
     "smoke": "node test/smoke.mjs http://localhost:8788",
     "test": "node test/run.mjs"
   },

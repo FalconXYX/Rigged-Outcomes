@@ -3,7 +3,7 @@ The closed list's last filter: a model reads what each market asked, how it
 resolved and the news about it, and says whether it is worth a person's look
 as a possible insider case. No prices, trades or wallets: the user wants this
 stage to be a light, non-statistical first filter (2026-11-12); the trade
-data comes later, for the markets people pick (watchlist.deep).
+data comes later, for the markets people add to the main page (add_market).
 
 The model is the free Gemini key (watchlist.ai.Client). That key cannot
 search the web, so the search is ours: the model writes a news query per
@@ -58,7 +58,6 @@ JUDGE_RETRIES = 1       # a busy model hands over at once instead of backing off
 BUSY_WAIT = 30          # seconds before asking again when every model was busy (then 3 times that)
 JUDGE_TRIES = 3         # tries of one batch while every model is busy
 JUDGE_DOWN_AFTER = 3    # batches in a row that got no judgement: the model is down for this run
-RUN_BUSY = ai.Busy()    # the default judge clients' busy count, over the run's days: one long pause a run
 NEWS_RETRY_WAIT = 5     # seconds before a news search that failed for a moment is asked again
 NEWS_DOWN_AFTER = 10    # markets in a row whose news search failed: the news is down for this run
 QUERY_BATCH = 25
@@ -269,8 +268,12 @@ def headlines_for(market, query):
     checks already cached keep what they read until the judgement change
     re-checks every market."""
     after, before = news_window(market)
-    found = news.search(query, after=after, before=before)
-    return [h for h in found if not kinds.is_odds(h.get("title"), h.get("source"), percent=False)][:HEADLINES]
+    return judge_headlines(news.search(query, after=after, before=before))
+
+
+def judge_headlines(found):
+    """A search's headlines as the judge reads them: odds and betting-site ones left out, up to HEADLINES."""
+    return [h for h in found or [] if not kinds.is_odds(h.get("title"), h.get("source"), percent=False)][:HEADLINES]
 
 
 def _headlines(m, q, sleep):
@@ -301,8 +304,6 @@ def check_markets(markets, conn, client=None, budget=None, sleep=time.sleep):
         return out
     queries = write_queries(todo, client or ai.Client(), budget)
     judge_client = client or ai.Client(models=JUDGE_MODELS, retries=JUDGE_RETRIES)
-    if client is None:
-        judge_client.busy = RUN_BUSY
     busy = ai.busy_of(judge_client)
     found, failed = [], 0
     for n, m in enumerate(todo):

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
 Offline tests for add_market.py (a market sent with "Add to main page"):
-fake Polymarket and pipeline steps in a temporary copy of the repo's
-markets.json. No network.
+fake Polymarket (Gamma, the trade pages, the whales' history totals) in a
+temporary copy of the repo's markets.json. No network.
 
     python3 tests/test_add_market.py
 
 Covers the page name (given, or made from the slug when the job has none)
-and its PascalCase output, avoiding the names and outputs of committed and
+and its PascalCase output, avoiding the names and outputs of markets.json's and
 added markets, Polymarket's market having to match (condition id, closed,
-winner), a slug already on the main page (committed, or added before)
+winner), a slug already on the main page (markets.json's, or added before)
 reported as added with no work, a name or output already taken, the caps
-(fills, the page's size), a step that fails, and a dry run. Whatever
-happens, markets.json stays byte for byte as it was and the scratch folder
-the market was built in is gone.
+(fills, the page's size, the data's size), a step that fails, and a dry
+run. Whatever happens, markets.json stays byte for byte as it was and no
+file is written (tests/test_add_pipeline.py checks the page itself).
 """
 import json
 import os
@@ -31,40 +31,36 @@ MARKET = {"conditionId": CID, "closed": True, "umaResolutionStatus": "resolved",
           "outcomes": '["Yes", "No"]', "outcomePrices": '["1", "0"]'}
 
 
-class Fake:
-    """The pipeline's steps, writing small files into the scratch folder; records what ran."""
+def fill(i, size=10.0, price=0.5, outcome="Yes"):
+    return {"proxy_wallet": "0x" + f"{i:040x}", "side": "BUY", "outcome": outcome,
+            "outcome_index": 0 if outcome == "Yes" else 1, "size": size, "price": price, "timestamp": 1_790_000_000 + i,
+            "transaction_hash": f"0x{i:064x}"}
 
-    def __init__(self, market=MARKET, fills=3, page_bytes=10):
-        self.market, self.fills, self.page_bytes, self.ran = market, fills, page_bytes, []
+
+class Fake:
+    """Polymarket's three answers the add needs; records what ran."""
+
+    def __init__(self, market=MARKET, fills=3, whale=True):
+        self.market, self.fills, self.whale, self.ran = market, fills, whale, []
 
     def steps(self):
         def gamma(slug):
             self.ran.append(("gamma", slug))
             return dict(self.market)
 
-        def download(slug, raw, max_rows):
-            self.ran.append(("download", slug, max_rows, raw))
-            n = min(self.fills, max_rows)
-            with open(raw, "w") as f:
-                f.write("h\n" + "r\n" * n)
-            return n
+        def pages(cid):
+            self.ran.append(("pages", cid))
+            rows = [fill(i) for i in range(1, self.fills + 1)]
+            if self.whale and rows:
+                rows.append(fill(999, size=5000.0, price=0.4))         # $2,000 on Yes: a whale
+            yield rows[:2]
+            yield rows[2:]
 
-        def clean(raw, out):
-            self.ran.append(("clean", os.path.basename(raw), os.path.basename(out)))
-            with open(out, "w") as f:
-                f.write("clean\n")
+        def history(w, cutoff):
+            self.ran.append(("history", w))
+            return {"stake": 100.0, "txs": 3, "trades": 3, "capped": False}
 
-        def score(entry, clean, out):
-            self.ran.append(("score", entry["output"]))
-            with open(out, "w") as f:
-                f.write("insiders\n")
-
-        def export(entry, data_dir):
-            self.ran.append(("export", entry, sorted(os.listdir(data_dir))))
-            return ({"name": entry["name"], "slug": entry["slug"], "title": "T?"},
-                    {"name": entry["name"], "slug": entry["slug"], "pad": "x" * self.page_bytes})
-
-        return {"gamma": gamma, "download": download, "clean": clean, "score": score, "export": export}
+        return {"gamma": gamma, "pages": pages, "history": history}
 
 
 class repo:
@@ -82,14 +78,10 @@ class repo:
         try:
             if exc[0] is None:
                 assert read(os.path.join(self.tmp, "markets.json")) == self.before, "markets.json changed"
-                work = os.path.join(self.tmp, A.WORK_DIR)
-                assert not os.path.exists(work) or os.listdir(work) == [], os.listdir(work)
-                assert set(os.listdir(os.path.join(self.tmp, "data"))) <= {"watchlist"} | set(self.kept), \
-                    os.listdir(os.path.join(self.tmp, "data"))
+                assert os.listdir(os.path.join(self.tmp, "data")) == [], os.listdir(os.path.join(self.tmp, "data"))
+                assert sorted(os.listdir(self.tmp)) == ["data", "markets.json"], os.listdir(self.tmp)
         finally:
             shutil.rmtree(self.tmp)
-
-    kept = ()
 
 
 def read(path, mode="rb"):
@@ -134,16 +126,15 @@ def test_adds_a_market():
                     root=tmp, steps=f.steps())
         entry = {"name": "gemini-carbon", "slug": "gemini-carbon-ship", "output": "GeminiCarbon",
                  "correct_outcome": "Yes"}
-        assert got == {"status": "added", "name": "gemini-carbon", "note": None, "changed": True, "entry": entry,
-                       "index": {"name": "gemini-carbon", "slug": "gemini-carbon-ship", "title": "T?"},
-                       "market": {"name": "gemini-carbon", "slug": "gemini-carbon-ship", "pad": "x" * 10},
-                       "data": {"GeminiCarbon_clean.csv": "clean\n", "GeminiCarbon_insiders.csv": "insiders\n"}}, got
-        assert [r[0] for r in f.ran] == ["gamma", "download", "clean", "score", "export"]
-        assert f.ran[1][:3] == ("download", "gemini-carbon-ship", A.MAX_FILLS + 1)
-        scratch = os.path.dirname(f.ran[1][3])                                  # built in data/watchlist/add/<...>
-        assert os.path.dirname(scratch) == os.path.join(tmp, A.WORK_DIR) and not os.path.exists(scratch)
-        assert f.ran[-1] == ("export", entry, ["GeminiCarbon.csv", "GeminiCarbon_clean.csv",
-                                               "GeminiCarbon_insiders.csv"])
+        assert got["status"] == "added" and got["changed"] and got["note"] is None, got
+        assert got["entry"] == entry and got["index"]["name"] == "gemini-carbon" == got["market"]["name"]
+        assert got["index"]["slug"] == "gemini-carbon-ship" and got["index"]["positions"] == 4
+        assert sorted(got["data"]) == ["GeminiCarbon_clean.csv", "GeminiCarbon_insiders.csv"]
+        assert got["data"]["GeminiCarbon_clean.csv"].startswith("user_id,eoa_address,market_id,")
+        assert "\r" not in got["data"]["GeminiCarbon_clean.csv"]
+        assert got["market"]["traders"]["totalWhales"] == 1
+        assert [r[0] for r in f.ran] == ["gamma", "pages", "history"]
+        assert f.ran[0] == ("gamma", "gemini-carbon-ship") and f.ran[1] == ("pages", MARKET["conditionId"])
         # added before (the database's entries): already on the main page, nothing runs
         f2 = Fake()
         got = A.add(CID, "gemini-carbon-ship", "other-name", "Yes", root=tmp, steps=f2.steps(), added=[entry])
@@ -155,18 +146,10 @@ def test_adds_a_market():
 def test_already_on_the_main_page_through_markets_json():
     with repo() as tmp:
         usiran = next(m for m in json.loads(read(os.path.join(tmp, "markets.json"))) if m["name"] == "usiran")
-        repo.kept = tuple(f"{usiran['output']}{s}.csv" for s in ("_clean", "_insiders"))
-        try:
-            for name in repo.kept:
-                open(os.path.join(tmp, "data", name), "w").close()
-            f = Fake()
-            got = A.add(CID, usiran["slug"], None, "Yes", root=tmp, steps=f.steps())
-            assert got == {"status": "added", "name": "usiran", "note": "already on the main page", "changed": False}
-            assert [r[0] for r in f.ran] == ["gamma"]
-        finally:
-            for name in repo.kept:
-                os.remove(os.path.join(tmp, "data", name))
-            repo.kept = ()
+        f = Fake()
+        got = A.add(CID, usiran["slug"], None, "Yes", root=tmp, steps=f.steps())
+        assert got == {"status": "added", "name": "usiran", "note": "already on the main page", "changed": False}
+        assert [r[0] for r in f.ran] == ["gamma"]
 
 
 def test_adds_a_market_named_from_its_slug():
@@ -213,49 +196,42 @@ def test_taken_names_and_files():
         got = A.add(CID, "new-slug", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps())
         assert got["status"] == "failed" and "in data/ already" in got["note"]
         os.remove(stray)
-        # the slug is listed but its data files are missing
-        superbowl = next(m for m in json.loads(read(os.path.join(tmp, "markets.json"))) if m["name"] == "superbowl")
-        got = A.add(CID, superbowl["slug"], "another", "Yes", root=tmp, steps=Fake().steps())
-        assert got["status"] == "failed" and "without its data files" in got["note"]
 
 
 def test_caps_and_failures_leave_nothing_behind():
     with repo() as tmp:
         got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(fills=6).steps(), max_fills=5)
         assert got["status"] == "failed" and "over 5 fills" in got["note"], got
-        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(page_bytes=2_000_000).steps(),
-                    max_page_bytes=1_000_000)
-        assert got["status"] == "failed" and "its page is 2 MB, over the 1 MB" in got["note"], got
+        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps(), max_page_bytes=1_000)
+        assert got["status"] == "failed" and "its page is 0 MB, over the 0 MB" in got["note"], got
         assert A.MAX_PAGE_BYTES == 10_000_000
-        # its data files, saved with it so the deploy can build its page again, have a cap too
+        # its data files, saved with it so its page can be built again, have a cap too
         got = A.add(CID, "event/gemini-carbon-ship#9", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps(),
                     max_data_bytes=10)
         assert got["status"] == "failed" and "its data files are 0 MB, over the 0 MB" in got["note"], got
         assert A.MAX_DATA_BYTES == 40_000_000
 
         # a step that raises (the trade feed down, a whale's history refused)
-        f = Fake()
-        steps = f.steps()
-
-        def refused(entry, clean, out):
-            with open(out + ".tmp", "w") as fh:
-                fh.write("half")
-            raise RuntimeError("prior history of 0xabc could not be fetched")
-        steps["score"] = refused
-        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=steps)
-        assert got["status"] == "failed" and got["note"].startswith("RuntimeError: prior history")
-        # no trades at all
-        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(fills=0).steps())
-        assert got["status"] == "failed" and "no trades" in got["note"]
-        # a page the site could not read (NaN) fails here, not at the deploy
         steps = Fake().steps()
-        steps["export"] = lambda entry, d: ({"name": entry["name"]}, {"name": entry["name"], "x": float("nan")})
+
+        def refused(w, cutoff):
+            raise RuntimeError("Polymarket refused")
+        steps["history"] = refused
         got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=steps)
+        assert got["status"] == "failed" and got["note"].startswith("RuntimeError: prior history"), got
+        assert isinstance(got["error"], RuntimeError) and "Traceback" in got["traceback"]
+        # no trades at all
+        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake(fills=0, whale=False).steps())
+        assert got["status"] == "failed" and "no trades" in got["note"]
+        # a page the site could not read (NaN) fails here, not on the site
+        import export
+        orig = export.export_one
+        export.export_one = lambda entry, **kw: ({"name": entry["name"]}, {"name": entry["name"], "x": float("nan")})
+        try:
+            got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps())
+        finally:
+            export.export_one = orig
         assert got["status"] == "failed" and got["note"].startswith("ValueError")
-    # a scratch folder elsewhere (work_dir) is removed too
-    with repo() as tmp, tempfile.TemporaryDirectory() as work:
-        got = A.add(CID, "s", "gemini-carbon", "Yes", root=tmp, steps=Fake().steps(), work_dir=work)
-        assert got["changed"] and os.listdir(work) == []
 
 
 def test_dry_run_changes_nothing():

@@ -1,24 +1,16 @@
-# Build the static dashboard (web/) and publish it to GitHub Pages.
+# Build the static site (web/) and publish it to GitHub Pages: on a push to main, or by hand. Nothing else runs on
+# GitHub. The backend is the Cloudflare Worker and the Vercel step function (docs/BACKEND.md), and the site reads
+# what they publish (every market, the Watchlist's lists) from the Worker as it loads, so an add or a day's lists
+# never need a build.
 #
 # One-time setup (see docs/DEPLOY.md), or the deploy job is rejected:
-#   1. Settings → Pages → Build and deployment → Source: "GitHub Actions"
-#      (it currently publishes the D3.js branch; switching replaces that site), and "Enforce HTTPS"
-#      (the API answers https://parthjain.ca only).
-#   2. Settings → Environments → github-pages → Deployment branches: add "main"
-#      (the environment only allows "D3.js" today).
-#   3. Optional, for the visitor controls (timeline markers, Watch, Add to main page): the repository
-#      variables API_URL (the Worker's address) and TURNSTILE_SITEKEY (the bot check's site key). With
-#      neither set, the build is exactly the site without them ("Not available yet").
-# The site is served at https://parthjain.ca/Rigged-Outcomes/ (Vite base "./" + hash
-# routing, so no path configuration is needed here).
-#
-# The Watchlist's two lists (closed.json, open.json) and the markets added with "Add to main page" come from
-# the database, through the API (watchlist/publish.py), where the daily Watchlist job
-# (.github/workflows/watchlist.yml) saves them; that job also calls this workflow after each run, with soft:
-# true. With no API configured, the build goes ahead without them (the Watchlist shows its placeholders); while
-# the API is down, the live site's own copies stand in; with the live site down too, this deploy is left out
-# (Pages keeps the last site) rather than failing. With soft, PyPI or npm still not answering after 3 tries
-# leaves it out too. The Pages deploy is tried twice. Otherwise only a setup or code problem fails it.
+#   1. Settings → Pages → Build and deployment → Source: "GitHub Actions", and "Enforce HTTPS" (the API answers
+#      https://parthjain.ca only).
+#   2. Settings → Environments → github-pages → Deployment branches: add "main".
+#   3. The repository variables API_URL (the Worker's address) and TURNSTILE_SITEKEY (the bot check's site key).
+#      With neither set, the site makes no API call and has no markets to show.
+# The site is served at https://parthjain.ca/Rigged-Outcomes/ (Vite base "./" + hash routing, so no path
+# configuration is needed here).
 
 name: Deploy dashboard to GitHub Pages
 
@@ -26,21 +18,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      ref:
-        description: "the commit to build (the Watchlist job passes main)"
-        type: string
-        default: main
-      soft:
-        description: "an install that fails 3 times leaves the deploy out (Pages keeps the last site) instead of failing"
-        type: boolean
-        default: false
-    secrets:
-      WATCHLIST_JOB_TOKEN:
-        required: false
 
-# The build (which installs packages from npm and PyPI) reads the repository only; the Pages permissions belong
+# The build (which installs packages from npm) reads the repository only; the Pages permissions belong
 # to the deploy job alone.
 permissions:
   contents: read
@@ -49,80 +28,30 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    outputs:
-      skip: ${{ steps.pyinstall.outputs.skip == 'true' || steps.npminstall.outputs.skip == 'true' || steps.watchlist.outputs.skip == 'true' }}
-    env:
-      SOFT: ${{ inputs.soft && 'true' || 'false' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      # With soft (the Watchlist job's deploy), PyPI still not answering after 3 tries leaves the deploy out
-      - name: Install Python dependencies
-        id: pyinstall
-        run: |
-          for try in 1 2 3; do
-            pip install --require-hashes -r requirements.lock && exit 0
-            if [ "$try" -lt 3 ]; then echo "::warning::pip install failed (try $try of 3); trying again in 60 s"; sleep 60; fi
-          done
-          if [ "$SOFT" = true ]; then
-            echo "::warning::pip install failed 3 times: this deploy is left out and Pages keeps the last site"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          exit 1
-
-      # Turns data/*.csv into web/public/data/*.json (gitignored, so built here).
-      - name: Export dashboard data
-        if: steps.pyinstall.outputs.skip != 'true'
-        run: python export.py
-
-      # The Watchlist's lists and the markets added with "Add to main page", as the daily job saved them in the
-      # database (each added market's page built again with this export.py). With no API configured the site is
-      # built without them; while the API is down the live site's copies stand in; with both down the deploy is
-      # left out (skip=true), so Pages keeps the last site. A refusal (a wrong token) fails the build.
-      - name: Add the Watchlist lists and the added markets
-        id: watchlist
-        if: steps.pyinstall.outputs.skip != 'true'
-        env:
-          WATCHLIST_API_URL: ${{ vars.API_URL }}
-          WATCHLIST_JOB_TOKEN: ${{ secrets.WATCHLIST_JOB_TOKEN }}
-        run: python3 -m watchlist.publish --out web/public/data
-
       - name: Set up Node
-        if: steps.pyinstall.outputs.skip != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
 
+      # npm not answering is tried 3 times, a minute apart
       - name: Install web dependencies
-        id: npminstall
-        if: steps.pyinstall.outputs.skip != 'true'
         working-directory: web
         run: |
           for try in 1 2 3; do
             npm ci && exit 0
             if [ "$try" -lt 3 ]; then echo "::warning::npm ci failed (try $try of 3); trying again in 60 s"; sleep 60; fi
           done
-          if [ "$SOFT" = true ]; then
-            echo "::warning::npm ci failed 3 times: this deploy is left out and Pages keeps the last site"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           exit 1
 
       - name: Type-check and build
-        if: steps.pyinstall.outputs.skip != 'true' && steps.npminstall.outputs.skip != 'true'
         working-directory: web
         env:
           VITE_API_URL: ${{ vars.API_URL }}
@@ -130,14 +59,12 @@ jobs:
         run: npm run build
 
       - name: Upload Pages artifact
-        if: steps.pyinstall.outputs.skip != 'true' && steps.npminstall.outputs.skip != 'true' && steps.watchlist.outputs.skip != 'true'
         uses: actions/upload-pages-artifact@v5
         with:
           path: web/dist
 
   deploy:
     needs: build
-    if: needs.build.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:

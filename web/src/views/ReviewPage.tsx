@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   WORDS,
   apiConfigured,
@@ -9,28 +9,41 @@ import {
   setOwner,
   type AddRequest,
   type AdminMarker,
+  type Backend,
+  type BackendRun,
+  type Budget,
+  type BudgetLevel,
   type Candidate,
   type Decision,
   type DecisionValue,
   type JobRun,
+  type LaneState,
   type Overview,
   type QueueItem,
+  type RunKind,
+  type RunState,
   type Sent,
 } from "../lib/api";
 import { loadIndex, useAsync } from "../lib/data";
-import { fmtDay, fmtInt, fmtT } from "../lib/format";
+import { fmtCalDay, fmtDayAt, fmtInt, fmtStamp, fmtT, torontoClock, torontoDay } from "../lib/format";
 import "./review.css";
 
 // The owner's review page (#/review, linked from nowhere). Unlocked with the
 // owner token (kept in this page's memory only, so a reload asks again), it
-// shows how the daily run went and the pause switch for visitors' changes,
-// then the open list's step headlines that wait for a decision, the closed
-// markets sent to the main page (a read-only list), the markers visitors
-// added and the site's watchlist. A decision is applied by the next run: the
-// daily one (about 04:17 UTC), or at once with "Apply decisions now" when the Worker holds a
-// GitHub token. Plain on purpose, in the site's type and tokens.
+// shows how the last daily run and the last apply run went, what the owner
+// must fix (a job token the API refused, a wake-up Vercel didn't take), the
+// pause switch for visitors' changes and "Apply decisions now"; then the
+// backend (docs/BACKEND.md): Vercel's use over the last 30 days as the Worker
+// last counted it, the lanes, the latest runs and the failed steps; then the
+// open list's step headlines that wait for a decision, the closed markets sent
+// to the main page (a read-only list), the markers visitors added and the
+// site's watchlist. A decision is applied by the next daily run, or within
+// minutes by "Apply decisions now" (an apply run). While it is in view the
+// page asks for the overview again (every 15 s while something waits for a
+// run, else every minute), so a run's result shows by itself. Every day and
+// time is Toronto's. Plain on purpose, in the site's type and tokens.
 
-/** a daily run older than this has missed one (they run once a day, and GitHub often starts one hours late) */
+/** a daily run older than this has missed one (they start once a day, at 04:00 Toronto time) */
 const LATE_HOURS = 40;
 /** daily runs in a row with a problem before the page says so (a problem that keeps coming back is worth a look) */
 const TROUBLED_RUNS = 3;
@@ -38,12 +51,28 @@ const TROUBLED_RUNS = 3;
 /** the first problem a run's summary lists after "; problems: " (watchlist/problems.py summary_with) */
 const firstProblem = (summary: string | null) => summary?.split("; problems: ")[1]?.split("; ")[0] ?? null;
 
-const day = (iso: string) => fmtDay(new Date(iso.length === 10 ? `${iso}T00:00:00Z` : iso));
-const hhmm = (s: number) => new Date(s * 1000).toISOString().slice(11, 16);
-/** "Nov 14, 04:31 UTC" from epoch seconds */
-const stampOf = (s: number) => `${fmtDay(new Date(s * 1000))}, ${hhmm(s)} UTC`;
-const dayOf = (s: number) => fmtDay(new Date(s * 1000));
+/** "Nov 14": a calendar day ("2026-11-14"), or Toronto's day of an ISO stamp */
+const day = (iso: string) => (iso.length === 10 ? fmtCalDay(iso) : fmtDayAt(iso));
+/** "Nov 14, 04:31 ET" from epoch seconds */
+const stampOf = (s: number) => fmtStamp(s * 1000);
+const dayOf = (s: number) => fmtDayAt(s * 1000);
+/** "04:31", or "Nov 14, 04:31 ET" when it isn't on Toronto's day `ref` (epoch seconds) */
+const clockOn = (s: number, ref: number) => (torontoDay(s * 1000) === torontoDay(ref * 1000) ? torontoClock(s * 1000) : stampOf(s));
 const dkey = (story: string, key: string) => `${story}\u0000${key}`;
+
+/** how often the page in view asks for the overview again: while a decision, an add or a run waits (or a run was just queued), else */
+const POLL_MS = 15_000;
+const IDLE_POLL_MS = 60_000;
+/** a run queued from this page counts as waited for this long (ms) */
+const STARTED_FOR = 30 * 60_000;
+
+/** The overview as compared between asks (its `now` changes every time). */
+const sameAs = (a: Overview | null, b: Overview) => !!a && JSON.stringify({ ...a, now: 0 }) === JSON.stringify({ ...b, now: 0 });
+
+const RUN_TERMINAL = new Set<RunState>(["done", "partial", "failed", "cancelled", "missed", "skipped"]);
+
+/** What "Apply decisions now" said, kept across the page's refreshes: `at` (ms) the press; `started`: an apply run was queued (`run`). */
+type ApplyNote = { at: number; text: string; started: boolean; run?: string | null };
 
 /** An error from the API in words: the code's words, with the API's own message where it says more. */
 const said = (r: Extract<Sent<unknown>, { ok: false }>) =>
@@ -65,16 +94,21 @@ function Review() {
   }, []);
   const [unlocked, setUnlocked] = useState(() => !!ownerToken());
   const [data, setData] = useState<Overview | null>(null);
-  // each load remounts the sections, whose state starts from the overview (so Reload shows what changed)
+  // each new overview remounts the sections, whose state starts from it (so Reload shows what changed)
   const [loads, setLoads] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [note, setNote] = useState<ApplyNote | null>(null);
+  const shown = useRef<{ data: Overview | null; note: ApplyNote | null }>({ data: null, note: null });
+  shown.current = { data, note };
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /** Ask for the overview; `quiet` (the page's own refresh): only a refused token is shown, and an unchanged one changes nothing. */
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
     const r = await ownerGet<Overview>("/api/admin/overview");
-    setLoading(false);
+    if (!quiet) setLoading(false);
     if (r.ok && r.data) {
+      if (quiet && sameAs(shown.current.data, r.data)) return;
       setData(r.data);
       setLoads((n) => n + 1);
       setError(null);
@@ -85,15 +119,45 @@ function Review() {
       forgetOwner();
       setUnlocked(false);
       setData(null);
-    }
+    } else if (quiet) return;
     setError(r.ok ? WORDS.other : said(r));
   }, []);
 
   useEffect(() => {
     if (unlocked) load();
-    // only on arrival: later loads follow an unlock or a decision
+    // only on arrival: later loads follow an unlock, a decision or the refresh below
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // the page's own refresh while it is in view
+  useEffect(() => {
+    if (!unlocked) return;
+    let asked = Date.now();
+    const waits = () => {
+      const { data: d, note: n } = shown.current;
+      if (n?.started && Date.now() - n.at < STARTED_FOR) return true;
+      return (
+        !!d &&
+        (d.decisions.some((x) => x.applied_at == null) ||
+          d.requests.some((x) => x.status === "approved") ||
+          (d.backend?.runs ?? []).some((x) => x.state === "queued" || x.state === "running"))
+      );
+    };
+    const ask = (every: number) => {
+      if (document.hidden || Date.now() - asked < every) return;
+      asked = Date.now();
+      void load(true);
+    };
+    const timer = window.setInterval(() => ask((waits() ? POLL_MS : IDLE_POLL_MS) - 1000), 5000);
+    const back = () => ask(5000);
+    document.addEventListener("visibilitychange", back);
+    window.addEventListener("focus", back);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", back);
+      window.removeEventListener("focus", back);
+    };
+  }, [unlocked, load]);
 
   if (!unlocked)
     return (
@@ -110,7 +174,7 @@ function Review() {
     return error ? (
       <p className="rv-line">
         <span className="rv-error">{error}</span> ·{" "}
-        <button type="button" className="cl-link" disabled={loading} onClick={load}>
+        <button type="button" className="cl-link" disabled={loading} onClick={() => load()}>
           Try again
         </button>
       </p>
@@ -121,7 +185,9 @@ function Review() {
     <Signed
       key={loads}
       data={data}
-      reload={load}
+      note={note}
+      onNote={setNote}
+      reload={() => load()}
       onForget={() => {
         forgetOwner();
         setUnlocked(false);
@@ -144,7 +210,6 @@ function Unlock({ error, busy, onUnlock }: { error: string | null; busy: boolean
         <span className="label">Owner token</span>
         <input type="password" autoComplete="current-password" value={token} onChange={(e) => setToken(e.target.value)} />
       </label>
-      <p className="rv-muted">Kept on this page only: reloading the page asks for it again.</p>
       <div className="rv-actions">
         <button type="submit" className="btn btn-solid btn-sm" disabled={busy || !token.trim()}>
           {busy ? "Checking…" : "Unlock"}
@@ -159,10 +224,23 @@ function Unlock({ error, busy, onUnlock }: { error: string | null; busy: boolean
   );
 }
 
-function Signed({ data, reload, onForget }: { data: Overview; reload: () => void; onForget: () => void }) {
+function Signed({
+  data,
+  note,
+  onNote,
+  reload,
+  onForget,
+}: {
+  data: Overview;
+  note: ApplyNote | null;
+  onNote: (n: ApplyNote | null) => void;
+  reload: () => void;
+  onForget: () => void;
+}) {
   return (
     <>
-      <Status data={data} onForget={onForget} />
+      <Status data={data} note={note} onNote={onNote} onForget={onForget} />
+      {data.backend && <BackendSection backend={data.backend} data={data} />}
       <QueueSection data={data} />
       <RequestsSection data={data} />
       <MarkersSection markers={data.markers} />
@@ -176,80 +254,130 @@ function Signed({ data, reload, onForget }: { data: Overview; reload: () => void
   );
 }
 
-/* ── Status: the last run, the pause switch, "Apply decisions now" ───── */
-
-const APPLY_NOTE =
-  "Starts the update job (about 10–20 minutes): it applies your decisions and adds the markets sent to the main page; " +
-  "the site updates when it finishes. Otherwise the next daily run (about 04:17 UTC) does it.";
+/* ── Status: the last runs, the pause switch, "Apply decisions now" ───── */
 
 const RUN_NAME: Record<JobRun["mode"], string> = { full: "Last daily run", apply: "Last apply run", local: "Last run from the Mac" };
 
-function Status({ data, onForget }: { data: Overview; onForget: () => void }) {
+/** One run's report in a line: when, its status, its summary, and its log when it had a problem. */
+function RunLine({ run }: { run: JobRun }) {
+  return (
+    <ul className="meta-line rv-line">
+      <li>
+        {RUN_NAME[run.mode]}: {stampOf(run.finished_at)}
+      </li>
+      <li>{run.status}</li>
+      {run.summary && <li className="rv-wrap">{run.summary}</li>}
+      {run.status !== "success" && run.url && (
+        <li>
+          <a href={run.url} target="_blank" rel="noopener noreferrer">
+            log ↗
+          </a>
+        </li>
+      )}
+    </ul>
+  );
+}
+
+/** What fixes a wake-up Vercel didn't take, by the error the Worker kept (lanes.wake_error). */
+const WAKE_FIX: Record<string, string> = {
+  "HTTP 401": "WAKE_SECRET must be the same on the Worker and on Vercel",
+  "HTTP 403": "vercel.json's /api/step rule must let the signed wake-ups through",
+  "HTTP 404": "the Worker's STEP_URL must be the Vercel deployment's /api/step",
+  "HTTP 503": "the Vercel project isn't taking calls; its dashboard says why",
+  "no answer": "the Worker's STEP_URL must be the Vercel deployment's /api/step",
+};
+
+/** What the owner must fix for the backend to run, newest first (none: nothing to fix). */
+function setupErrors(data: Overview, newest: number): string[] {
+  const out: string[] = [];
+  if (data.job_refused_at != null && data.job_refused_at > newest)
+    out.push(
+      `The API refused the job's token (${stampOf(data.job_refused_at)}): Vercel's WATCHLIST_JOB_TOKEN must be the Worker's JOB_TOKEN.`,
+    );
+  const byError = new Map<string, string[]>();
+  for (const l of data.backend?.lanes ?? []) if (l.wake_error) byError.set(l.wake_error, [...(byError.get(l.wake_error) ?? []), l.lane]);
+  for (const [err, lanes] of byError) {
+    const fix = WAKE_FIX[err];
+    out.push(
+      `Vercel didn't take the last wake-up of the ${lanes.join(", ")} ${lanes.length === 1 ? "lane" : "lanes"} (${err})${fix ? `: ${fix}` : ""}.`,
+    );
+  }
+  return out;
+}
+
+function Status({
+  data,
+  note,
+  onNote,
+  onForget,
+}: {
+  data: Overview;
+  note: ApplyNote | null;
+  onNote: (n: ApplyNote | null) => void;
+  onForget: () => void;
+}) {
   const [writes, setWrites] = useState(data.settings.writes);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-  const [applied, setApplied] = useState<string | null>(null);
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
   const runs = [...data.runs].sort((a, b) => b.finished_at - a.finished_at);
-  const last = runs[0];
   const dailies = runs.filter((r) => r.mode !== "apply");
   const daily = dailies[0];
+  // the last daily run always; the last apply run too when it came after it
+  const apply = runs.find((r) => r.mode === "apply" && (!daily || r.finished_at > daily.finished_at));
   const late = daily ? Math.floor((data.now - daily.finished_at) / 3600) : null;
   const troubled = dailies.length >= TROUBLED_RUNS && dailies.slice(0, TROUBLED_RUNS).every((r) => r.status !== "success");
   const problem = troubled ? firstProblem(daily.summary) : null;
+  const errors = setupErrors(data, runs[0]?.finished_at ?? 0);
+  // a queued apply's note goes once a run has reported since the press, or its run has finished (the lines say how it went)
+  const applyRun = note?.run ? data.backend?.runs.find((r) => r.id === note.run) : undefined;
+  const reported = note?.started && (runs.some((r) => r.finished_at * 1000 >= note.at) || (!!applyRun && RUN_TERMINAL.has(applyRun.state)));
+  const noteText = note && !reported ? (applyRun?.state === "running" ? "Applying your decisions." : note.text) : null;
 
   const toggle = async () => {
     setBusy(true);
-    setNote(null);
+    setSwitchError(null);
     const next = writes === "on" ? "off" : "on";
     const r = await ownerSend<{ settings: { writes: "on" | "off" } }>("PUT", "/api/admin/settings", { writes: next });
     setBusy(false);
     if (r.ok) setWrites(r.data?.settings?.writes ?? next);
-    else setNote(said(r));
+    else setSwitchError(said(r));
   };
 
-  const apply = async () => {
+  const start = async () => {
     setBusy(true);
-    setApplied(null);
-    const r = await ownerSend<{ dispatched: boolean }>("POST", "/api/admin/apply");
+    const at = Date.now();
+    onNote(null);
+    const r = await ownerSend<{ queued: boolean; run?: string }>("POST", "/api/admin/apply");
     setBusy(false);
-    if (r.ok) setApplied("Started · the site updates when the job finishes.");
-    else if (r.code === "limit") setApplied("Not started: it was started less than 2 minutes ago, or 30 times today.");
-    else if (r.code === "no_dispatch") setApplied("Not started: the Worker has no GitHub token.");
-    else setApplied(`Not started: ${said(r)}`);
+    if (r.ok) onNote({ at, text: "Queued: your decisions are applied in a few minutes.", started: true, run: r.data?.run ?? null });
+    else if (r.code === "limit") onNote({ at, text: "Not queued: it has been pressed 30 times today.", started: false });
+    else onNote({ at, text: `Not queued: ${said(r)}`, started: false });
   };
 
   return (
     <section className="rv-sec" aria-label="Status">
-      <ul className="meta-line rv-line">
-        {last ? (
-          <>
-            <li>
-              {RUN_NAME[last.mode]}: {stampOf(last.finished_at)}
-            </li>
-            <li>{last.status}</li>
-            {last.summary && <li className="rv-wrap">{last.summary}</li>}
-            {last.status !== "success" && last.url && (
-              <li>
-                <a href={last.url} target="_blank" rel="noopener noreferrer">
-                  log ↗
-                </a>
-              </li>
-            )}
-          </>
-        ) : (
-          <li>No run has reported yet.</li>
+      <div className="rv-runs">
+        {daily && <RunLine run={daily} />}
+        {apply && <RunLine run={apply} />}
+        {!runs.length && (
+          <ul className="meta-line rv-line">
+            <li>No run has reported yet.</li>
+          </ul>
         )}
-      </ul>
+        {errors.map((e) => (
+          <p key={e} className="rv-warn" role="alert">
+            {e}
+          </p>
+        ))}
+      </div>
       {late != null && late > LATE_HOURS && (
-        <p className="rv-warn">
-          No daily run has reported for {fmtInt(late)} hours. Check the workflow in GitHub Actions.
-        </p>
+        <p className="rv-warn">No daily run has reported for {fmtInt(late)} hours. The backend's runs below show where it stopped.</p>
       )}
       {troubled && (
         <p className="rv-warn">
-          The last {TROUBLED_RUNS} daily runs each had a problem{problem ? ` (the newest: ${problem})` : ""}. Check the
-          newest run's log.
+          The last {TROUBLED_RUNS} daily runs each had a problem{problem ? ` (the newest: ${problem})` : ""}. The failed steps below
+          say more.
         </p>
       )}
       <p className="rv-line">
@@ -257,18 +385,14 @@ function Status({ data, onForget }: { data: Overview; onForget: () => void }) {
         <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={toggle}>
           {writes === "on" ? "Pause visitors' changes" : "Allow visitors' changes"}
         </button>
-        {note && <span className="rv-error"> {note}</span>}
+        {switchError && <span className="rv-error"> {switchError}</span>}
       </p>
-      {data.dispatch ? (
-        <div className="rv-apply">
-          <button type="button" className="btn btn-solid btn-sm" disabled={busy} onClick={apply}>
-            Apply decisions now
-          </button>
-          <p className="rv-muted">{applied ?? APPLY_NOTE}</p>
-        </div>
-      ) : (
-        <p className="rv-muted">Decisions are applied by the next daily run (about 04:17 UTC).</p>
-      )}
+      <div className="rv-apply">
+        <button type="button" className="btn btn-solid btn-sm" disabled={busy} onClick={start}>
+          Apply decisions now
+        </button>
+        {noteText && <p className="rv-muted">{noteText}</p>}
+      </div>
       <p className="rv-line">
         <button type="button" className="cl-link" onClick={onForget}>
           Forget token
@@ -278,14 +402,175 @@ function Status({ data, onForget }: { data: Overview; onForget: () => void }) {
   );
 }
 
+/* ── The backend: Vercel's use, the lanes, the runs, the failed steps ─── */
+
+/** Vercel Hobby's monthly allowances (docs/BACKEND.md; the Worker's budget counts against them). */
+const CPU_MS_MONTH = 14_400_000;
+const GB_MS_MONTH = 1_296_000_000;
+const CALLS_MONTH = 1_000_000;
+
+const LEVEL: Record<BudgetLevel, string> = {
+  ok: "Within budget: everything runs.",
+  tight: "Budget tight: no catch-up runs, and adds and Open now are capped lower.",
+  low: "Budget low: adds and new Open now readings wait; the lists still publish.",
+  stop: "Budget at its limit: nothing runs on Vercel until the last 30 days' use falls under 80%.",
+};
+
+/** "42 min", "3.1 h", "4 h" of CPU */
+const cpuWords = (ms: number) =>
+  ms < 90 * 60_000 ? `${fmtInt(Math.round(ms / 60_000))} min` : `${(ms / 36e5).toFixed(1).replace(/\.0$/, "")} h`;
+/** "12.4 GB-h" */
+const gbWords = (gbMs: number) => `${(gbMs / 36e5).toFixed(gbMs < 36e6 ? 1 : 0)} GB-h`;
+const pct = (v: number, of: number) => `${fmtInt(Math.round((100 * v) / of))}%`;
+
+function BudgetLine({ b }: { b: Budget }) {
+  if (!b.computed_at) return <p className="rv-line">{LEVEL[b.level]} No use counted yet.</p>;
+  return (
+    <>
+      <p className={b.level === "ok" ? "rv-line" : "rv-warn"}>{LEVEL[b.level]}</p>
+      <ul className="meta-line rv-line tabular">
+        <li>
+          Last 30 days: CPU {cpuWords(b.cpu_ms_30d)} of {cpuWords(CPU_MS_MONTH)} ({pct(b.cpu_ms_30d, CPU_MS_MONTH)})
+        </li>
+        <li>
+          memory {gbWords(b.gb_ms_30d)} of {gbWords(GB_MS_MONTH)} ({pct(b.gb_ms_30d, GB_MS_MONTH)})
+        </li>
+        <li>
+          {fmtInt(b.invocations_30d)} of {fmtInt(CALLS_MONTH)} calls
+        </li>
+        <li>
+          today CPU {cpuWords(b.cpu_ms_today)}, memory {gbWords(b.gb_ms_today)}
+        </li>
+        <li>counted {stampOf(b.computed_at)}</li>
+      </ul>
+    </>
+  );
+}
+
+/** A lane in a row: its last claim, a pause, wake-ups no claim followed. */
+function LaneRow({ l, now }: { l: LaneState; now: number }) {
+  const facts = [
+    l.last_claim_at ? `last step ${clockOn(l.last_claim_at, now)}` : "no step yet",
+    l.paused_until > now ? `paused until ${clockOn(l.paused_until, now)}` : null,
+    l.unanswered > 0 ? `${fmtInt(l.unanswered)} ${l.unanswered === 1 ? "wake-up" : "wake-ups"} since` : null,
+  ].filter(Boolean);
+  return (
+    <li className="rv-row rv-row-lane">
+      <b>{l.lane}</b>
+      <span className="rv-label rv-muted">{facts.join(" · ")}</span>
+    </li>
+  );
+}
+
+const RUN_KIND: Record<RunKind, string> = { daily: "Daily", catchup: "Catch-up", add: "Add", apply: "Apply" };
+const RUN_STATE: Record<RunState, string> = {
+  queued: "queued",
+  running: "running",
+  done: "done",
+  partial: "partly done",
+  failed: "failed",
+  cancelled: "cancelled",
+  missed: "missed: no run that day",
+  skipped: "skipped: over budget",
+};
+
+/** A run's meta as an object (some answers give it as JSON text). */
+function metaOf(r: BackendRun): Record<string, unknown> {
+  if (r.meta && typeof r.meta === "object") return r.meta;
+  if (typeof r.meta === "string")
+    try {
+      const v = JSON.parse(r.meta) as unknown;
+      return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  return {};
+}
+
+/** What a run is about: its day (daily, catch-up), its market (add), the press (apply). */
+function runWhat(r: BackendRun, requests: AddRequest[]): string {
+  if (r.kind === "daily" || r.kind === "catchup") return fmtCalDay(r.slot);
+  if (r.kind === "apply") return stampOf(Number(r.slot) || r.created_at);
+  const cid = String(metaOf(r).condition_id ?? r.slot.split(":")[0]).toLowerCase();
+  return requests.find((x) => x.condition_id.toLowerCase() === cid)?.question ?? `${cid.slice(0, 10)}…`;
+}
+
+/** When a run ran: "Nov 19, 04:00–05:12 ET", queued since, or nothing for a run that never ran. */
+function runWhen(r: BackendRun): string {
+  if (r.state === "missed" || r.state === "skipped") return "";
+  if (!r.started_at) return `queued ${stampOf(r.created_at)}`;
+  if (!r.finished_at) return `since ${stampOf(r.started_at)}`;
+  const sameDay = torontoDay(r.started_at * 1000) === torontoDay(r.finished_at * 1000);
+  return sameDay
+    ? `${dayOf(r.started_at)}, ${torontoClock(r.started_at * 1000)}–${torontoClock(r.finished_at * 1000)} ET`
+    : `${stampOf(r.started_at)} – ${stampOf(r.finished_at)}`;
+}
+
+/** What a run's jobs reported: the stories left for the catch-up, the first problem. */
+function runNotes(r: BackendRun): string {
+  const m = metaOf(r);
+  const out: string[] = [];
+  if (typeof m.left === "number" && m.left > 0) out.push(`${fmtInt(m.left)} ${m.left === 1 ? "story" : "stories"} left`);
+  const problems = Array.isArray(m.problems) ? m.problems.filter((p): p is string => typeof p === "string") : [];
+  if (problems.length) out.push(problems.length > 1 ? `${problems[0]} (and ${fmtInt(problems.length - 1)} more)` : problems[0]);
+  return out.join(" · ");
+}
+
+function BackendSection({ backend, data }: { backend: Backend; data: Overview }) {
+  return (
+    <section className="rv-sec" aria-labelledby="rv-backend">
+      <h2 className="rv-h" id="rv-backend">
+        Backend
+      </h2>
+      <BudgetLine b={backend.budget} />
+      {backend.lanes.length > 0 && (
+        <ul className="rv-rows">
+          {backend.lanes.map((l) => (
+            <LaneRow key={l.lane} l={l} now={data.now} />
+          ))}
+        </ul>
+      )}
+      <h3 className="label rv-sub-h">Latest runs</h3>
+      {backend.runs.length === 0 ? (
+        <p className="rv-muted">None yet.</p>
+      ) : (
+        <ul className="rv-rows">
+          {backend.runs.map((r) => (
+            <li key={r.id} className="rv-row rv-row-run" data-state={r.state}>
+              <b>{RUN_KIND[r.kind] ?? r.kind}</b>
+              <span className="rv-label">{runWhat(r, data.requests)}</span>
+              <span className={r.state === "failed" ? "rv-error" : undefined}>{RUN_STATE[r.state] ?? r.state}</span>
+              <span className="rv-muted tabular">{runWhen(r)}</span>
+              {runNotes(r) && <span className="rv-muted rv-row-note">{runNotes(r)}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      <h3 className="label rv-sub-h">Failed steps, last 14 days</h3>
+      {backend.failed_jobs.length === 0 ? (
+        <p className="rv-muted">None.</p>
+      ) : (
+        <ul className="rv-rows">
+          {backend.failed_jobs.map((j) => (
+            <li key={j.id} className="rv-row rv-row-fail">
+              <b>{j.kind}</b>
+              <span className="rv-muted tabular">{stampOf(j.updated_at)}</span>
+              <span className="rv-label">{j.error ?? "no error kept"}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /* ── The open list's queue ────────────────────────────────────────────── */
 
 const WHY: Record<QueueItem["why"], string> = {
-  "awaiting approval": "Both readings marked a step. The card shows once you count one as a step.",
-  "on the list":
-    "On today's list, with newer steps the readings marked. Count one as a step to keep the card fresh, or mark one as not a step to hide it.",
-  "one reading": "Only one reading marked a step. Count it as a step to list it.",
-  "dated, on the list": "Decided in advance: it shows on its own. Choose Don't show it to take it off.",
+  "awaiting approval": "Both readings marked a step.",
+  "on the list": "On today's list, with newer steps the readings marked.",
+  "one reading": "Only one reading marked a step.",
+  "dated, on the list": "Decided in advance, on today's list.",
 };
 
 const PLACE: Record<QueueItem["place"], string> = {
@@ -294,6 +579,9 @@ const PLACE: Record<QueueItem["place"], string> = {
   "gone quiet": "Gone quiet",
   dated: "Decided in advance",
 };
+
+/** What a decision was about: its headline, or a whole card's question. */
+const titleOf = (d: Decision) => d.headline?.title ?? d.question ?? d.story;
 
 /** A decision in words, by what it was about: a headline, or a dated card as a whole. */
 function decisionWords(d: Decision): string {
@@ -383,9 +671,7 @@ function QueueSection({ data }: { data: Overview }) {
       <h2 className="rv-h" id="rv-queue">
         Open list · waiting for your check{q && ` (${day(q.day)})`}
       </h2>
-      {!q ? (
-        <p className="rv-muted">Nothing yet: the daily run sends the open list's queue after it runs.</p>
-      ) : q.items.length === 0 ? (
+      {!q || q.items.length === 0 ? (
         <p className="rv-muted">Nothing is waiting for a check.</p>
       ) : (
         <ol className="rv-list">
@@ -445,12 +731,12 @@ function QueueSection({ data }: { data: Overview }) {
       )}
       {elsewhere.length > 0 && (
         <div className="rv-elsewhere">
-          <p className="label">Also waiting for the next run (not in the list above)</p>
+          <p className="label">Your other decisions</p>
           <ul className="rv-cands">
             {elsewhere.map((d) => (
               <li key={dkey(d.story, d.headline_key)} className="rv-cand">
                 <span className="rv-cand-text">
-                  {d.headline?.title ?? d.story} · {decisionWords(d)}
+                  {titleOf(d)} · {decisionWords(d)}
                 </span>
                 <span className="rv-cand-do">
                   <button type="button" className="cl-link" onClick={() => undo(d.story, d.headline_key)}>
@@ -469,7 +755,7 @@ function QueueSection({ data }: { data: Overview }) {
             {applied.map((d) => (
               <li key={dkey(d.story, d.headline_key)} className="rv-cand">
                 <span className="rv-cand-text">
-                  {d.headline?.title ?? d.story} · {decisionWords(d)} · applied {dayOf(d.applied_at!)}
+                  {titleOf(d)} · {decisionWords(d)} · applied {dayOf(d.applied_at!)}
                 </span>
                 <span className="rv-cand-do">
                   <button type="button" className="cl-link" onClick={() => redecide(d, oppositeOf(d))}>
@@ -488,7 +774,7 @@ function QueueSection({ data }: { data: Overview }) {
   );
 }
 
-/** What a decision reads once made: "Counted as a step · applies at the next run · Undo", later "· applied Nov 14". */
+/** What a decision reads once made: "Counted as a step · Undo", once a run applied it "· applied Nov 14". */
 function Decided({ d, onUndo, opposite }: { d: Decision; onUndo: () => void; opposite: ReactNode }) {
   return (
     <span className="rv-decided">
@@ -496,7 +782,7 @@ function Decided({ d, onUndo, opposite }: { d: Decision; onUndo: () => void; opp
       {d.applied_at == null ? (
         <>
           {" "}
-          · applies at the next run ·{" "}
+          ·{" "}
           <button type="button" className="cl-link" onClick={onUndo}>
             Undo
           </button>
@@ -620,7 +906,7 @@ function CardRow({
 
 /* ── Closed markets sent to the main page ─────────────────────────────── */
 
-/** A market's state in words: "Adding to the main page", "Added as gemini-hydrogen on Nov 14", or why the job couldn't add it. */
+/** A market's state in words: "Adding to the main page", "Added as gemini-hydrogen on Nov 14", or why its add run couldn't add it. */
 function requestWords(r: AddRequest): [head: string, tail: string] {
   switch (r.status) {
     case "approved":
@@ -629,6 +915,8 @@ function requestWords(r: AddRequest): [head: string, tail: string] {
       return [`Added${r.name ? ` as ${r.name}` : ""}`, r.done_at ? ` on ${dayOf(r.done_at)}` : ""];
     case "failed":
       return ["Couldn't add it", r.note ? `: ${r.note}` : ""];
+    case "removed":
+      return ["Taken off the main page", ""];
   }
 }
 

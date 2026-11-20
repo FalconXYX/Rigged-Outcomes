@@ -110,7 +110,7 @@ def main(base):
         again = S.push(conn, c, now=NOW + 2, **place)
         check("state: an unchanged push saves nothing", not again["changed"] and not [m for m, _ in sent if m != "GET"],
               sent)
-        store.save_review(conn, "acme", "acme talks", "step", {"title": "Acme talks"}, at=NOW + 3)
+        store.save_filing(conn, "acme", None, None, "rule")
         second = S.push(conn, c, now=NOW + 4, **place)
         kept = blobs.versions(c, S.STATE)
         check("state: a changed push saves a new version and keeps the one before",
@@ -163,10 +163,20 @@ def watched(base):
     check("watched: ...and the story leaves the watchlist", left["watching"] is False, left)
 
 
+def status(base):
+    """python3 -m backend.status's reading of GET /api/job/status."""
+    from backend import status as B
+    doc = sync.Client(base, "dev-job-token", retry_waits=()).request("GET", "/api/job/status")
+    out = B.text(doc)
+    check("status: the budget, runs, failed steps and reports", out.startswith("Budget: ") and "\nRuns:\n" in out and
+          "\nFailed steps (last 14 days):\n" in out and "\nReports:\n" in out, out[:300])
+
+
 if __name__ == "__main__":
     try:
         main(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8788")
         watched(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8788")
+        status(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8788")
     except Exception as e:                                        # noqa: BLE001
         import traceback
         traceback.print_exc()

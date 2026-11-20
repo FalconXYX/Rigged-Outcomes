@@ -46,7 +46,6 @@ if ! python3 -m watchlist.state pull; then
 fi
 
 step python3 -m watchlist.sync pull
-step python3 -m watchlist.sync decide --mode local
 step python3 -m watchlist.upsets --days 2 --watched data/watchlist/work.json
 step python3 -m watchlist.opennow --report data/watchlist/open_report.json
 

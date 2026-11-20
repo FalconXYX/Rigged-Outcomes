@@ -7,8 +7,8 @@ and reports what it returns. Every handler works to the step's deadline and
 stops before it: a step that cannot finish its next request returns
 partial (its cursor), and the job is claimed again.
 
-  daily.begin     the owner's decisions into the state, the state pruned and
-                  saved; the run's work and time (result daily:work)
+  daily.begin     the state pruned and saved; the run's work and time
+                  (result daily:work)
   watch.check     each watched card's markets on Polymarket, once a day: one
                   that closed with a result goes to the main page
                   (POST /api/job/requests; the Worker starts its add run)
@@ -29,9 +29,7 @@ partial (its cursor), and the job is claimed again.
   open.out        one "already out" reading per story: the current cards
                   every day, then the candidates, up to the cap
   open.publish    the readings into the state, the day's list, site:open.json
-  daily.end       the review queue, the catalog, the run's report
-  apply.decide    "Apply decisions now": the decisions into the state, the
-                  reviewed day rebuilt from its stored searches (no model)
+  daily.end       the catalog, the run's report
 
 The state (the state blob, watchlist.state's format 1) is read by any job
 into its own folder (ctx.tmp) and saved only by main-lane jobs, with the
@@ -58,7 +56,7 @@ STEP_TRIES = C.STEP["state_save_tries"]
 MODEL_NEED = C.JOB_KINDS["closed.judge"]["need_s"]      # a model request: up to 120 s, and room to report
 NEWS_NEED = 40                                          # a search: its 30 s timeout and its retry wait
 NEWS_FRESH_S = opennow.NEWS_MAX_AGE_HOURS * 3600        # a search this recent is not made again
-NEWS_STORED_S = opennow.REVIEW_NEWS_HOURS * 3600        # the searches the later steps and a rebuild read
+NEWS_STORED_S = opennow.STORED_NEWS_HOURS * 3600        # the searches the later steps read
 NEWS_FAILS = 3                                          # searches in a row Google refused: the lane waits
 TRACKED = {t: state.TABLES[t] for t in ("ai_labels", "closed_checks", "open_filings", "open_answers")}
 SITE = {"closed": "site:closed.json", "open": "site:open.json", "index": "site:index.json"}
@@ -307,7 +305,7 @@ def work_of(ctx):
     w = result(ctx, "daily:work", from_run(ctx))
     if isinstance(w, dict):
         return w
-    return {"now": int(ctx.now()), "work": {}, "applied": []}
+    return {"now": int(ctx.now()), "work": {}}
 
 
 def run_now(ctx):
@@ -382,19 +380,11 @@ def polymarket_later(ctx, e):
 def daily_begin(ctx):
     now = int(ctx.now())
     work = ctx.api.request("GET", "/api/job/work") or {}
-    work = {k: list(work.get(k) or []) for k in ("decisions", "requests", "watched", "added")}
+    work = {k: list(work.get(k) or []) for k in ("requests", "watched", "added")}
     st = State(ctx).load()
-
-    def merge(conn):
-        saved = sync.decide(conn, work, "full", os.path.join(ctx.tmp, "decide_results.json"), now=now)["saved"]
-        state.prune(conn, now)
-        return saved
-
-    applied = st.save(merge)
-    ctx.checkpoint(results=[{"key": "daily:work", "value": {
-        "now": now, "day": local_day(now), "applied": applied,
-        "work": {k: work[k] for k in ("requests", "watched", "added")}}}])
-    log(f"daily run {local_day(now)}: {len(applied)} decision(s) saved, {len(work['watched'])} watched card(s)")
+    st.save(lambda conn: state.prune(conn, now))
+    ctx.checkpoint(results=[{"key": "daily:work", "value": {"now": now, "day": local_day(now), "work": work}}])
+    log(f"daily run {local_day(now)}: {len(work['watched'])} watched card(s)")
 
 
 def watch_check(ctx):
@@ -412,7 +402,7 @@ def watch_check(ctx):
 # ── the closed list ──────────────────────────────────────────────────────────
 
 def closed_scan(ctx):
-    import polymarket_api
+    from pipeline import polymarket_api
     from watchlist import net
     now = run_now(ctx)
     st = State(ctx).load()
@@ -752,7 +742,7 @@ def _no_events(ctx):
 
 
 def open_walk(ctx):
-    import polymarket_api
+    from pipeline import polymarket_api
     from watchlist import net
     now = run_now(ctx)
     try:
@@ -889,7 +879,6 @@ def open_read(ctx):
                       budget=StepBudget(ctx, MODEL_NEED), on_answer=_answers_hook(ctx, out, "open.read"))
         prev = store.previous_open_day(st.conn, r.today)
         prev_updated = store.previous_open_day(st.conn, r.today, status=opennow.STATUS_UPDATED)
-        r.reviews = store.open_reviews(st.conn)
         r.shortlist(prev_updated if prev_updated is not None else prev)
         r.read_all_steps()
     except opennow.NotStored:
@@ -987,7 +976,7 @@ def _open_bytes(doc):
     return json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-# ── daily.end, apply.decide ─────────────────────────────────────────────────
+# ── daily.end ───────────────────────────────────────────────────────────────
 
 def _catalog(ctx, conn):
     """PUT /api/job/catalog: the main page's markets, the closed list's picks, the open list's cards."""
@@ -1005,23 +994,16 @@ def _catalog(ctx, conn):
         ctx.api.request("PUT", "/api/job/catalog", body)
 
 
-def _queue(ctx, conn):
-    q = sync.queue_payload(conn)
-    if q is not None:
-        ctx.api.request("PUT", "/api/job/queue", q)
-
-
-def _report(ctx, conn, mode, applied, watched=()):
+def _report(ctx, conn, mode, watched=()):
     meta = job(ctx, "run_meta", {}) or {}
     found = list(meta.get("problems") or [])
     missing = [m for m in job(ctx, "missing", []) or [] if isinstance(m, dict)]
     found += [f"{m.get('kind')} {m.get('state')}" + (f": {m.get('error')}" if m.get("error") else "") for m in missing]
     closed_path = os.path.join(ctx.tmp, "closed.json")
     summary = sync.run_summary(conn, closed_path if os.path.exists(closed_path) else os.path.join(ctx.tmp, "none"),
-                               started_at=run_now(ctx), applied=len([a for a in applied if not a.get("withdrawn")]),
-                               withdrawn=len([a for a in applied if a.get("withdrawn")]))
+                               started_at=run_now(ctx))
     status = "partial" if found else "success"
-    body = {"applied": applied, "requests": [], "watched": sorted(watched),
+    body = {"requests": [], "watched": sorted(watched),
             "run": {"mode": mode, "status": status, "started_at": run_now(ctx), "finished_at": int(ctx.now()),
                     "summary": "; ".join([summary] + [problems._one_line(p, 160) for p in found])[:500],
                     "url": None}}
@@ -1031,52 +1013,14 @@ def _report(ctx, conn, mode, applied, watched=()):
 
 def daily_end(ctx):
     st = State(ctx).load()
-    _queue(ctx, st.conn)
     _catalog(ctx, st.conn)
     if catching_up(ctx):
-        log("catch-up: the queue and the catalog sent")
+        log("catch-up: the catalog sent")
         return
-    w = work_of(ctx)
     watched = (result(ctx, "watch:done") or {}).get("finished") or []
-    _report(ctx, st.conn, "full", list(w.get("applied") or []), watched)
-
-
-def reviewed_events(ctx, day):
-    """The pool events of the daily run that made a stored day (its open.walk's scratch blob), or a fresh walk
-    when that is gone."""
-    events, _ = _events(ctx, f"daily:{day}")
-    if events is not None:
-        return events
-    from watchlist import net
-    log(f"  the {day} run's pool is gone; walking Polymarket again")
-    return [trim_event(e) for e in net.walk_open_events(min_volume=K.MIN_VOLUME)]
-
-
-def apply_decide(ctx):
-    work = ctx.api.request("GET", "/api/job/work") or {}
-    st = State(ctx).load()
-    reviewed = opennow.latest_day(st.conn)
-    events = reviewed_events(ctx, reviewed["day"]) if reviewed else []
-    cache = RowNews(ctx, NEWS_STORED_S)
-
-    def rebuild(conn, out_path=None, **kw):
-        return opennow.rebuild_reviewed(conn, out_path=None, walk=lambda: events, news_cache=cache,
-                                        before_news=lambda r: cache.prefetch([k for _, _, k in r.news_keys()]),
-                                        cached_news=True, naming=False, label_cache_only=True, record_pool=False,
-                                        budget=Budget(0))
-
-    def merge(conn):
-        return sync.decide(conn, work, "apply", os.path.join(ctx.tmp, "decide_results.json"), rebuild=rebuild,
-                           now=int(ctx.now()))
-
-    doc = st.save(merge)
-    if doc.get("rebuilt"):
-        put_site(ctx, "open", _open_bytes(opennow.open_doc(st.conn, int(ctx.now()))))
-    _queue(ctx, st.conn)
-    _catalog(ctx, st.conn)
-    _report(ctx, st.conn, "apply", list(doc.get("saved") or []))
+    _report(ctx, st.conn, "full", watched)
 
 
 __all__ = ["daily_begin", "watch_check", "closed_scan", "closed_label", "closed_query", "closed_news", "closed_judge",
            "closed_publish", "open_walk", "open_name", "open_news", "open_read", "open_out", "open_publish",
-           "daily_end", "apply_decide", "OutOfTime"]
+           "daily_end", "OutOfTime"]

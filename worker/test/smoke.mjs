@@ -28,7 +28,6 @@ const WAKE_SECRET = "test-wake-secret";
 const MODE = BOT_FAIL ? " (bot-check failure)" : PRODUCTION ? " (production settings)" : PRUNE ? " (prune)" : "";
 const RUN = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const DAY_KEY = `t-${RUN}`;
-const OWNER = "dev-owner-token";
 const JOB = "dev-job-token";
 const TOKEN = "XXXX.DUMMY.TOKEN.XXXX";
 const ALLOWED = "http://localhost:5190";
@@ -114,17 +113,17 @@ async function productionOnly() {
   expect("production: seed catalog", cat, 200);
   const r = await call("POST", "/api/markers", { body: { market: mA, t: 1.77e9, label: "Wrong host", token: TOKEN } });
   expect("production: a token from another hostname is 403 bot_check", r, 403, "bot_check");
-  for (let i = 1; i <= 10; i++) await call("GET", "/api/admin/overview", { visitor: `p${i}`, auth: "wrong" });
-  expect("production: X-Test-Visitor is ignored (ten wrong tokens from one address lock it)", await call("GET", "/api/admin/overview", { visitor: "other", auth: "wrong" }), 429, "locked");
-  expect("production: the right token still gets in from that address", await call("GET", "/api/admin/overview", { visitor: "other", auth: OWNER }), 200);
-  expect("production: X-Test-IP is ignored too", await call("GET", "/api/admin/overview", { ip: "2001:db8:ffff::1", auth: "wrong" }), 429, "locked");
+  for (let i = 1; i <= 10; i++) await call("GET", "/api/job/status", { visitor: `p${i}`, auth: "wrong" });
+  expect("production: X-Test-Visitor is ignored (ten wrong tokens from one address lock it)", await call("GET", "/api/job/status", { visitor: "other", auth: "wrong" }), 429, "locked");
+  expect("production: the right token still gets in from that address", await call("GET", "/api/job/status", { visitor: "other", auth: JOB }), 200);
+  expect("production: X-Test-IP is ignored too", await call("GET", "/api/job/status", { ip: "2001:db8:ffff::1", auth: "wrong" }), 429, "locked");
   expect("production: no clock to move", await call("POST", "/api/dev/clock", { auth: JOB, body: { now: 1 } }), 404, "not_found");
   expect("production: no tick on demand", await call("POST", "/api/dev/tick", { auth: JOB }), 404, "not_found");
   if (STEP) {
     const before = (await (await fetch(`${STEP}/__wakes`)).json()).length;
-    const ap = await call("POST", "/api/admin/apply", { visitor: "pa", auth: OWNER });
+    const sent = await call("POST", "/api/job/requests", { visitor: "pa", auth: JOB, body: { requests: [CLOSED[60]] } });
     await sleep(1500);
-    check("production: a local STEP_URL is never woken (https only)", ap.status === 202 && (await (await fetch(`${STEP}/__wakes`)).json()).length === before, ap);
+    check("production: a local STEP_URL is never woken (https only)", sent.status === 200 && sent.body?.requests?.length === 1 && (await (await fetch(`${STEP}/__wakes`)).json()).length === before, sent);
   }
 }
 
@@ -153,9 +152,12 @@ async function suite() {
   }
   {
     const h = await call("GET", "/api/health");
-    check("health", h.status === 200 && h.body?.ok === true && h.body?.writes === true, h);
+    check("health", h.status === 200 && h.body?.ok === true, h);
     expect("unknown endpoint is 404", await call("GET", "/api/nothing"), 404, "not_found");
     expect("wrong method is 405", await call("PATCH", "/api/markers"), 405, "bad_method");
+    for (const [method, path] of [["GET", "/api/admin/overview"], ["PUT", "/api/admin/settings"], ["POST", "/api/admin/apply"], ["PUT", "/api/job/queue"]]) {
+      expect(`gone: ${method} ${path} is 404`, await call(method, path, { auth: JOB, body: method === "GET" ? undefined : {} }), 404, "not_found");
+    }
   }
 
   // ---------- the catalog ----------
@@ -201,7 +203,7 @@ async function suite() {
   let first;
   {
     const empty = await call("GET", `/api/markers?market=${mA}`);
-    check("markers: listed market starts empty", empty.body?.listed === true && empty.body?.writes === true && empty.body?.markers?.length === 0, empty.body);
+    check("markers: listed market starts empty", empty.body?.listed === true && empty.body?.markers?.length === 0, empty.body);
     check("markers: list is cacheable for 15 s", (empty.headers.get("cache-control") ?? "").includes("max-age=15"));
     const unlisted = await call("GET", `/api/markers?market=nope-${RUN}`);
     check("markers: unlisted market", unlisted.body?.listed === false && unlisted.body?.markers?.length === 0, unlisted.body);
@@ -275,15 +277,6 @@ async function suite() {
     const list = await call("GET", `/api/markers?market=${mA}`);
     check("markers: the undone marker is gone", !list.body?.markers?.some((m) => m.id === id));
 
-    const victim = list.body.markers[0].id;
-    expect("markers: owner delete is 204", await call("DELETE", `/api/admin/markers/${victim}`, { auth: OWNER }), 204);
-    expect("markers: owner delete of an unknown id is 404", await call("DELETE", `/api/admin/markers/${crypto.randomUUID()}`, { auth: OWNER }), 404, "not_found");
-    const after = await call("GET", `/api/markers?market=${mA}`);
-    check("markers: the owner-deleted marker is gone", !after.body?.markers?.some((m) => m.id === victim));
-    const ov = await call("GET", "/api/admin/overview", { auth: OWNER });
-    const rows = ov.body?.markers ?? [];
-    check("markers: overview shows who deleted", rows.find((m) => m.id === victim)?.deleted_by === "owner" && rows.find((m) => m.id === id)?.deleted_by === "visitor", rows.slice(0, 3));
-    check("markers: overview rows carry no visitor or undo hash", rows.every((m) => !("visitor" in m) && !("undo_sha" in m)));
   }
 
   {
@@ -327,7 +320,7 @@ async function suite() {
   {
     const s = encodeURIComponent(stories.a);
     const g = await call("GET", `/api/watch?story=${s}`);
-    check("watch: starts off the watchlist, with no count", g.body?.listed === true && g.body?.writes === true && g.body?.watching === false && !("count" in (g.body ?? {})), g.body);
+    check("watch: starts off the watchlist, with no count", g.body?.listed === true && g.body?.watching === false && !("count" in (g.body ?? {})), g.body);
     check("watch: GET is no-store", g.headers.get("cache-control") === "no-store");
     const w = await call("POST", "/api/watch", { body: { story: stories.a, token: TOKEN } });
     check("watch: on the watchlist", w.status === 200 && Object.keys(w.body ?? {}).join() === "watching" && w.body.watching === true, w);
@@ -369,7 +362,7 @@ async function suite() {
   const c1 = CLOSED[0].condition_id;
   {
     const g = await call("GET", `/api/request?cid=${c1}`);
-    check("add: none yet", g.body?.listed === true && g.body?.writes === true && g.body?.request === null, g.body);
+    check("add: none yet", g.body?.listed === true && g.body?.request === null, g.body);
     const r = await call("POST", "/api/request", { body: { condition_id: c1.toUpperCase().replace("0X", "0x"), token: TOKEN, question: "Forged?" } });
     check("add: recorded at once as approved, the status the job adds (201)", r.status === 201 && r.body?.request?.status === "approved" && r.body.request.decided_at > 0 && r.body.request.name === null, r);
     check("add: the public shape only", Object.keys(r.body?.request ?? {}).sort().join() === "decided_at,done_at,name,status", r.body);
@@ -381,22 +374,22 @@ async function suite() {
     expect("add: a bad cid on GET is 400", await call("GET", "/api/request?cid=nope"), 400, "bad_request");
     expect("add: an empty token is 403 bot_check", await call("POST", "/api/request", { body: { condition_id: CLOSED[2].condition_id, token: "" } }), 403, "bot_check");
 
-    const ov = await call("GET", "/api/admin/overview", { auth: OWNER });
+    const ov = await call("GET", "/api/job/status", { auth: JOB });
     const row = ov.body?.requests?.find((x) => x.condition_id === c1);
     check("add: copied from the catalog, never the browser", row?.question === CLOSED[0].question && row?.slug === CLOSED[0].slug && row?.winner === "Yes" && row?.day === "2026-11-12" && row?.status === "approved", row);
     const work = await call("GET", "/api/job/work", { auth: JOB });
     check("add: job/work lists it at once, with no page name (the job makes one from the slug)", work.body?.requests?.some((x) => x.condition_id === c1 && x.status === "approved" && x.name === null), work.body?.requests);
-    expect("add: there is no approve or decline step", await call("POST", `/api/admin/requests/${c1}`, { auth: OWNER, body: { action: "approve", name: "page-name" } }), 404, "not_found");
+    expect("add: there is no approve or decline step", await call("POST", `/api/admin/requests/${c1}`, { auth: JOB, body: { action: "approve", name: "page-name" } }), 404, "not_found");
 
     const fail = await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c1, status: "failed", name: null, note: "too many trades to add automatically" }] } });
     expect("add: the job reports a failure (204)", fail, 204);
     const pub = await call("GET", `/api/request?cid=${c1}`);
     check("add: failed is recorded", pub.body?.request?.status === "failed" && pub.body.request.done_at > 0, pub.body);
-    check("add: ...with its reason for the review page", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.requests?.find((x) => x.condition_id === c1)?.note === "too many trades to add automatically");
+    check("add: ...with its reason", (await call("GET", "/api/job/status", { auth: JOB })).body?.requests?.find((x) => x.condition_id === c1)?.note === "too many trades to add automatically");
     check("add: a failed one is not handed to the job again", !(await call("GET", "/api/job/work", { auth: JOB })).body?.requests?.some((x) => x.condition_id === c1));
     const retry = await call("POST", "/api/request", { visitor: "retry", body: { condition_id: c1, token: TOKEN } });
     check("add: a visitor can add a failed one again: approved once more (201)", retry.status === 201 && retry.body?.request?.status === "approved" && retry.body.request.done_at === null && retry.body.request.decided_at >= pub.body?.request?.done_at, retry.body);
-    check("add: ...its old reason gone, and the job has it again", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.requests?.find((x) => x.condition_id === c1)?.note === null && (await call("GET", "/api/job/work", { auth: JOB })).body?.requests?.some((x) => x.condition_id === c1));
+    check("add: ...its old reason gone, and the job has it again", (await call("GET", "/api/job/status", { auth: JOB })).body?.requests?.find((x) => x.condition_id === c1)?.note === null && (await call("GET", "/api/job/work", { auth: JOB })).body?.requests?.some((x) => x.condition_id === c1));
     const usedRetry = await call("GET", "/api/request?cid=" + c1);
     check("add: ...and it reads as on its way", usedRetry.body?.request?.status === "approved", usedRetry.body);
     await call("POST", "/api/job/done", { auth: JOB, body: { requests: [{ condition_id: c1, status: "failed", name: null, note: "too many trades to add automatically" }] } });
@@ -457,7 +450,7 @@ async function suite() {
       ...extra,
     });
     const w1 = cid(0xbeef01);
-    expect("watched: the owner token is 401", await call("POST", "/api/job/requests", { visitor: "wj", auth: OWNER, body: { requests: [pick(0)] } }), 401, "unauthorized");
+    expect("watched: a wrong token is 401", await call("POST", "/api/job/requests", { visitor: "wj", auth: "wrong", body: { requests: [pick(0)] } }), 401, "unauthorized");
     expect("watched: no token is 401", await call("POST", "/api/job/requests", { visitor: "wj", body: { requests: [pick(0)] } }), 401, "unauthorized");
     const day = { "x-test-day": `${DAY_KEY}-w` }; // the visitor's add below counts apart from the limits filled above
     const mine = await call("POST", "/api/request", { visitor: "w", headers: day, body: { condition_id: CLOSED[4].condition_id, token: TOKEN } });
@@ -512,150 +505,27 @@ async function suite() {
     expect("done: a watched entry that isn't a story is 400", await call("POST", "/api/job/done", { auth: JOB, body: { watched: [5] } }), 400, "bad_request");
   }
 
-  // ---------- pause ----------
-  {
-    const keep = await call("POST", "/api/markers", { visitor: "p", body: { market: mA, t: t0 + 77_000, label: "Before the pause", token: TOKEN } });
-    await call("POST", "/api/watch", { visitor: "p", body: { story: stories.b, token: TOKEN } });
-    const off = await call("PUT", "/api/admin/settings", { auth: OWNER, body: { writes: "off" } });
-    check("pause: switched off", off.body?.settings?.writes === "off", off.body);
-    expect("pause: adding a marker is 503 paused", await call("POST", "/api/markers", { visitor: "p", body: { market: mA, t: t0 + 78_000, label: "During", token: TOKEN } }), 503, "paused");
-    expect("pause: watching is 503 paused", await call("POST", "/api/watch", { visitor: "p", body: { story: stories.a, token: TOKEN } }), 503, "paused");
-    expect("pause: adding to the main page is 503 paused", await call("POST", "/api/request", { visitor: "p", body: { condition_id: CLOSED[5].condition_id, token: TOKEN } }), 503, "paused");
-    const m = await call("GET", `/api/markers?market=${mA}`);
-    check("pause: marker list reads writes:false", m.body?.writes === false && m.body?.markers?.length > 0, m.body?.writes);
-    check("pause: watch reads writes:false", (await call("GET", `/api/watch?story=${encodeURIComponent(stories.a)}`)).body?.writes === false);
-    check("pause: request reads writes:false", (await call("GET", `/api/request?cid=${c1}`)).body?.writes === false);
-    check("pause: health reads writes:false", (await call("GET", "/api/health")).body?.writes === false);
-    expect("pause: undo still works", await call("DELETE", `/api/markers/${keep.body?.marker?.id}`, { visitor: "p", headers: { "x-undo": keep.body?.undo } }), 204);
-    const un = await call("DELETE", `/api/watch?story=${encodeURIComponent(stories.b)}`, { visitor: "p" });
-    check("pause: unwatch still works", un.status === 200 && un.body?.watching === false, un);
-    check("pause: overview still works", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.settings?.writes === "off");
-    expect("pause: a bad value is 400", await call("PUT", "/api/admin/settings", { auth: OWNER, body: { writes: "maybe" } }), 400, "bad_request");
-    const on = await call("PUT", "/api/admin/settings", { auth: OWNER, body: { writes: "on" } });
-    check("pause: switched back on", on.body?.settings?.writes === "on" && (await call("GET", "/api/health")).body?.writes === true);
-  }
-
   // ---------- sign-in ----------
   {
     for (let i = 1; i <= 10; i++) {
-      expect(`auth: wrong owner token ${i} is 401`, await call("GET", "/api/admin/overview", { visitor: "lock", auth: "wrong" }), 401, "unauthorized");
+      expect(`auth: wrong job token ${i} is 401`, await call("GET", "/api/job/work", { visitor: "lock", auth: "wrong" }), 401, "unauthorized");
     }
-    expect("auth: the 11th try is 429 locked", await call("GET", "/api/admin/overview", { visitor: "lock", auth: "wrong" }), 429, "locked");
-    expect("auth: the right token still gets in from a locked address", await call("GET", "/api/admin/overview", { visitor: "lock", auth: OWNER }), 200);
-    expect("auth: ...and a wrong one stays locked", await call("GET", "/api/admin/overview", { visitor: "lock", auth: "wrong" }), 429, "locked");
-    expect("auth: the job token on an owner endpoint is 401", await call("GET", "/api/admin/overview", { visitor: "auth2", auth: JOB }), 401, "unauthorized");
-    expect("auth: the owner token on a job endpoint is 401", await call("GET", "/api/job/work", { visitor: "auth2", auth: OWNER }), 401, "unauthorized");
+    expect("auth: the 11th try is 429 locked", await call("GET", "/api/job/work", { visitor: "lock", auth: "wrong" }), 429, "locked");
+    expect("auth: the right token still gets in from a locked address", await call("GET", "/api/job/work", { visitor: "lock", auth: JOB }), 200);
+    expect("auth: ...and a wrong one stays locked", await call("GET", "/api/job/work", { visitor: "lock", auth: "wrong" }), 429, "locked");
     expect("auth: no token is 401", await call("GET", "/api/job/blobs", { visitor: "auth2" }), 401, "unauthorized");
-    check("auth: the right token still works for others", (await call("GET", "/api/admin/overview", { visitor: "auth3", auth: OWNER })).status === 200);
+    check("auth: the right token still works for others", (await call("GET", "/api/job/status", { visitor: "auth3", auth: JOB })).status === 200);
   }
 
-  // ---------- the open list's queue and decisions ----------
-  const day = "2026-11-13";
-  const qStory = `queue ${RUN} one`;
-  const qDated = `queue ${RUN} dated`;
-  const item = (n, story, place, why, candidates) => ({
-    n, story, place, why, kind: "merger_acquisition", group: 1, question: `Will ${story}?`, who_knows: "Both boards.",
-    polymarket: `${story}?`, url: "https://polymarket.com/event/q", reveal: null, candidates, model_copy_unmatched: [],
-  });
-  const k1 = { title: "Tesla and SpaceX agree to merge", source: "Reuters", published: "2026-11-13T08:00:00Z", url: "https://news.example/1", key: "tesla and spacex agree to merge" };
-  const k2 = { title: "Talks stall", source: "AP", published: "2026-11-12T08:00:00Z", url: null, key: "talks stall" };
+  // ---------- the run's report ----------
   {
-    const put = await call("PUT", "/api/job/queue", {
-      auth: JOB,
-      body: { day, run_at: "2026-11-13T22:30:20Z", steps_by: "person", items: [item(1, qStory, "new step", "awaiting approval", [k1, k2]), item(2, qDated, "dated", "dated, on the list", [])] },
-    });
-    expect("queue: put is 204", put, 204);
-    const ov = await call("GET", "/api/admin/overview", { auth: OWNER });
-    check("queue: overview shows the day", ov.body?.queue?.day === day && ov.body.queue.steps_by === "person" && ov.body.queue.items.length === 2 && ov.body.queue.items[0].candidates[0].key === k1.key, ov.body?.queue);
-    expect("queue: over 30 items is 400", await call("PUT", "/api/job/queue", { auth: JOB, body: { day: "2026-11-01", run_at: "x", steps_by: "person", items: Array.from({ length: 31 }, (_, i) => item(i, `s${i}`, "stays", "on the list", [])) } }), 400, "bad_request");
-    expect("queue: a candidate with no key is 400", await call("PUT", "/api/job/queue", { auth: JOB, body: { day: "2026-11-01", run_at: "x", steps_by: "person", items: [item(1, "s", "stays", "on the list", [{ title: "t" }])] } }), 400, "bad_request");
-    const older = await call("PUT", "/api/job/queue", { auth: JOB, body: { day: "2026-11-12", run_at: "2026-11-12T22:00:00Z", steps_by: "person", items: [item(1, "old story", "stays", "on the list", [])] } });
-    expect("queue: an older day is accepted", older, 204);
-    check("queue: overview keeps the newest day", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.queue?.day === day);
-
-    const d = (story, key, decision, extra = {}) => call("PUT", "/api/admin/decisions", { auth: OWNER, body: { day, story, headline_key: key, decision, ...extra } });
-    const s1 = await d(qStory, k1.key, "step", { headline: { title: "FORGED" } });
-    check("decide: saved", s1.status === 200 && s1.body?.decision?.decision === "step" && s1.body.decision.applied_at === null, s1);
-    check("decide: the headline comes from the queue", s1.body?.decision?.headline?.title === k1.title && s1.body.decision.headline.source === "Reuters" && !("key" in s1.body.decision.headline), s1.body?.decision?.headline);
-    expect("decide: an unknown key is 404", await d(qStory, "no such headline", "step"), 404, "not_found");
-    expect("decide: an unknown story is 404", await d(`nothing ${RUN}`, k1.key, "step"), 404, "not_found");
-    expect("decide: card approved on a headline is 400", await d(qStory, k2.key, "card approved"), 400, "bad_request");
-    expect("decide: a card on an item that isn't dated is 400", await d(qStory, "card", "card approved"), 400, "bad_request");
-    expect("decide: a bad decision is 400", await d(qStory, k1.key, "maybe"), 400, "bad_request");
-    const card = await d(qDated, "card", "card approved");
-    check("decide: a dated card as a whole", card.status === 200 && card.body?.decision?.headline === null, card);
-    const cardRow = (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.decisions?.find((x) => x.story === qDated);
-    check("overview: a decision on a whole card carries the card's question", cardRow?.question === `Will ${qDated}?` && cardRow.headline === null, cardRow);
-    const del = (story, key) => call("DELETE", `/api/admin/decisions?story=${encodeURIComponent(story)}&key=${encodeURIComponent(key)}`, { auth: OWNER });
-    expect("decide: taking back a pending decision is 204", await del(qDated, "card"), 204);
-    expect("decide: taking it back again is 404", await del(qDated, "card"), 404, "not_found");
-    const wd = (await call("GET", "/api/job/work", { auth: JOB })).body?.decisions?.find((x) => x.story === qDated && x.headline_key === "card");
-    check("decide: a taken-back decision reaches the job as withdrawn (a run may already have saved it)", wd?.decision === "withdrawn" && wd.applied_at === null && wd.decided_at > card.body?.decision?.decided_at, wd);
-    check("decide: ...and the review page no longer lists it", !(await call("GET", "/api/admin/overview", { auth: OWNER })).body?.decisions?.some((x) => x.story === qDated));
-    const reCard = await d(qDated, "card", "card approved");
-    check("decide: deciding a withdrawn one again makes it a decision again", reCard.status === 200 && reCard.body?.decision?.decision === "card approved", reCard.body);
-    expect("decide: ...and taking that back is 204 again", await del(qDated, "card"), 204);
-    const wd2 = (await call("GET", "/api/job/work", { auth: JOB })).body?.decisions?.find((x) => x.story === qDated && x.headline_key === "card");
-    const s2 = await d(qStory, k2.key, "not a step");
-    const again = await d(qStory, k1.key, "step");
-    check("decide: deciding again moves decided_at forward", again.body?.decision?.decided_at > s1.body?.decision?.decided_at, [s1.body?.decision?.decided_at, again.body?.decision?.decided_at]);
-
-    const work = await call("GET", "/api/job/work", { auth: JOB });
-    const pending = (work.body?.decisions ?? []).filter((x) => x.story === qStory);
-    check("job/work: pending decisions", pending.length === 2 && pending.every((x) => x.applied_at === null && x.day === day), pending);
-    check("job/work: the watchlist's stories, no counts", work.body?.watched?.some((w) => w.story === stories.a) && work.body.watched.every((w) => Object.keys(w).join() === "story"), work.body?.watched);
-    check("job/work: shape", typeof work.body?.now === "number" && Array.isArray(work.body?.requests) && Array.isArray(work.body?.added));
-
-    const done = await call("POST", "/api/job/done", {
-      auth: JOB,
-      body: {
-        applied: [
-          { story: qStory, headline_key: k1.key, decided_at: again.body.decision.decided_at },
-          { story: qStory, headline_key: k2.key, decided_at: s2.body.decision.decided_at - 1 },
-          { story: qDated, headline_key: "card", decided_at: wd2?.decided_at },
-        ],
-        run: { mode: "local", status: "success", started_at: now() - 60, finished_at: now(), summary: `smoke ${RUN}`, url: "https://github.com/FalconXYX/Rigged-Outcomes/actions/runs/1" },
-      },
-    });
-    expect("done: 204", done, 204);
-    const ov2 = await call("GET", "/api/admin/overview", { auth: OWNER });
-    const byKey = Object.fromEntries((ov2.body?.decisions ?? []).filter((x) => x.story === qStory).map((x) => [x.headline_key, x]));
-    check("done: a decision with its decided_at is applied", byKey[k1.key]?.applied_at > 0, byKey[k1.key]);
-    check("done: a decided_at mismatch stays pending", byKey[k2.key]?.applied_at === null, byKey[k2.key]);
-    check("done: the run is recorded", ov2.body?.runs?.[0]?.summary === `smoke ${RUN}` && ov2.body.runs[0].mode === "local", ov2.body?.runs?.[0]);
-    const after = (await call("GET", "/api/job/work", { auth: JOB })).body?.decisions ?? [];
-    check("done: a withdrawal the job reported is gone", !after.some((x) => x.story === qDated), after.filter((x) => x.story === qDated));
-    expect("decide: taking back an applied decision is 409 applied", await del(qStory, k1.key), 409, "applied");
-    const redo = await d(qStory, k1.key, "not a step");
-    check("decide: deciding an applied one again makes it pending", redo.body?.decision?.applied_at === null && redo.body.decision.decision === "not a step", redo.body);
-
-    // the run that applies a decision rebuilds the queue without its headline; the decision can still be changed
-    const bad = { ...k2, url: "javascript:alert(1)" };
-    await call("PUT", "/api/job/queue", { auth: JOB, body: { day, run_at: "2026-11-13T23:00:00Z", steps_by: "person", items: [{ ...item(1, qStory, "new step", "awaiting approval", [bad]), url: "data:text/html,x" }] } });
-    const rebuilt = (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.queue?.items?.[0];
-    check("queue: links that aren't https:// are stored as null", rebuilt?.url === null && rebuilt?.candidates?.[0]?.url === null && rebuilt?.candidates?.[0]?.title === k2.title, rebuilt);
-    await call("POST", "/api/job/done", { auth: JOB, body: { applied: [{ story: qStory, headline_key: k1.key, decided_at: redo.body.decision.decided_at }] } });
-    const flip = await d(qStory, k1.key, "step");
-    check("decide: an applied decision whose headline left the queue can still be changed", flip.status === 200 && flip.body?.decision?.decision === "step" && flip.body.decision.applied_at === null && flip.body.decision.headline?.title === k1.title, flip);
-    const flipOld = await call("PUT", "/api/admin/decisions", { auth: OWNER, body: { day: "2026-11-01", story: qStory, headline_key: k1.key, decision: "not a step" } });
-    check("decide: ...it keeps its own day and headline", flipOld.status === 200 && flipOld.body?.decision?.day === day && flipOld.body.decision.headline?.source === "Reuters", flipOld.body);
-    expect("decide: a headline never decided and not in the queue is still 404", await d(qStory, "never seen", "step"), 404, "not_found");
     expect("done: a javascript: run url is accepted", await call("POST", "/api/job/done", { auth: JOB, body: { run: { mode: "full", status: "success", started_at: 1, finished_at: 2, summary: "x".repeat(900), url: "javascript:alert(1)" } } }), 204);
-    const latest = (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.runs?.[0];
+    const latest = (await call("GET", "/api/job/status", { auth: JOB })).body?.reports?.[0];
     check("done: ...but stored with no link, and the summary cut to 500", latest?.url === null && latest?.summary?.length === 500, latest);
     expect("done: a bad run mode is 400", await call("POST", "/api/job/done", { auth: JOB, body: { run: { mode: "sometimes", status: "success", started_at: 1, finished_at: 2 } } }), 400, "bad_request");
     expect("done: an empty report is 204", await call("POST", "/api/job/done", { auth: JOB, body: {} }), 204);
-  }
-
-  // a newer queue day with nothing to check reads as that day, empty (last: it stays the newest day)
-  {
-    const item = { n: 1, story: `queue ${RUN} older`, place: "stays", why: "on the list", kind: null, group: null, question: "Q?", who_knows: "x", polymarket: "x", url: null, reveal: null, candidates: [], model_copy_unmatched: [] };
-    expect("queue: an empty day is 204", await call("PUT", "/api/job/queue", { auth: JOB, body: { day: "2026-11-14", run_at: "2026-11-14T04:40:00Z", steps_by: "model", items: [] } }), 204);
-    const q = (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.queue;
-    check("queue: an empty newest day reads as that day with no items", q?.day === "2026-11-14" && q.steps_by === "model" && Array.isArray(q.items) && q.items.length === 0, q);
-    await call("PUT", "/api/job/queue", { auth: JOB, body: { day: "2026-11-13", run_at: "x", steps_by: "person", items: [item] } });
-    const q2 = (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.queue;
-    check("queue: an older day's items don't take its place", q2?.day === "2026-11-14" && q2.items.length === 0, q2);
+    const work = await call("GET", "/api/job/work", { auth: JOB });
+    check("job/work: requests, the watchlist and the added markets only", Object.keys(work.body ?? {}).sort().join() === "added,now,requests,watched", work.body && Object.keys(work.body));
   }
 
   if (STEP) await queue();
@@ -663,22 +533,16 @@ async function suite() {
   await blobs();
   await dataFiles();
 
-  // ---------- overview, sizes ----------
+  // ---------- status, sizes ----------
   {
-    const ov = await call("GET", "/api/admin/overview", { auth: OWNER });
-    check("overview: the watchlist's rows", ov.body?.watched?.some((w) => w.story === stories.a && w.since > 0 && w.question === "Will A happen?" && !("count" in w)), ov.body?.watched);
-    const ovKeys = Object.keys(ov.body ?? {}).sort().join();
-    check("overview: shape", ovKeys === "backend,decisions,job_refused_at,markers,now,queue,requests,runs,settings,watched", ovKeys);
-    const be = ov.body?.backend;
-    check("overview: the backend's budget, lanes, runs and failed jobs", Object.keys(be ?? {}).sort().join() === "budget,failed_jobs,lanes,runs" && be.lanes.length === 4 && be.runs.length <= 15 && be.failed_jobs.length <= 10, be && Object.keys(be));
-    check("overview: budget fields", Object.keys(be?.budget ?? {}).sort().join() === "computed_at,cpu_ms_30d,cpu_ms_today,gb_ms_30d,gb_ms_today,invocations_30d,level", be?.budget);
-    check("overview: a run's meta is an object", be?.runs?.every((r) => r.meta && typeof r.meta === "object"), be?.runs?.[0]);
-    const refusedAt = ov.body?.job_refused_at;
+    const st = await call("GET", "/api/job/status", { auth: JOB });
+    check("status: shape", Object.keys(st.body ?? {}).sort().join() === "budget,failed_jobs,lanes,now,reports,requests,runs", st.body && Object.keys(st.body));
+    check("status: the lanes, runs and failed jobs", st.body?.lanes?.length === 4 && st.body.runs.length <= 15 && st.body.failed_jobs.length <= 10, st.body?.lanes);
+    check("status: budget fields", Object.keys(st.body?.budget ?? {}).sort().join() === "computed_at,cpu_ms_30d,cpu_ms_today,gb_ms_30d,gb_ms_today,invocations_30d,level", st.body?.budget);
+    check("status: a run's meta is an object", st.body?.runs?.every((r) => r.meta && typeof r.meta === "object"), st.body?.runs?.[0]);
+    expect("status: no token is 401", await call("GET", "/api/job/status", { visitor: "st1" }), 401, "unauthorized");
     expect("job token: a wrong one from anyone is 401", await call("GET", "/api/job/work", { visitor: "jt1", auth: "wrong-job-token" }), 401, "unauthorized");
-    check("job token: ...and only the job's own refusal is kept", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.job_refused_at === refusedAt);
     expect("job token: a wrong one from the job is 401", await call("GET", "/api/job/work", { visitor: "jt2", auth: "wrong-job-token", headers: { "user-agent": "rigged-outcomes-job" } }), 401, "unauthorized");
-    const kept = (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.job_refused_at;
-    check("job token: ...is kept for the review page", typeof kept === "number" && kept >= Math.floor(Date.now() / 1000) - 60, kept);
 
     expect("size: a visitor body over 4 KB is 413", await call("POST", "/api/markers", { raw: JSON.stringify({ market: mA, t: t0, label: "x", token: "y".repeat(5000) }), headers: { "content-type": "application/json" } }), 413, "too_large");
     expect("size: a job body over 1 MB is 413", await call("PUT", "/api/job/catalog", { auth: JOB, raw: JSON.stringify({ open: [], pad: "z".repeat(1_100_000) }), headers: { "content-type": "application/json" } }), 413, "too_large");
@@ -697,7 +561,7 @@ const claim = (lane, left = 270) => call("POST", "/api/job/claim", { auth: JOB, 
 const complete = (job, outcome, extra = {}) =>
   call("POST", "/api/job/complete", { auth: JOB, body: { job_id: job?.id, lease_token: job?.lease_token, outcome, usage: { cpu_ms: 100, wall_ms: 1000, units: 1 }, ...extra } });
 const runOf = async (id) => (await call("GET", `/api/job/run?id=${encodeURIComponent(id)}`, { auth: JOB })).body;
-const backend = async () => (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.backend;
+const backend = async () => (await call("GET", "/api/job/status", { auth: JOB })).body;
 const wakes = async () => (await fetch(`${STEP}/__wakes`)).json();
 const wakesFor = async (lane) => (await wakes()).filter((w) => w.lane === lane);
 /** The wake-ups of a lane once there are n (they go out after the answer), or what there are after 5 s. */
@@ -728,7 +592,7 @@ async function queue() {
   check("tick: 03:59 Toronto makes no daily run", Array.isArray(r?.created) && !r.created.includes("daily:2026-12-01"), r);
   check("tick: ...and records the day before as missed", r?.created?.includes("daily:2026-11-30"), r);
   check("tick: a missed day never runs", (await runOf("daily:2026-11-30"))?.run?.state === "missed");
-  const stopped = async () => ((await call("GET", "/api/admin/overview", { auth: OWNER })).body?.requests ?? []).filter((x) => x.note === "stopped part way").length;
+  const stopped = async () => ((await call("GET", "/api/job/status", { auth: JOB })).body?.requests ?? []).filter((x) => x.note === "stopped part way").length;
   check("watchdog: the suite's adds, a day past their deadline, ended with their runs", (await stopped()) === 0);
 
   // 04:00 Toronto: the daily run, its 15 jobs, its deadline at 09:30, and the main lane woken
@@ -766,7 +630,7 @@ async function queue() {
   // checkpoint
   const cp = (job, body) => call("POST", "/api/job/checkpoint", { auth: JOB, body: { job_id: job?.id, lease_token: job?.lease_token, ...body } });
   const search = `smoke q ${RUN}|7d`; // (test/run.mjs's --prune phase back-dates a search named "smoke q ...")
-  expect("checkpoint: results, a search and the cursor (204)", await cp(begin, { cursor: { done: 1 }, results: [{ key: "daily:work", value: { decisions: 2 } }], news: [{ key: search, body: [{ title: "Acme agrees deal" }] }] }), 204);
+  expect("checkpoint: results, a search and the cursor (204)", await cp(begin, { cursor: { done: 1 }, results: [{ key: "daily:work", value: { watched: 2 } }], news: [{ key: search, body: [{ title: "Acme agrees deal" }] }] }), 204);
   expect("checkpoint: another token is 409 lost", await cp({ ...begin, lease_token: hex(32, "0") }, { results: [] }), 409, "lost");
   expect("checkpoint: a value over 200 KB is 413", await cp(begin, { results: [{ key: "big", value: "x".repeat(205_000) }] }), 413, "too_large");
   expect("checkpoint: a search that isn't a list is 400", await cp(begin, { news: [{ key: "k", body: "x" }] }), 400, "bad_request");
@@ -781,7 +645,7 @@ async function queue() {
   const res = await call("GET", "/api/job/results?run=daily:2026-12-01&prefix=daily:", { auth: JOB });
   check(
     "results: the run's results by key, each value as it was sent",
-    JSON.stringify(res.body) === JSON.stringify({ results: [{ key: "daily:note", job_id: begin?.id, value: "plain text" }, { key: "daily:work", job_id: begin?.id, value: { decisions: 2 } }], next: null }),
+    JSON.stringify(res.body) === JSON.stringify({ results: [{ key: "daily:note", job_id: begin?.id, value: "plain text" }, { key: "daily:work", job_id: begin?.id, value: { watched: 2 } }], next: null }),
     res.body,
   );
   const page = await call("GET", "/api/job/results?run=daily:2026-12-01&prefix=daily:&after=daily:note", { auth: JOB });
@@ -879,7 +743,7 @@ async function queue() {
   const nAdd = (await wakesFor("add")).length;
   const a = await call("POST", "/api/request", { visitor: "q", headers: { "x-test-day": `${DAY_KEY}-q` }, body: { condition_id: pick.condition_id, token: TOKEN } });
   check("add: approved at once (201)", a.status === 201 && a.body?.request?.status === "approved", a);
-  const row = (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.requests?.find((x) => x.condition_id === pick.condition_id);
+  const row = (await call("GET", "/api/job/status", { auth: JOB })).body?.requests?.find((x) => x.condition_id === pick.condition_id);
   check("add: its run is on the request", row?.run_id === `add:${pick.condition_id}:${a.body?.request?.decided_at}`, row);
   const ar = await runOf(row?.run_id);
   check("add: the run's graph", ar?.run?.state === "queued" && ar.jobs.map((j) => j.kind).sort().join() === "add.export,add.fetch" && ar.run.deadline === ar.run.created_at + 129600, ar);
@@ -917,7 +781,7 @@ async function queue() {
   await complete(exp, "done");
   check("add: its run ends partial (a batch failed)", (await runOf(row?.run_id))?.run?.state === "partial");
   check("add: ...and the market is on the main page", (await call("GET", `/api/request?cid=${pick.condition_id}`)).body?.request?.status === "added");
-  check("failed jobs: on the review page", (await backend())?.failed_jobs?.some((j) => j.kind === "add.whales" && j.error === "whale 5"));
+  check("failed jobs: in the status", (await backend())?.failed_jobs?.some((j) => j.kind === "add.whales" && j.error === "whale 5"));
 
   // a watched market sent to the main page gets its own add run; one too large reports itself and stops its run
   const wp = { ...CLOSED[66], condition_id: cid(0xabc001), slug: `watched-q-${RUN}` };
@@ -931,24 +795,6 @@ async function queue() {
   const st = await complete(wf, "done", { stop_run: true, usage: { cpu_ms: 12_000_000, wall_ms: 1000, units: 0 } });
   const wrun = await runOf(wr?.run_id);
   check("stop_run: the run is cancelled, with its export", st.body?.state === "done" && wrun?.run?.state === "cancelled" && wrun.jobs.find((j) => j.kind === "add.export")?.state === "cancelled", wrun);
-
-  // "Apply decisions now": an apply run on the main lane; a press while it waits joins it
-  t += 60;
-  await setClock(t);
-  const nMain = (await wakesFor("main")).length;
-  const ap = await call("POST", "/api/admin/apply", { auth: OWNER });
-  check("apply: 202 with its run", ap.status === 202 && ap.body?.queued === true && /^apply:\d+$/.test(ap.body.run ?? ""), ap);
-  const ap2 = await call("POST", "/api/admin/apply", { auth: OWNER });
-  check("apply: a press while it waits joins it", ap2.status === 202 && ap2.body?.run === ap.body?.run, ap2);
-  check("apply: the main lane is woken", (await wokeAtLeast("main", nMain + 1)).length >= nMain + 1);
-  const dec = (await claim("main")).body?.job;
-  check("apply: apply.decide on the main lane", dec?.kind === "apply.decide" && dec.run_id === ap.body?.run && dec.run_kind === "apply", dec);
-  await complete(dec, "done");
-  check("apply: its run is done", (await runOf(ap.body?.run))?.run?.state === "done");
-  t += 5;
-  await setClock(t);
-  const ap3 = await call("POST", "/api/admin/apply", { auth: OWNER });
-  check("apply: after it ran, a press makes another", ap3.status === 202 && ap3.body?.run !== ap.body?.run, ap3);
 
   // the budget: the step above used 12,000,000 ms of CPU, over 80% of the month's 14,400,000 with the safety
   // margin and 20 minutes in a day, so the level is stop: nothing is claimed or woken, and a due run is skipped
@@ -1083,7 +929,7 @@ async function blobs() {
   for (const [i, [method, p]] of routes.entries()) {
     const body = method === "PUT" ? { data: "AAAA" } : method === "POST" ? { parts: 1, bytes: 0, sha256: hex(64, "a"), meta: {} } : undefined;
     expect(`blobs: ${method} ${p.replace(name, "<name>")} with no token is 401`, await call(method, p, { visitor: `blob${i}`, body }), 401, "unauthorized");
-    expect(`blobs: ${method} ${p.replace(name, "<name>")} with the owner token is 401`, await call(method, p, { visitor: `blob${i}`, auth: OWNER, body }), 401, "unauthorized");
+    expect(`blobs: ${method} ${p.replace(name, "<name>")} with a wrong token is 401`, await call(method, p, { visitor: `blob${i}`, auth: "wrong", body }), 401, "unauthorized");
   }
 
   // three parts, then the first commit (expect: null, the blob must not exist yet)
@@ -1272,7 +1118,7 @@ async function blobs() {
   expect("off: DELETE is 204", await call("DELETE", `/api/job/blobs/${page}`, { auth: JOB }), 204);
   const off = await call("GET", `/api/request?cid=${cOff}`);
   check("off: visitors see it as removed now, under the same name", off.body?.request?.status === "removed" && off.body.request.name === `page-${RUN}`, off.body);
-  check("off: ...with why, for the review page", (await call("GET", "/api/admin/overview", { auth: OWNER })).body?.requests?.find((x) => x.condition_id === cOff)?.note === "taken off the main page");
+  check("off: ...with why", (await call("GET", "/api/job/status", { auth: JOB })).body?.requests?.find((x) => x.condition_id === cOff)?.note === "taken off the main page");
   const offAgain = await call("POST", "/api/request", { visitor: "off", body: { condition_id: cOff, token: TOKEN } });
   check("off: sending it again changes nothing (200, still removed)", offAgain.status === 200 && offAgain.body?.request?.status === "removed", offAgain);
   check("off: ...and the job doesn't get it again", !(await call("GET", "/api/job/work", { auth: JOB })).body?.requests?.some((x) => x.condition_id === cOff));
@@ -1333,7 +1179,7 @@ async function pruneOnly() {
   expect("prune: a two-day-old part of no version is gone", await get(`${at}/${PRUNE_ORPHAN}/0`), 404, "no_part");
   check("prune: a two-day-old live part stays", (await get(`${at}/${PRUNE_LIVE_VERSION}/0`)).body?.data === "TElWRQ==");
   check("prune: the kept versions' parts stay", kept.length === 3 && (await Promise.all(kept.map((k) => get(`/api/job/blobs/site:open.json/${k.version}/0`)))).every((x) => x.status === 200), kept.map((k) => k.version));
-  const any = (await call("GET", "/api/admin/overview", { auth: OWNER })).body;
+  const any = (await call("GET", "/api/job/status", { auth: JOB })).body;
   const left = any?.requests?.find((x) => x.condition_id === `0x${"e".repeat(64)}`);
   check("watchdog: an approved add with no run gets one", left?.status === "approved" && left.run_id === `add:0x${"e".repeat(64)}:1`, left);
   const lr = (await call("GET", `/api/job/run?id=${encodeURIComponent(left?.run_id ?? "")}`, { auth: JOB })).body;

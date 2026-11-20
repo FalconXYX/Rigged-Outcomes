@@ -54,10 +54,14 @@ def filled(conn=None):
     card = {"id": "jane roe", "place": "new step", "label": "new", "listed_since": "2026-11-13",
             "event_ids": ["e1"], "slugs": ["ev-1"], "question": "Will Jane Roe leave?"}
     store.save_open_day(conn, "2026-11-13", "updated", NOW - DAY, [card], version="open-step-1",
-                        info={"awaiting": [{"n": 1}], "new_today": 1})
-    store.save_review(conn, "jane roe", "white house weighs", "step", {"title": "White House weighs"}, at=NOW - 3600)
+                        info={"seen_step_headlines": ["a"], "new_today": 1})
     store.set_meta(conn, "not state", {"x": 1})
     return conn
+
+
+def change(conn, key):
+    """One more row in the state (an open event filed)."""
+    store.save_filing(conn, key, None, None, "rule")
 
 
 def rows(conn, table):
@@ -79,15 +83,15 @@ def test_round_trip_and_same_bytes():
     assert set(files) == {"manifest.json"} | {f"{t}.jsonl" for t in S.TABLES}
     b = store.connect(":memory:")
     counts = S.load_files(b, files)
-    assert counts["open_cards"] == 1 and counts["open_listed"] == 2 and sum(counts.values()) == 10
+    assert counts["open_cards"] == 1 and counts["open_listed"] == 2 and sum(counts.values()) == 9
     for t in S.TABLES:
         assert rows(a, t) == rows(b, t), t
     assert S.dump_files(b, made_at=NOW) == files                         # and back to the same bytes
     assert store.get_meta(b, "not state") is None                        # the state leaves other tables alone
     m = json.loads(files["manifest.json"])
-    assert m["latest"] == {"open_runs.run_at": NOW - DAY, "open_reviews.decided_at": NOW - 3600,
+    assert m["latest"] == {"open_runs.run_at": NOW - DAY,
                            "closed_checks.created_at": rows(a, "closed_checks")[0]["created_at"]}
-    assert m["format"] == 1 and m["tables"]["open_reviews"]["rows"] == 1
+    assert m["format"] == 1 and m["tables"]["open_filings"]["rows"] == 1
     # rows are in primary key order, keys sorted
     first = files["open_listed.jsonl"].decode().splitlines()
     assert first == sorted(first) and list(json.loads(first[0])) == sorted(json.loads(first[0]))
@@ -121,15 +125,21 @@ def test_bad_state_is_refused():
 
 def test_unknown_columns_are_left_out():
     files = S.dump_files(filled(), made_at=NOW)
-    line = json.loads(files["open_reviews.jsonl"])
+    line = json.loads(files["open_filings.jsonl"])
     line["new_column"] = "x"
     data = (json.dumps(line, sort_keys=True) + "\n").encode()
     m = json.loads(files["manifest.json"])
-    m["tables"]["open_reviews"]["sha256"] = S._sha256(data)
+    m["tables"]["open_filings"]["sha256"] = S._sha256(data)
     conn = store.connect(":memory:")
     with quiet():
-        S.load_files(conn, dict(files, **{"open_reviews.jsonl": data, "manifest.json": json.dumps(m).encode()}))
-    assert rows(conn, "open_reviews")[0]["decision"] == "step"
+        S.load_files(conn, dict(files, **{"open_filings.jsonl": data, "manifest.json": json.dumps(m).encode()}))
+    assert rows(conn, "open_filings")[0]["kind"] == "us_official"
+    # a state saved before a table left the format still loads (the extra table is left alone)
+    m = json.loads(files["manifest.json"])
+    m["tables"]["open_reviews"] = {"rows": 1, "sha256": S._sha256(b"{}\n")}
+    with quiet():
+        S.load_files(store.connect(":memory:"), dict(files, **{"open_reviews.jsonl": b"{}\n",
+                                                               "manifest.json": json.dumps(m).encode()}))
 
 
 # ── the database: the fake API (tests/fake_api.py) ───────────────────────────
@@ -214,16 +224,16 @@ def test_no_saved_state_starts_fresh_and_saves_the_first():
             same = S.push(conn, api, now=NOW + 5, **kw)
         assert same["changed"] is False and same["version"] is None and blobs.head(api, S.STATE) is None
         # the run's work: its push saves the first state
-        store.save_review(conn, "acme", "acme talks", "step", {"title": "Acme talks"}, at=NOW + 10)
+        change(conn, "acme")
         with quiet():
             first = S.push(conn, api, now=NOW + 20, **kw)
         assert first["changed"] and blobs.head(api, S.STATE)["version"] == first["version"]
-        assert rows(conn, "open_reviews")[0]["story"] == "acme"
+        assert rows(conn, "open_filings")[0]["event_id"] == "acme"
         # another place started fresh too, but the first state was saved meanwhile: it is refused, not overwritten
         conn2 = store.connect(":memory:")
         with quiet():
             S.pull(conn2, FakeApi(), db_path=":memory:", now=NOW, **other)          # its own empty database
-        store.save_review(conn2, "other", "k", "step", {"title": "k"}, at=NOW + 30)
+        change(conn2, "other")
         e = refused(lambda: S.push(conn2, api, now=NOW + 40, **other), 3, "changed since this run's pull")
         assert e.kind == "outside" and blobs.head(api, S.STATE)["version"] == first["version"]
 
@@ -283,7 +293,7 @@ def test_push_then_pull_into_a_fresh_store():
         assert got["changed"] and got["lists"] == ["closed.json", "open.json"]
         h = blobs.head(api, S.STATE)
         assert h["version"] == got["version"] and h["meta"]["by"] == "mac" and h["meta"]["open_day"] == "2026-11-13"
-        assert h["meta"]["tables"]["open_reviews"]["rows"] == 1
+        assert h["meta"]["tables"]["open_filings"]["rows"] == 1
         assert json.loads(read(os.path.join(a["job_dir"], "state_pushed.json"))) == \
             {"ok": True, "version": got["version"], "changed": True, "at": NOW}
         for name in S.SITE_FILES:
@@ -318,20 +328,20 @@ def test_a_newer_local_store_is_kept_unless_forced():
             S.push(src, api, seed=True, now=NOW, **a)
         db = os.path.join(tmp, "local.db")
         local = filled(store.connect(db))
-        store.save_review(local, "late", "late headline", "step", {"title": "late headline"}, at=NOW + 10_000)
-        refused(lambda: S.pull(local, api, db_path=db, now=NOW + 400, **a), 2, "open_reviews.decided_at")
-        assert any(r["story"] == "late" for r in rows(local, "open_reviews"))
+        store.save_open_day(local, "2026-11-20", "updated", NOW + 10_000, [])
+        refused(lambda: S.pull(local, api, db_path=db, now=NOW + 400, **a), 2, "open_runs.run_at")
+        assert any(r["day"] == "2026-11-20" for r in rows(local, "open_runs"))
         for i in range(4):                                       # --force backs the store up, keeping 3 copies
             with quiet():
                 S.pull(local, api, db_path=db, force=True, now=NOW + 500 + i, **a)
-        assert rows(local, "open_reviews") == rows(src, "open_reviews")
+        assert rows(local, "open_runs") == rows(src, "open_runs")
         backups = sorted(x for x in os.listdir(tmp) if x.startswith("local.db.bak-"))
         assert len(backups) == S.BACKUPS_KEPT, backups
         # a state that does not match its manifest is refused before anything changes
         api.parts[("state", api.blobs["state"]["version"], 0)] = "AAAA"
-        before = rows(local, "open_reviews")
+        before = rows(local, "open_runs")
         refused(lambda: S.pull(local, api, db_path=db, force=True, now=NOW + 600, **a), 2, "could not be downloaded")
-        assert rows(local, "open_reviews") == before
+        assert rows(local, "open_runs") == before
 
 
 def test_two_writers_and_the_guards():
@@ -353,16 +363,16 @@ def test_two_writers_and_the_guards():
         assert api.calls["PUT"] == calls.get("PUT", 0) and api.calls["POST"] == calls.get("POST", 0)
         assert json.loads(read(os.path.join(b["job_dir"], "state_pushed.json"))) == \
             {"ok": True, "version": first, "changed": False, "at": NOW + 20}
-        # b saves a decision; a, still on its pull of the first version, is refused and the pointer stays
-        store.save_review(conn_b, "acme", "acme talks", "not a step", {"title": "Acme talks"}, at=NOW + 25)
+        # b saves a change; a, still on its pull of the first version, is refused and the pointer stays
+        change(conn_b, "acme")
         with quiet():
             second = S.push(conn_b, api, now=NOW + 30, **b)
         assert second["changed"] and second["version"] != first and second["lists"] == []
-        store.save_review(conn_a, "other", "other talks", "step", {"title": "Other talks"}, at=NOW + 26)
+        change(conn_a, "other")
         refused(lambda: S.push(conn_a, api, now=NOW + 40, **a), 3, "changed since this run's pull")
         assert blobs.head(api, S.STATE)["version"] == second["version"]
         # pushing again from b works (its push counts as its new pull)
-        store.save_review(conn_b, "acme", "acme bid", "step", {"title": "Acme bid"}, at=NOW + 50)
+        change(conn_b, "acme bid")
         with quiet():
             third = S.push(conn_b, api, now=NOW + 60, **b)
         assert third["changed"] and blobs.head(api, S.STATE)["version"] == third["version"]
@@ -373,9 +383,9 @@ def test_two_writers_and_the_guards():
         fresh = store.connect(":memory:")
         with quiet():
             S.pull(fresh, api, db_path=":memory:", now=NOW + 80, **b)
-        assert rows(fresh, "open_reviews") == rows(conn_a, "open_reviews")
+        assert rows(fresh, "open_filings") == rows(conn_a, "open_filings")
         # a race: the pointer moves between the check and the commit; nothing changes
-        store.save_review(fresh, "late", "k", "step", {"title": "k"}, at=NOW + 90)
+        change(fresh, "late")
         api.fail_next(409, "moved", method="POST")
         refused(lambda: S.push(fresh, api, now=NOW + 95, **b), 3, "changed since this run's pull")
         assert blobs.head(api, S.STATE)["version"] == back["version"]
@@ -398,7 +408,7 @@ def test_lists_are_sent_only_when_they_changed():
                                                          "run_url": "https://run/1"}
         assert json.loads(blobs.get(api, "site:closed.json")[1])["generated_at"].startswith("2026-11-15")
         # a list the database refuses fails the push after the state was saved
-        store.save_review(conn, "acme", "acme talks", "step", {"title": "Acme talks"}, at=NOW + 3)
+        change(conn, "acme")
         _site(a, generated="2026-11-16T04:20:00+00:00")
         api.fail_next(400, "bad_request", method="POST", path="site:closed.json")
         refused(lambda: S.push(conn, api, now=NOW + 4, **a), 3, "the state was saved but the lists were not")
@@ -406,7 +416,7 @@ def test_lists_are_sent_only_when_they_changed():
         fresh = store.connect(":memory:")
         with quiet():
             S.pull(fresh, api, db_path=":memory:", now=NOW + 5, **a)
-        assert rows(fresh, "open_reviews") == rows(conn, "open_reviews")
+        assert rows(fresh, "open_filings") == rows(conn, "open_filings")
 
 
 def test_the_head_says_what_the_latest_open_day_left():
@@ -446,7 +456,7 @@ def test_prune():
     assert {r["condition_id"] for r in rows(conn, "closed_checks")} == {"0xabc"}
     infos = {r["day"]: json.loads(r["info"]) for r in rows(conn, "open_runs")}
     assert infos["2026-10-20"] == {"new_today": 2} and infos["2026-10-21"] == {"new_today": 2}
-    assert infos["2026-11-13"]["awaiting"] == [{"n": 1}]                # a recent day keeps its notes
+    assert infos["2026-11-13"]["seen_step_headlines"] == ["a"]          # a recent day keeps its notes
     assert S.prune(conn, NOW) == {"open_answers": 0, "closed_checks": 0, "open_runs notes": 0}
     # the latest updated day keeps its notes however old it is (the next run reads its seen headlines)
     lone = store.connect(":memory:")
@@ -489,7 +499,7 @@ def test_prune_leaves_the_next_days_cards_as_they_were():
             with quiet():
                 s = T._run(conn, T.NOW + 2 * DAY, T.FakeClient(), out)
             doc = json.load(open(out))
-            outs.append((doc["days"][0]["cards"], s["awaiting"], s["picks"]))
+            outs.append((doc["days"][0]["cards"], s["held_back"], s["picks"]))
     assert outs[0] == outs[1]
     assert outs[0][0], "the fixture's third day has cards"
 

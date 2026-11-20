@@ -34,9 +34,9 @@ import {
 // didn't answer (less often for each); once the add run has added a market,
 // the index is read past every cache instead, until it lists the market and
 // its page is served. With no API in
-// the build, or the API not answering or paused, the controls work the same
-// and keep what this browser did, and a click kept that way is sent once the
-// API answers and takes visitors' changes; only a refusal a visitor should
+// the build, or the API not answering, the controls work the same and keep
+// what this browser did, and a click kept that way is sent once the API
+// answers; only a refusal a visitor should
 // read (a daily limit, a failed bot check, an add that couldn't be made) is
 // shown.
 
@@ -165,7 +165,7 @@ const ADDED_HERE: PublicRequest = { status: "approved", name: null, decided_at: 
 /** A market on its way to the main page (or there); one its add run couldn't add (failed) offers the button again. */
 const onItsWay = (r: PublicRequest | null) => r?.status === "approved" || r?.status === "added";
 
-/** What a market the owner took off the main page reads, in place of its button. */
+/** What a market taken off the main page reads, in place of its button. */
 const REMOVED = "Taken off the main page";
 
 const requests = makeStore<RequestState>(
@@ -206,10 +206,10 @@ function lookFor(slug: string, every: number) {
 
 /**
  * Reads the API's answer for closed market `k`, keeping what it says in this browser, and sends a click this
- * browser kept for it (it still reads "Adding") once the API takes visitors' changes.
+ * browser kept for it (it still reads "Adding") once the API answers.
  */
 const readRequest = (k: string) => (r: unknown): RequestState | null => {
-  const v = r as { listed?: boolean; writes?: boolean; request?: PublicRequest | null } | null;
+  const v = r as { listed?: boolean; request?: PublicRequest | null } | null;
   if (!v) return null;
   // a market on its way keeps its state even once its card has left the closed list
   if (v.request) {
@@ -218,7 +218,7 @@ const readRequest = (k: string) => (r: unknown): RequestState | null => {
   }
   if (v.listed !== true) return null;
   if (!requestedHere(k)) return { request: null };
-  if (v.writes !== false) queueMicrotask(() => void sendRequest(k, "card", null));
+  queueMicrotask(() => void sendRequest(k, "card", null));
   return { request: ADDED_HERE };
 };
 
@@ -400,10 +400,10 @@ const watchPath = (k: string) => `/api/watch?story=${encodeURIComponent(k)}`;
 
 /**
  * Reads the API's answer for open market `k`, keeping what it says in this browser, and sends a change this
- * browser kept for it (shown as made) once the API takes visitors' changes.
+ * browser kept for it (shown as made) once the API answers.
  */
 const readWatch = (k: string) => (r: unknown): WatchState | null => {
-  const w = r as { listed?: boolean; writes?: boolean; watching?: boolean } | null;
+  const w = r as { listed?: boolean; watching?: boolean } | null;
   if (!w || w.listed !== true || typeof w.watching !== "boolean") return null;
   const mine = watchToSend(k);
   if (mine === null || mine === w.watching) {
@@ -411,7 +411,7 @@ const readWatch = (k: string) => (r: unknown): WatchState | null => {
     setWatchedHere(k, w.watching);
     return { watching: w.watching };
   }
-  if (w.writes !== false) queueMicrotask(() => void saveWatch(k, mine, "card", null));
+  queueMicrotask(() => void saveWatch(k, mine, "card", null));
   return { watching: mine };
 };
 

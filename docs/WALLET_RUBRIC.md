@@ -122,7 +122,7 @@ Each market page carries the rubric's display part and each trader's result, so 
 
 ## Code
 
-`backend/rubric/`: `spec.py` (load, check, display) · `wallet_facts.py` (factors) · `fact_sources.py` (facts files) · `prompt.py` (input text) · `scorers.py` (both scorers) · `combine.py` (score, band) · `cache.py` (answers, daily ledger) · `pipeline.py` (`score_market`, `page_part`) · `store.py` (the D1 blob, `publish_page`) · `steps.py` (`wallets.score`) · `__main__.py` (CLI). `export.py` attaches the page part (`build_traders(df, spectrum)`, `spectrum_summary`). Web: `web/src/views/traders/spectrum.ts` (bands, layout, colours).
+`backend/rubric/`: `spec.py` (load, check, display) · `wallet_facts.py` (factors) · `fact_sources.py` (facts files) · `prompt.py` (input text) · `scorers.py` (both scorers) · `combine.py` (score, band) · `cache.py` (answers, daily ledger) · `pipeline.py` (`score_market`, `page_part`) · `store.py` (the D1 blob, `publish_page`) · `steps.py` (`wallets.score`) · `__main__.py` (CLI). `pipeline/export.py` attaches the page part (`build_traders(df, spectrum)`, `spectrum_summary`). Web: `web/src/views/traders/spectrum.ts` (bands, layout, colours).
 
 - **Tests:** `python3 tests/test_rubric_scoring.py` (a fake Decisions API on a local port), `python3 tests/test_rubric_step.py` (the step against the fake Worker), `python3 tests/test_rubric_wallet_facts.py`.
 - **Local site data:** `python3 -m backend.rubric pages --to DIR` writes `DIR/api/data/` from the live API with the local scores attached; serve `DIR` and point `VITE_API_URL` at it.

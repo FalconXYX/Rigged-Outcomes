@@ -29,7 +29,7 @@ database_name = "rigged-outcomes"
 database_id = "fefb90bc-c205-4628-b9b3-bd164ef93fba"
 migrations_dir = "migrations"
 
-# Production values. Secrets (wrangler secret put): TURNSTILE_SECRET, OWNER_TOKEN, JOB_TOKEN, VISITOR_SALT, and
+# Production values. Secrets (wrangler secret put): TURNSTILE_SECRET, JOB_TOKEN, VISITOR_SALT, and
 # WAKE_SECRET (it signs the wake-ups sent to STEP_URL; the Vercel project holds the same value), and WAKE_GATE
 # (sent as x-ro-gate; Vercel's firewall rule lets /api/step through only with it, docs/DEPLOY.md).
 [vars]

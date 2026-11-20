@@ -192,7 +192,7 @@ def put_originals(c, read=None, now=None, by="local"):
     branch's data/), the page byte for byte what export.py writes, saved with put_market with added_at 1 to 7,
     then the index ordered with them first. A market whose page, record and index entry are these already is left
     as it is, so a second run changes nothing. Returns [(name, "saved" | "unchanged")]."""
-    import add_market
+    from pipeline import add_market
     read = read or (lambda path: git_text(ORIGINALS_REF, path))
     markets = add_market.read_markets()
     order = {m["name"]: i for i, m in enumerate(markets)}
@@ -264,7 +264,7 @@ def migrate(c, now=None):
     """Move the markets added before the backend (market:* records holding their page) to what the Worker
     serves: each page built again from its data files with this export.py (the saved page when that fails), put
     as site:markets/<name>.json, its record kept without the page, then site:index.json. Safe to run again."""
-    import add_market
+    from pipeline import add_market
     from watchlist import blobs
     done = []
     for h, doc in _records(c):

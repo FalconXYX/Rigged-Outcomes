@@ -166,7 +166,7 @@ class Polymarket:
 
     def __init__(self, cache_dir=None, rate=5.0, getter=None):
         if getter is None:
-            import polymarket_api
+            from pipeline import polymarket_api
             getter = polymarket_api.get_json
         self.getter, self.cache_dir, self.gap = getter, cache_dir, 1.0 / rate if rate else 0.0
         self._lock, self._next = threading.Lock(), 0.0
@@ -540,7 +540,7 @@ def market_facts(market, source=None, workers=5, on_whale=None, histories=None):
     fresh = [is_fresh(h["prior_txs"], a) for h, a in zip(hists, ages)]
     first_ts = [r["first_buy_ts"] for r in rows]
 
-    import scrape_insiders as si
+    from pipeline import scrape_insiders as si
     threshold = si.whale_threshold(m.volume)
     whales = []
     for i, (wh, row, h) in enumerate(zip(market.whales, rows, hists)):

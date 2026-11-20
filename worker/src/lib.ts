@@ -9,7 +9,6 @@ export interface Env {
   DB: D1Database;
   // secrets (wrangler secret put; .dev.vars locally)
   TURNSTILE_SECRET: string;
-  OWNER_TOKEN: string;
   JOB_TOKEN: string;
   VISITOR_SALT: string;
   /** Signs the wake-ups sent to the step function (wake.ts); Vercel holds the same value. */
@@ -65,8 +64,8 @@ export function daysBefore(day: string, n: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Body caps: a visitor's write, the owner's review page, the daily job. */
-export const BODY = { visitor: 4 * 1024, owner: 64 * 1024, job: 1024 * 1024 } as const;
+/** Body caps: a visitor's write, the daily job. */
+export const BODY = { visitor: 4 * 1024, job: 1024 * 1024 } as const;
 
 export const MARKET_NAME = /^[a-z0-9_-]{1,40}$/;
 export const PAGE_NAME = /^[a-z0-9][a-z0-9-]{1,31}$/;
@@ -75,7 +74,7 @@ export const DAY_TEXT = /^\d{4}-\d{2}-\d{2}$/;
 
 // ---------- responses and errors ----------
 
-/** A failed request: `code` is what the site keys its own words on; `message` is for the owner and logs only. */
+/** A failed request: `code` is what the site keys its own words on; `message` is for the job and logs only. */
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -295,24 +294,15 @@ const AUTH_FAILS = 10;
 export const JOB_AGENT = "rigged-outcomes-job";
 
 /**
- * Owner and job sign-in: one bearer token each. The token is compared first, so the right one always gets
- * in (one shared network's wrong guesses can't lock the owner out). Wrong ones are counted per visitor; after
- * 10 in a Toronto day that visitor's wrong tokens are answered 429 locked and no longer counted (which keeps the
- * writes down; guessing a 256-bit token is hopeless anyway). A job token refused from the job itself (its
- * User-Agent) is kept as settings.job_refused, for the review page: the job's secret no longer matches.
+ * The job's sign-in: one bearer token (JOB_TOKEN). The token is compared first, so the right one always gets
+ * in (one shared network's wrong guesses can't lock the job out). Wrong ones are counted per visitor; after 10
+ * in a Toronto day that visitor's wrong tokens are answered 429 locked and no longer counted (which keeps the
+ * writes down; guessing a 256-bit token is hopeless anyway).
  */
-export async function authorize(req: Request, env: Env, who: "owner" | "job"): Promise<void> {
+export async function authorize(req: Request, env: Env): Promise<void> {
   const m = /^Bearer (\S{1,512})$/.exec(req.headers.get("authorization") ?? "");
-  const secret = who === "owner" ? env.OWNER_TOKEN : env.JOB_TOKEN;
-  if (m && secret && (await safeEqual(m[1], secret))) return;
+  if (m && env.JOB_TOKEN && (await safeEqual(m[1], env.JOB_TOKEN))) return;
   const at = await clockOf(env);
-  if (who === "job" && req.headers.get("user-agent") === JOB_AGENT) {
-    await env.DB.prepare(
-      "INSERT INTO settings (key, value, updated_at) VALUES ('job_refused', ?1, ?1) ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?1",
-    )
-      .bind(String(at))
-      .run();
-  }
   const visitor = await visitorOf(req, env);
   const day = limitDay(req, env, at);
   if (!(await counter(env, day, "auth_fail", visitor, AUTH_FAILS).first())) {
@@ -364,22 +354,6 @@ export async function quota(
   for (const a of also) if (!(await counter(env, day, a.kind, "*", a.cap).first())) fail(429, a.code, a.message);
   if (!(await counter(env, day, kind, "*", site).first())) fail(429, "busy", `The site's limit of ${site} ${kind} writes today is reached.`);
 }
-
-// ---------- settings ----------
-
-/** Whether visitors may write (the review page's pause switch, settings.writes). */
-export async function writesOn(env: Env): Promise<boolean> {
-  return ((await env.DB.prepare("SELECT value FROM settings WHERE key = 'writes'").first<string>("value")) ?? "on") !== "off";
-}
-
-export async function requireWrites(env: Env): Promise<void> {
-  if (!(await writesOn(env))) fail(503, "paused", "Visitors' changes are paused.");
-}
-
-// ---------- "Apply decisions now" ----------
-
-/** Apply runs the review page's "Apply decisions now" may make a Toronto day (quota.kind 'apply'). */
-export const APPLIES_A_DAY = 30;
 
 // ---------- the bot check ----------
 

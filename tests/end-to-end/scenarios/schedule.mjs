@@ -5,13 +5,12 @@
 // Worker stopped for it. In order, on one stack:
 //
 //   budget low     30 days of use past 65% of the allowance: a visitor's add waits, its card reading "Adding to
-//                  the main page" with nothing hedging and no error; Vercel is never woken for it; the review page
-//                  says the budget is low
+//                  the main page" with nothing hedging and no error; Vercel is never woken for it
 //   budget stop    today's use past its cap: nothing is claimed and nothing woken; the next day's 04:00 daily run
 //                  is recorded "skipped"
 //   back to ok     the use gone: the waiting add is woken and lands by itself on the page left open
-//   missed day     the cron silent for a whole day: that day's run is recorded "missed" (the review page says so),
-//                  and the next day's starts at 04:00
+//   missed day     the cron silent for a whole day: that day's run is recorded "missed", and the next day's
+//                  starts at 04:00
 //   04:00 Toronto  on the days the clocks change (2027-03-14 and 2027-11-07): nothing at 03:59, the daily run at
 //                  04:00 Toronto with its 09:30 deadline; the newer run cancels the older one still queued
 //   catch-up       10:00 Toronto: a catch-up only after a daily run that left work, none otherwise
@@ -25,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { launch } from "../lib/browser.mjs";
 import { secs, sleep, until } from "../lib/proc.mjs";
-import { Report, addButton, addRuns, callsLine, faceOf, hedges, onMainLink, openWatchlist, ownerSees, runLine, watch } from "../lib/scenario.mjs";
+import { Report, addButton, addRuns, callsLine, faceOf, hedges, onMainLink, openWatchlist, runLine, watch } from "../lib/scenario.mjs";
 import { dayShift, toronto, torontoAt } from "../lib/toronto.mjs";
 import { parseArgs, stackOptions, startStack } from "../stack.mjs";
 
@@ -50,7 +49,7 @@ try {
   const D = stack.today;
   const p = stack.seed.picks[0];
   browser = await launch({ headed: !!args.headed });
-  const level = async () => (await stack.overview()).backend?.budget?.level;
+  const level = async () => (await stack.status())?.budget?.level;
   const runState = async (id) => (await stack.run(id))?.run?.state ?? null;
 
   // ── budget low: 10 earlier days at 12.7 CPU-min each (×1.25 safety: 66% of 4 h), today nothing ──
@@ -66,12 +65,11 @@ try {
   const waiting = await faceOf(page, p);
   const run = (await addRuns(stack, p.condition_id))[0];
   const addCalls = (await stack.vercel.calls()).filter((c) => c.lane === "add" && c.at * 1000 >= clickAt);
-  const owner = await ownerSees(browser, stack);
   report.row(
     "budget low: an add waits",
-    'the level is "low"; the card keeps reading "Adding to the main page" (no error, nothing hedging); its run waits queued and Vercel is never woken for it; the review page says the budget is low',
-    `level ${low}; the card: ${w.seen("card")}; ${run ? await runLine(stack, run.id, clickAt) : "no add run"}; add-lane Vercel calls: ${addCalls.length}; review page: ${owner.includes("Budget low") ? '"Budget low: …"' : `no "Budget low" (${owner.slice(0, 120)})`}`,
-    low === "low" && waiting === "Adding to the main page" && !hedges(w).length && run?.state === "queued" && !addCalls.length && owner.includes("Budget low"),
+    'the level is "low"; the card keeps reading "Adding to the main page" (no error, nothing hedging); its run waits queued and Vercel is never woken for it',
+    `level ${low}; the card: ${w.seen("card")}; ${run ? await runLine(stack, run.id, clickAt) : "no add run"}; add-lane Vercel calls: ${addCalls.length}`,
+    low === "low" && waiting === "Adding to the main page" && !hedges(w).length && run?.state === "queued" && !addCalls.length,
   );
 
   // ── budget stop: today's use past its 20 CPU-min cap, and the 30 days past 80% (so tomorrow is still over) ──
@@ -126,12 +124,12 @@ try {
   await stack.tick();
   const missed = await runState(`daily:${d2}`);
   const made3 = await stack.run(`daily:${d3}`);
-  const ownerMissed = await ownerSees(browser, stack);
+  const listed = ((await stack.status())?.runs ?? []).find((r) => r.id === `daily:${d2}`)?.state;
   report.row(
     "a missed cron day",
-    `a day with no tick at all (${d2}) is recorded "missed" and the review page says so; the next day's run (${d3}) is made by its first tick after 04:00`,
-    `daily:${d2} ${missed}; daily:${d3} ${made3?.run.state ?? "not made"} (deadline ${made3 ? new Date(made3.run.deadline * 1000).toISOString() : "-"}); review page ${/missed: no run that day/.test(ownerMissed) ? 'says "missed: no run that day"' : "does not say missed"}`,
-    missed === "missed" && ["queued", "running"].includes(made3?.run.state) && /missed: no run that day/.test(ownerMissed),
+    `a day with no tick at all (${d2}) is recorded "missed" (python3 -m backend.status lists it); the next day's run (${d3}) is made by its first tick after 04:00`,
+    `daily:${d2} ${missed}, in the status ${listed ?? "not listed"}; daily:${d3} ${made3?.run.state ?? "not made"} (deadline ${made3 ? new Date(made3.run.deadline * 1000).toISOString() : "-"})`,
+    missed === "missed" && listed === "missed" && ["queued", "running"].includes(made3?.run.state),
   );
 
   // ── 04:00 Toronto on the days the clocks change ──

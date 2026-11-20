@@ -6,7 +6,7 @@ Nothing goes to git and nothing goes to disk: the market's page and its data rec
 database (backend.site.put_market), and the Worker serves the page and the added markets' index from there, so it
 is on the main page with no site rebuild. markets.json is never changed.
 
-    python3 add_market.py --condition-id 0x... --slug SLUG [--name NAME] --outcome Yes [--dry-run]
+    python3 -m pipeline.add_market --condition-id 0x... --slug SLUG [--name NAME] --outcome Yes [--dry-run]
 
 1. Polymarket. Gamma's market for the slug must have this condition id, be
    closed, and have resolved to --outcome (watchlist.filters.winning_outcome).
@@ -47,7 +47,7 @@ import sys
 import traceback
 from datetime import datetime, timezone
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # the repo root (markets.json, data/)
 MAX_FILLS = 400_000                                     # about twice US x Iran's, inside the 2 GB step (its clean: 377 MB)
 MAX_PAGE_BYTES = 10_000_000                             # the exported page, as the site loads it
 MAX_DATA_BYTES = 40_000_000                             # its clean and insiders CSVs
@@ -171,8 +171,8 @@ class Fills:
     def add_page(self, rows):
         """A page of /v2/trades rows (polymarket_api.v2_pages); the CLOB operator's rows are left out, as
         polymarket_api.fetch_trades leaves them."""
-        import polymarket_api
-        import polymarket_trades
+        from pipeline import polymarket_api
+        from pipeline import polymarket_trades
         for r in rows:
             w = str(r.get("proxy_wallet") or "").lower()
             if not w or w in polymarket_api.OPERATORS:
@@ -222,7 +222,7 @@ class Fills:
 
 def trade_params(condition_id):
     """/v2/trades' query for every fill of a market, maker and taker rows (polymarket_api.fetch_trades')."""
-    import polymarket_api
+    from pipeline import polymarket_api
     return {"condition": str(condition_id), "taker_only": "false", "limit": polymarket_api.PAGE_SIZE}
 
 
@@ -230,7 +230,7 @@ def trade_params(condition_id):
 
 def clean_text(fills):
     """(the clean CSV's text, positions) of the fills: byte for byte what cleandata.main writes from the raw CSV."""
-    import cleandata
+    from pipeline import cleandata
     clean, _ = cleandata.clean_rows(fills.rows())
     if not clean:
         raise AddError("Polymarket served no trades for it")
@@ -258,7 +258,7 @@ def saved_text(text):
 
 def whale_list(entry, clean):
     """[[wallet, first-trade epoch]] of the whales to score, in scoring order, each pair once."""
-    import scrape_insiders
+    from pipeline import scrape_insiders
     whales, _ = scrape_insiders.select_whales(entry, clean.copy(), quiet=True)
     out = []
     for _, row in whales.iterrows():
@@ -271,7 +271,7 @@ def whale_list(entry, clean):
 def score(entry, clean, totals_for):
     """The insiders frame from the clean frame and each whale's history totals: totals_for(wallet, cutoff) ->
     {"stake", "txs", ...}, raising when it has none. scrape_insiders.score_frame's frame, whales in order."""
-    import scrape_insiders
+    from pipeline import scrape_insiders
     whales, title = scrape_insiders.select_whales(entry, clean.copy(), quiet=True)
     results = [scrape_insiders.score_whale(row, totals_for(scrape_insiders.wallet_for(row),
                                                            scrape_insiders.whale_cutoff(row)))
@@ -284,7 +284,7 @@ def build(entry, clean_csv, insiders_csv, max_page_bytes=MAX_PAGE_BYTES, max_dat
     the data record ({"<Output>_clean.csv": text, "<Output>_insiders.csv": text}). spectrum: the wallet rubric's
     page part (backend/rubric/pipeline.page_part), carried by the page and the entry when given. Raises AddError
     over a cap, ValueError for a page the site could not read (NaN)."""
-    import export
+    from pipeline import export
     index, page = export.export_one(entry, clean=frame(clean_csv), insiders=frame(insiders_csv), spectrum=spectrum)
     size = len(export.page_bytes(page))
     if size > max_page_bytes:
@@ -301,8 +301,8 @@ def build(entry, clean_csv, insiders_csv, max_page_bytes=MAX_PAGE_BYTES, max_dat
 
 
 def _real_steps():
-    import polymarket_api
-    import scrape_insiders
+    from pipeline import polymarket_api
+    from pipeline import scrape_insiders
     return {"gamma": polymarket_api.fetch_market,
             "pages": lambda cid: polymarket_api.v2_pages("trades", trade_params(cid)),
             "history": scrape_insiders.history_totals}
@@ -346,7 +346,7 @@ def add(condition_id, slug, name, outcome, dry_run=False, root=ROOT, steps=None,
         if not fills.n:
             raise AddError("Polymarket served no trades for it")
         csv_clean, _ = clean_text(fills)
-        import scrape_insiders
+        from pipeline import scrape_insiders
         csv_insiders = insiders_text(scrape_insiders.score_frame(entry, frame(csv_clean), totals_for=step["history"]))
         index, page, data = build(entry, csv_clean, csv_insiders, max_page_bytes, max_data_bytes)
     except AddError as e:

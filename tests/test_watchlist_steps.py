@@ -156,18 +156,18 @@ def test_state_saved_again_onto_a_moved_one():
         merges.append(1)
         if len(merges) == 1:                              # another job saves first, while this one merges
             other = steps.State(Ctx(api, w, "open.walk")).load()
-            other.save(lambda c: store.save_review(c, "other", "card", "card approved", None, "person", NOW))
-        store.save_review(conn, "mine", "card", "card approved", None, "person", NOW)
+            other.save(lambda c: store.save_filing(c, "other", None, None, "rule"))
+        store.save_filing(conn, "mine", None, None, "rule")
         return "merged"
     assert st.save(merge) == "merged" and len(merges) == 2
     fresh = steps.State(Ctx(api, w, "daily.end")).load()
-    assert set(store.open_reviews(fresh.conn)) == {"other", "mine"}
+    assert store.get_filing(fresh.conn, "other") and store.get_filing(fresh.conn, "mine")
     # a save that keeps moving waits: Later("state_moved")
     st = steps.State(Ctx(api, w, "daily.begin")).load()
 
     def always_moved(conn):
         api.fail_next(409, "moved", method="POST", path="/api/job/blobs/state/")
-        store.save_review(conn, f"x{conn.total_changes}", "card", "card approved", None, "person", NOW)
+        store.save_filing(conn, f"x{conn.total_changes}", None, None, "rule")
     e = raises(lambda: st.save(always_moved), Later)
     assert e.reason == "state_moved" and e.run_after == NOW + C.RETRY["state_moved_s"]
     # nothing changed: nothing is saved
@@ -238,7 +238,7 @@ def test_the_closed_list_in_steps_is_three_a_toronto_day():
                (news, "search", search)):
         ctx = Ctx(api, w, "daily.begin")
         ctx.worker.results["daily:2026-11-19"] = {"daily:work": {"now": NOW, "work": {"watched": [], "requests": [],
-                                                                                    "added": []}, "applied": []}}
+                                                                                    "added": []}}}
         steps.closed_scan(Ctx(api, w, "closed.scan"))
         scan = w.results["daily:2026-11-19"]["closed:candidates"]
         assert scan["days"] == ["2026-11-18", "2026-11-19"] and scan["markets"] == 9
@@ -438,14 +438,6 @@ def test_a_model_reading_of_out_is_recorded_for_good():
 # ── Open now in steps, against one run of the same day ──────────────────────
 
 def test_open_now_in_steps_makes_the_list_one_run_makes():
-    steps_by = O.STEPS_BY
-    try:
-        _open_now_in_steps()
-    finally:
-        O.STEPS_BY = steps_by                       # the opennow tests' fixtures set "model" when imported
-
-
-def _open_now_in_steps():
     import test_watchlist_opennow as TO
     from watchlist import net
     run = "daily:" + local_day(TO.NOW)
@@ -454,7 +446,7 @@ def _open_now_in_steps():
     client = TO.FakeClient()
     with Patch((net, "walk_open_events", lambda min_volume=0: list(TO.EVENTS)), (news, "search", TO.fake_search),
                (O, "open_client", lambda: client), (O, "make_step_client", lambda: client)):
-        w.results[run] = {"daily:work": {"now": TO.NOW, "work": {}, "applied": []}}
+        w.results[run] = {"daily:work": {"now": TO.NOW, "work": {}}}
         for kind in ("open.walk", "open.name", "open.news", "open.read", "open.out", "open.publish"):
             got = getattr(steps, kind.replace(".", "_"))(Ctx(api, w, kind, run=run, now=TO.NOW))
             assert got is None, (kind, got)

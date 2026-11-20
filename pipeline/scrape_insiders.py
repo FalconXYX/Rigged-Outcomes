@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
-import polymarket_api
+from pipeline import polymarket_api
 from backend import outcomes
 
 MARKETS_FILE = "markets.json"
@@ -311,8 +311,8 @@ def check_correct_outcome(df, correct_outcome, name):
                          f"before scoring (the whales would be picked from the losing side)")
 
 if __name__ == "__main__":
-    # python3 scrape_insiders.py iran          first market whose name/slug contains "iran"
-    # python3 scrape_insiders.py --name fired   exactly the entry named "fired"
+    # python3 -m pipeline.scrape_insiders iran          first market whose name/slug contains "iran"
+    # python3 -m pipeline.scrape_insiders --name fired   exactly the entry named "fired"
     if len(sys.argv) > 2 and sys.argv[1] == "--name":
         main(name=sys.argv[2])
     else:

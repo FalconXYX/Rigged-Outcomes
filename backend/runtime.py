@@ -355,7 +355,7 @@ def tmp_dir(job, root=None):
 
 def _polymarket_down(e):
     """Polymarket not answering (after polymarket_api's own retries): a network error, a 429 or a 5xx."""
-    pm = sys.modules.get("polymarket_api")
+    pm = sys.modules.get("pipeline.polymarket_api")
     if pm is None or not isinstance(e, pm.PolymarketAPIError) or isinstance(e, pm.RetiredEndpointError):
         return False
     status = getattr(e, "status", None)

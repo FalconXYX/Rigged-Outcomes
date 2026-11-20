@@ -213,7 +213,7 @@ class FakeWorker:
                 found = {k: self.news[k] for k in body["keys"] if k in self.news}
                 return {"news": copy.deepcopy(found), "more": []}
             if url.path == "/api/job/work":
-                return {"now": self.now(), "decisions": [], "requests": copy.deepcopy(self.requests), "watched": [],
+                return {"now": self.now(), "requests": copy.deepcopy(self.requests), "watched": [],
                         "added": []}
             if url.path == "/api/job/done":
                 self.done.append(copy.deepcopy(body))

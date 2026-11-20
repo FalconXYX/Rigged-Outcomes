@@ -5,7 +5,7 @@ original Dash apps, on the original-project branch) as JSON for the web
 dashboard (web/). Every calculation here mirrors the Dash apps line for line so
 the numbers on the site match the Python output.
 
-    python3 export.py            # data/*.csv -> web/public/data/ (CSVs from the original-project branch)
+    python3 -m pipeline.export   # data/*.csv -> web/public/data/ (CSVs from the original-project branch)
 
 Outputs
     data/index.json              one entry per market (+ ranking fields)

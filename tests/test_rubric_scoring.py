@@ -372,7 +372,7 @@ def test_the_pacer_keeps_the_token_window():
 def test_export_attaches_the_scores():
     import pandas as pd
 
-    import export
+    from pipeline import export
     fake()
     rubric = spec.load_rubric()
     res, _ = run(rubric)

@@ -84,8 +84,8 @@ def _stop(ctx, cid, status, name, note):
 # ── add.fetch ────────────────────────────────────────────────────────────────
 
 def fetch(ctx):
-    import add_market as A
-    import polymarket_api
+    from pipeline import add_market as A
+    from pipeline import polymarket_api
     from backend import site
 
     cur = ctx.cursor or {}
@@ -171,7 +171,7 @@ def whales(ctx):
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
-    import polymarket_api
+    from pipeline import polymarket_api
 
     batch = [(str(w), int(t)) for w, t in (ctx.job.get("input") or {}).get("whales") or []]
     done = set((ctx.cursor or {}).get("done") or [])
@@ -220,7 +220,7 @@ def whales(ctx):
 # ── add.export ───────────────────────────────────────────────────────────────
 
 def export(ctx):
-    import add_market as A
+    from pipeline import add_market as A
     from backend import site
     from watchlist import sync
 

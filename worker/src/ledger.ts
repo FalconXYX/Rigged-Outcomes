@@ -8,7 +8,7 @@ import { type Env, daysBefore } from "./lib";
 
 const B = CONTRACT.budget;
 
-/** settings.budget, as the review page shows it: the 30 days' and today's figures (safety and wake-ups counted in). */
+/** settings.budget, as GET /api/job/status gives it: the 30 days' and today's figures (safety and wake-ups counted in). */
 export interface Budget {
   level: BudgetLevel;
   cpu_ms_30d: number;

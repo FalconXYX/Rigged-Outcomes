@@ -133,8 +133,8 @@ try {
   // the backend: one add run, done, every job done, every Vercel call answered
   watching = false;
   await watcher;
-  const o = await stack.overview();
-  const addRuns = (o.backend?.runs ?? []).filter((r) => r.kind === "add" && String(r.slot).startsWith(`${pick.condition_id}:`));
+  const o = await stack.status();
+  const addRuns = (o.runs ?? []).filter((r) => r.kind === "add" && String(r.slot).startsWith(`${pick.condition_id}:`));
   check(addRuns.length === 1, `the click made exactly one add run (${addRuns.map((r) => `${r.id} ${r.state}`).join(", ")})`);
   const r = addRuns[0] ? await stack.run(addRuns[0].id) : null;
   check(r?.run.state === "done", `that run ended ${r?.run.state}${r ? ` (${failedJobs(r.jobs) || "no job failed"})` : ""}`);
@@ -195,8 +195,8 @@ async function diagnose(stack, cid) {
   const got = id ? await stack.run(id) : null;
   lines.push(`  run ${id ?? "none"}: ${got?.run.state ?? "-"}`);
   for (const j of got?.jobs ?? []) lines.push(`    ${j.kind}#${j.part}: ${j.state} (attempt ${j.attempt}, laters ${j.laters}, partials ${j.partials})${j.error ? ` ${j.error}` : ""}`);
-  const o = await stack.overview();
-  for (const l of o.backend?.lanes ?? []) lines.push(`  lane ${l.lane}: unanswered ${l.unanswered}, wake_error ${l.wake_error ?? "-"}`);
+  const o = await stack.status();
+  for (const l of o?.lanes ?? []) lines.push(`  lane ${l.lane}: unanswered ${l.unanswered}, wake_error ${l.wake_error ?? "-"}`);
   for (const c of (await stack.vercel.calls()).slice(-8)) lines.push(`  vercel ${c.lane}: ${c.status} in ${c.s} s, ${c.jobs ?? "-"} job(s)`);
   lines.push(`  logs: ${stack.dirs.logs}`);
   return lines.join("\n");

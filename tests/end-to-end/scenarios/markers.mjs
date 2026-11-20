@@ -9,11 +9,8 @@
 //   reload       after a reload both people see every marker; the adder still has Remove
 //   remove own   the adder removes theirs (within 24 h): gone for them, the API and a fresh visitor
 //   not theirs   the other person has no Remove, and the API refuses a forged undo (403 not_yours)
-//   owner        the owner deletes one on #/review: gone for a fresh visitor; the adder's open page?
 //   worker down  the API stops while a page is open and the person adds: what they see, and whether the
 //                marker ever reaches the API once it is back (page left open, then a reload)
-//   pause        the owner's pause switch: a new marker doesn't reach the API; what the person sees; after
-//                "Allow", the same tab's next add
 //   limit        one person's daily limit (10 a Toronto day): the add after it reads the limit's words, with no
 //                "UTC" in them
 //
@@ -29,7 +26,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { launch } from "../lib/browser.mjs";
 import { secs, sleep } from "../lib/proc.mjs";
-import { OWNER_TOKEN } from "../lib/worker.mjs";
 import { parseArgs, stackOptions, startStack } from "../stack.mjs";
 
 const args = parseArgs(process.argv.slice(2));
@@ -193,25 +189,16 @@ async function scenario(key, name, expected, fn) {
 
 // ---------- what the API counted ----------
 
+/** Markers this run removed from the API (each still counted against today's limit). */
+let removedHere = 0;
+
 /**
- * The markers this run's adds put in the API today, deleted ones included (the owner's overview lists the newest
- * 50): each counted against this address's daily limit (every person here is 127.0.0.1), whether its add was a
- * click or a marker kept in a browser and sent once the API took it.
+ * The markers this run's adds put in the API today: the live ones and the ones removed since, each counted against
+ * this address's daily limit (every person here is 127.0.0.1), whether its add was a click or a marker kept in a
+ * browser and sent once the API took it.
  */
 async function countedToday() {
-  const ov = await stack.api("GET", "/api/admin/overview", undefined, OWNER_TOKEN);
-  return (ov.body?.markers ?? []).filter((m) => m.market === MARKET && m.label.startsWith("E2E")).length;
-}
-
-// ---------- the owner's review page ----------
-
-async function ownerPage() {
-  const page = await person("owner");
-  await page.goto(`${stack.urls.site}#/review`);
-  await page.locator('input[type="password"]').fill(OWNER_TOKEN);
-  await page.locator(".rv-unlock button[type=submit]").click();
-  await page.locator("#rv-markers").waitFor({ timeout: 30_000 });
-  return page;
+  return (await apiMarkers()).filter((m) => m.label.startsWith("E2E")).length + removedHere;
 }
 
 // ---------- the run ----------
@@ -313,7 +300,9 @@ try {
       check(gone !== null, `gone from A's list ${gone !== null ? `${s(gone)} after the click` : "never (30 s)"}`);
       check((await chartLines(A)) === linesBefore - 1, `A's chart lost its line (${linesBefore} -> ${await chartLines(A)})`);
       check(!(await A.locator(".tl-ev-error").count()), "no error shows");
-      check(!(await apiHas("E2E second marker")), "the API no longer lists it");
+      const removed = !(await apiHas("E2E second marker"));
+      if (removed) removedHere++;
+      check(removed, "the API no longer lists it");
       const D = await person("D");
       await openMarket(D);
       check(!(await rowOf(D, "E2E second marker")), "a fresh visitor doesn't see it");
@@ -336,32 +325,6 @@ try {
       );
       check(forged.status === 403 && forged.body?.error === "not_yours", `a forged undo from B's page: ${forged.status} ${forged.body?.error}`);
       check(await apiHas("E2E first marker"), "the marker is still there");
-    });
-
-    await scenario("owner-delete", "Owner deletes a marker from #/review", 'the owner presses Delete: the row reads "deleted by the owner"; a fresh visitor no longer sees it; the adder\'s open page drops it within minutes', async (note, check) => {
-      const r = await addMarker(A, "E2E owner deletes me");
-      if (r.ok) serverAdds++;
-      check(r.ok, `A added "E2E owner deletes me" (${s(r.ms)})`);
-      const O = await ownerPage();
-      const row = O.locator(".rv-row", { hasText: "E2E owner deletes me" });
-      check((await row.count()) === 1, "the review page lists it");
-      const at = Date.now();
-      await row.locator("button", { hasText: "Delete" }).click();
-      const done = await row.locator(".rv-muted", { hasText: "deleted by the owner" }).waitFor({ timeout: 30_000 }).then(() => Date.now() - at, () => null);
-      check(done !== null, `the row reads "deleted by the owner" ${done !== null ? `${s(done)} after the click` : "never"}`);
-      check(!(await apiHas("E2E owner deletes me")), "the API no longer lists it");
-      const E = await person("E");
-      await openMarket(E);
-      check(!(await rowOf(E, "E2E owner deletes me")), "a fresh visitor doesn't see it");
-      await E.context().close();
-      pages.delete(E);
-      const took = await within(120_000, async () => !(await rowOf(A, "E2E owner deletes me")), 10_000);
-      check(took !== null, took !== null ? `A's open page dropped it by itself ${s(took)} after the delete` : "A's open page still shows it 2 minutes after the owner deleted it (and still offers Remove)");
-      await O.context().close();
-      pages.delete(O);
-      await A.reload();
-      await A.locator("button.tl-ev-toggle").waitFor({ timeout: 60_000 });
-      note(`after a reload A ${(await rowOf(A, "E2E owner deletes me")) ? "still shows it" : "no longer shows it"}`);
     });
 
     await scenario("worker-down", "The Worker down when adding", "A adds while the API is down: no hedging text; once the API is back the marker reaches it by itself (page left open) and survives a reload; a fresh visitor sees it", async (note, check) => {
@@ -391,43 +354,6 @@ try {
       check(!!(await rowOf(F, "E2E while down")), `a fresh visitor ${(await rowOf(F, "E2E while down")) ? "sees" : "doesn't see"} it`);
       await F.context().close();
       pages.delete(F);
-    });
-
-    await scenario("pause", "The pause switch blocking new markers", 'the owner pauses: a new marker doesn\'t reach the API or anyone else; no "paused" or hedging text on the market page; after "Allow", adds work again in the same tab', async (note, check) => {
-      const O = await ownerPage();
-      let at = Date.now();
-      await O.locator("button", { hasText: "Pause visitors' changes" }).click();
-      await O.locator(".rv-line", { hasText: "Visitors' changes: paused" }).waitFor({ timeout: 30_000 });
-      note(`the owner paused visitors' changes (${secs(at)} s)`);
-      const G = await person("G");
-      await openMarket(G);
-      const r = await addMarker(G, "E2E while paused");
-      note(`G (page opened after the pause) adds: ${r.which} in ${s(r.ms)} (POST ${r.status})${r.error ? `, it reads "${r.error}"` : ""}`);
-      const row = await rowOf(G, "E2E while paused");
-      note(`G's list ${row ? `shows it (${row.remove ? "with Remove" : row.tag})` : "doesn't show it"}`);
-      check(!(await apiHas("E2E while paused")), "the API doesn't have it (blocked)");
-      const text = await panelText(G);
-      check(!HEDGE.test(text), `no hedging text on the market page${HEDGE.test(text) ? `: "${text.match(HEDGE)[0]}"` : ""}`);
-      const H = await person("H");
-      await openMarket(H);
-      check(!(await rowOf(H, "E2E while paused")), "another visitor doesn't see it");
-      await H.context().close();
-      pages.delete(H);
-      at = Date.now();
-      await O.locator("button", { hasText: "Allow visitors' changes" }).click();
-      await O.locator(".rv-line", { hasText: "Visitors' changes: allowed" }).waitFor({ timeout: 30_000 });
-      note(`the owner allowed visitors' changes again (${secs(at)} s)`);
-      const reached = await within(60_000, () => apiHas("E2E while paused"), 10_000);
-      note(`the paused marker ${reached !== null ? `reached the API ${s(reached)} after "Allow"` : "never reached the API (G's page left open a minute)"}`);
-      const r2 = await addMarker(G, "E2E after allow");
-      const inApi = await apiHas("E2E after allow");
-      if (inApi) serverAdds++;
-      check(inApi, `G's next add in the same tab after "Allow": ${r2.ok ? "shows for G" : `not shown (${r2.error})`}, POST ${r2.status}, the API ${inApi ? "has it" : "doesn't have it"}`);
-      await G.reload();
-      await G.locator("button.tl-ev-toggle").waitFor({ timeout: 60_000 });
-      note(`after a reload G ${(await rowOf(G, "E2E while paused")) ? "still shows" : "no longer shows"} "E2E while paused" and ${(await rowOf(G, "E2E after allow")) ? "shows" : "doesn't show"} "E2E after allow"`);
-      await O.context().close();
-      pages.delete(O);
     });
 
     await scenario("limit", "The daily limit", "a person's adds work up to 10 a Toronto day; the next one shows the limit's words (\"Try again tomorrow.\", no UTC) and isn't added; nothing is kept as if added", async (note, check) => {

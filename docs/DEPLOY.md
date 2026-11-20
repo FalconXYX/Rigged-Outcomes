@@ -30,7 +30,6 @@ Run these from `worker/`:
    | Name | Value |
    |---|---|
    | `TURNSTILE_SECRET` | Turnstile's Secret key |
-   | `OWNER_TOKEN` | A random value: your password for the review page |
    | `JOB_TOKEN` | A random value: the job's key to the API |
    | `VISITOR_SALT` | A random value |
    | `WAKE_SECRET` | A random value: signs the API's calls to Vercel |
@@ -53,7 +52,7 @@ Run these from the repository root:
    | `WATCHLIST_JOB_TOKEN` | The same value as `JOB_TOKEN` |
    | `WAKE_SECRET` | The same value as the Worker's `WAKE_SECRET` |
 
-3. Deploy: `npx vercel deploy --prod`. It prints the production address, for example `https://rigged-outcomes.vercel.app`.
+3. Connect the repository: `npx vercel git connect`, so every push to `main` deploys the job (no other branch deploys; `vercel.json` sets that). Then deploy once now: `npx vercel deploy --prod`. It prints the production address, for example `https://rigged-outcomes.vercel.app`.
 4. Put that address plus `/api/step` into `STEP_URL` in `worker/wrangler.toml`, then run `npx wrangler deploy` again from `worker/`.
 5. Add the firewall rule, so only your API can start the job. In the Vercel dashboard, open the project and go to **Firewall → Configure → New Rule**:
    - **Name:** `only the Worker`
@@ -75,34 +74,32 @@ Run these from the repository root:
 
 ## After a code change
 
-Pushing only rebuilds the site. Deploy the other parts yourself:
+Pushing `main` rebuilds the site and deploys the Python job on Vercel by itself. Only `worker/` is deployed by hand:
 
 | You changed | Run |
 |---|---|
 | `web/` | Push `main` |
 | `worker/` | `cd worker && npx wrangler deploy`. If there's a new file in `worker/migrations/`, run `npx wrangler d1 migrations apply rigged-outcomes --remote` first |
-| The Python job: `api/`, `backend/`, `watchlist/`, `add_market.py` and the other scripts | `npx vercel deploy --prod` |
+| The Python job: `api/`, `backend/`, `watchlist/`, `pipeline/` | Push `main` |
 
 Before pushing, run the tests: `python3 tests/test_*.py`, `cd worker && npm test`, and the end-to-end tests in `tests/end-to-end/` (see its README).
 
 ## Day to day
 
 - **The daily run:** at 4 AM Toronto time. If a step couldn't finish, a catch-up runs at 10 AM.
-- **The review page:** `https://<your site>/#/review`, unlocked with `OWNER_TOKEN`. It shows:
-  - the Open now queue;
-  - recent runs and any failed step;
-  - how much of Vercel's free allowance is used.
+- **How it's going:** `python3 -m backend.status` prints recent runs, failed steps and how much of Vercel's free allowance is used.
 - **The free allowance:** adds wait when Vercel use reaches 65% of the free monthly allowance, and all work stops at 80%. That keeps the account from being paused.
 
 ## If something breaks
 
 | Problem | Fix |
 |---|---|
+| See recent runs, failed steps and the budget | `python3 -m backend.status` |
 | See the API's errors | `cd worker && npx wrangler tail` |
 | See the job's log | `npx vercel logs --deployment <your-project>.vercel.app` |
-| Stop visitors' changes | The pause switch on the review page |
 | Stop all work on Vercel | Set the Worker's `WAKE_SECRET` to a new random value. Set it back to resume |
 | Take a market off the main page | `python3 -m backend.site rm NAME` |
 | Undo a bad save of a list | `python3 -m watchlist.blobs versions site:closed.json`, then `python3 -m watchlist.blobs restore site:closed.json <version>`. The same works for `site:open.json` and `state` |
 | Put the database back to an earlier time (up to 7 days) | `cd worker && npx wrangler d1 time-travel restore rigged-outcomes --timestamp <time>` |
+| A push broke the job | `npx vercel rollback` puts the previous deployment back. After a rollback, new pushes don't go live until you promote a good deployment with `npx vercel promote <url>` |
 | Vercel can't reach Google News or Polymarket | `scripts/watchlist-mac.sh` runs the daily lists on your own computer |

@@ -6,12 +6,12 @@ the user: "ok try to implement this"): its pool, kinds and places, and
 the steadier version (a card that enters with a new step stays at least 3
 days), embargoed releases left out, no wallet analysis in this build.
 
-Who confirms a step. The first reading (the model copying step headlines,
+The step reading. The first reading (the model copying step headlines,
 open-copy-1 on gemini-3.5-flash-lite) failed the step reading's bars in
 the approved open-list proposal (2026-11-13) on 2026-11-13: its two
 readings agreed on step or no step for 86% of 155 stories (the bar is 9
 in 10) and about 3 in 10 of its copied steps were real (the bar is 8 in
-10), so for one day a person approved every card. The
+10), so it was replaced. The
 step reading that replaced it (PROMPT_VERSION, on kinds.STEP_MODEL, a free
 Gemma model) passed both bars on a frozen yardstick of 63 stories and 397
 hand-graded headline pairs from that day's run: its two readings (the
@@ -24,16 +24,9 @@ was chosen on. An independent check on 2026-11-14 graded the headlines no
 gold label covers, from the same day's live run and from a second pass
 that read the headlines the 8-headline cap had left out: on stories outside
 the yardstick only 23 of 37 headlines both readings marked were real steps
-(62%), and 52 of 68 (76%) of all of them, under the bar. So, as the
-approved open-list proposal (2026-11-13) says when the bar is not met, the
-readings only propose steps
-(STEPS_BY = "person"): a card shows once a person approves its step with
---approve (a dated card needs no step and shows on its own). STEPS_BY =
-"model" lets the readings' steps show unapproved, for when a fresh test on
-another day passes. Either way a person's decisions override the readings
-(--review, --approve, --reject; store.open_reviews): an approved headline
-always counts as a step, a rejected one never shows, and a rejected dated
-card never shows.
+(62%), and 52 of 68 (76%) of all of them. The readings decide: a
+headline the step reading marks is a step, and a card shows on it (the user,
+2026-11-19: no review step). A dated card needs no step.
 
 Nothing statistical chooses or orders a card. Volume >= $10,000 and the 99c
 check at an event's first entry only build the pool; no price, odds,
@@ -98,8 +91,7 @@ One run, at about 04:00 UTC:
    denial, not the deciders, a rumour with no inside source). The code keeps
    a step only for a number it gave, once, whose "who acts" words are in
    that headline. One reading a story (the user, 2026-11-19: less compute):
-   a headline is a step when that reading marks it, and it waits for a
-   person's approval (STEPS_BY "person"). The day's cards with new step-word
+   a headline is a step when that reading marks it. The day's cards with new step-word
    headlines are read first, up to the day's cap (open_reads). Stored per
    (story, headlines given, PROMPT_VERSION,
    reading) with the event it was asked about; a headline's verdict is set
@@ -108,7 +100,7 @@ One run, at about 04:00 UTC:
    readings name is the card's "other side". Dated stories are not read
    for steps: a dated card needs none.
 6. "Already out" (OUT_VERSION). Every day each current card is read again
-   first, then every story the list or the queue would take, up to the
+   first, then every story the list would take, up to the
    day's cap (open_out): the model gets its question, the event that would
    settle it (kinds.card_text), the start of its rules and every on-topic
    headline of the last 7 days (up to 40), and copies one that reports the
@@ -119,16 +111,9 @@ One run, at about 04:00 UTC:
    also finds that itself (kinds.released_work). A story read as out is
    dropped and recorded (data "answered"), so it never comes back.
 7. The list (select): the five places of the approved open-list proposal
-   (2026-11-13), on the steps the reading marked plus a person's approved
-   ones (less the rejected), for stories the "already out" reading has
-   checked; an "already out" or "unclear" headline from the last 7 days
-   holds a story back.
-   The queue (Run.lists): with STEPS_BY "person", the day's cards with
-   newer steps the readings marked (approve one to keep a card fresh), then
-   the stories the list would take on the readings' steps (approve one to
-   show it), up to 15; with "model", the cards that rest on the readings'
-   steps (reject one to take it off), then the stories the list would add
-   if the steps only one reading marked counted.
+   (2026-11-13), on the steps the reading marked, for stories the "already
+   out" reading has checked; an "already out" or "unclear" headline from the
+   last 7 days holds a story back.
 8. Cards: the kind's question and "who would know first" sentence, the step
    on the card (kinds.card_headline: news agencies first), Polymarket's
    question and dates, 14 days of headlines. Stored per day (open_runs,
@@ -150,10 +135,7 @@ the same way, no model is asked
 after it, and a card that stays keeps the headlines it had. One step
 reading that fails while the model answers others
 only leaves that story unread: its headlines count as new at the next
-run. --approve and --reject rebuild the list --review showed (the latest
-stored day) at its own run time, from its searches and stored readings,
-and never ask the step model (rebuild_reviewed; the daily job calls it
-for decisions made on the site's review page). A naming request the
+run. A naming request the
 model gives up on only stops the naming: the unnamed stories wait for the
 next run.
 
@@ -167,7 +149,7 @@ and no model request at all starts once it is spent. Every reading is stored as 
 the next run does not ask it again; the stories left unread wait for the
 next run (their step-word headlines count as new then), and the day's list
 is made from what was read: a headline only the first step reading reached
-counts as one reading's (a card needs both, or a person's approval), and a
+counts as one reading's, and a
 story whose "already out" check was not reached is not listed. Such a day
 is still "updated". No news search starts once the budget is spent either:
 the news then counts as down for the day, as above. After ai.BUSY_STREAK
@@ -180,8 +162,6 @@ nothing read that changes the list: it stays as it was.
 
     python3 -m watchlist.opennow [--out PATH] [--db PATH] [--workers 3]
     python3 -m watchlist.opennow --catch-up
-    python3 -m watchlist.opennow --review
-    python3 -m watchlist.opennow --approve 1 3.2 [--reject 2]
     python3 -m watchlist.opennow --dry-run [--skip-news] [--report PATH]
     python3 -m watchlist.opennow --consistency DIR [--seed N]
 """
@@ -212,9 +192,6 @@ KEEP_DAYS = 14              # days kept in open.json
 # module docstring); it replaced the copy questions ("open-copy-1"), which failed them.
 PROMPT_VERSION = "open-step-1"
 OUT_VERSION = "open-out-2"         # the "already out" question (.2: a work being out counts as out, 2026-11-19)
-STEPS_BY = "person"                # who confirms a step: "person" (the readings' steps wait in the queue for a
-                                   # person's approval; the bar was not met out of sample, 2026-11-14) or "model"
-                                   # (the step reading, twice, with no approval; a person's decisions override it)
 NAMES_VERSION = "open-names-2"     # the names questions (.2: fill, then read the question back; "and", not "x")
 NAMES_PER_REQUEST = 40      # names are short: one request names 40 stories
 NEWS_LIMIT = 100            # headlines a search returns at most (Google's feed gives about 100)
@@ -225,7 +202,7 @@ NEWS_LATE = "the news searches ran past the run's time budget"
 REBUILT_DOWN = "a rebuild of a day the model was down for: its last cards stay, none added"
 CATCH_UP_READS = ("steps 1", "steps 2", "already out")   # what a catch-up run reads of what a day's run left
 NEWS_MAX_AGE_HOURS = 3      # a search this recent is not asked again (a re-run after a stall)
-REVIEW_NEWS_HOURS = 30      # --approve / --reject rebuild the reviewed day from searches up to this old at its run time
+STORED_NEWS_HOURS = 30      # a catch-up rebuilds the day from searches up to this old
 FIRST_RUN_HOURS = 24        # "new since the last run" when there is no earlier run
 STEP_HEADLINES = 8          # step-word headlines one step reading is given, at most (the yardstick's 8)
 STEP_WORKERS = 3            # step readings asked at once (the step model takes 20-90 s an answer)
@@ -239,14 +216,9 @@ OUT_RUNS = tuple(range(1, OUT_READINGS + 1))
 OUT_HEADLINES = 40          # the "already out" question reads every on-topic headline of the last 7 days, up to this
 RULES_CHARS = 500           # the start of the market's rules
 MODEL_TRIES = 4             # tries of one request while the model is busy, BUSY_WAIT apart (ai.Busy: longer)
-MAX_ROUNDS = 6              # rounds of "already out" readings until the day's list and queue hold still
-QUEUE_MAX = 15              # stories offered to a person each day, the day's cards first
-CANDIDATES = 4              # one-reading step headlines offered per story
+MAX_ROUNDS = 6              # rounds of "already out" readings until the day's list holds still
 HORIZON_DAYS = 10 ** 6      # no deadline window: most any-day markets end on Dec 31
 STATUS_UPDATED, STATUS_STALE = "updated", "not updated today"
-STEP, NOT_STEP, CARD_OK = "step", "not a step", "card approved"   # a person's decisions (store.open_reviews)
-SHOWN, ONE_READING, DATED_SHOWN = "on the list", "one reading", "dated, on the list"   # why a story is in the queue
-AWAITING = "awaiting approval"     # STEPS_BY "person": the readings marked a step; it shows once a person approves it
 # what a run out of time leaves for the next one (Run.left), as its log line names it
 LEFT_FOR = (("names", "to name"), ("steps 1", "first step reading(s)"), ("steps 2", "second step reading(s)"),
             ("already out", "\"already out\" check(s)"))
@@ -1099,7 +1071,7 @@ def check_out(answer, given, names):
     """The model's "already out" answer for one story, as the code accepts
     it: {"out": headline | None, "out_status": "out" | "unclear" | None,
     "unmatched": the status it gave when its copy matched nothing given
-    (counted as "none", and shown to a person in --review)}."""
+    (counted as "none")}."""
     a = answer if isinstance(answer, dict) else {}
     status = a.get("already_out_status")
     if status not in ("out", "unclear"):
@@ -1372,13 +1344,11 @@ def threads(stories, now):
     return {k: find(k) for k in stories}
 
 
-# ── readings: steps, "already out", a person's decisions ─────────────────────
+# ── readings: steps, "already out" ───────────────────────────────────────────
 
 def _key(h):
     return K.normalise_title((h or {}).get("title")).lower()
 
-
-headline_key = _key     # a headline's key in a person's decisions (store.open_reviews); the job and the API use it
 
 
 def step_word_headlines(headlines, now):
@@ -1420,7 +1390,7 @@ def step_verdicts(readings):
     {"both": [headline] (marked a step by the first reading given it and by
     the second reading of the same headlines, in reverse order: what counts),
     "one": [headline] (marked by one of the two only, or by the first while
-    the second is not asked yet: a person may approve one), "denials":
+    the second is not asked yet), "denials":
     [headline] (a denial in the
     first and, when it was asked, the second: the other side)}. A
     headline's verdict is set by the first reading that answered it."""
@@ -1479,28 +1449,6 @@ def is_held(readings, now):
     """Held back: a reading copied an "already out" or "unclear" headline from the last 7 days."""
     return any(now - K.HELD_BACK_DAYS * DAY <= (K.effective_ts(h.get("published")) or 0) <= now
                for h, _ in out_headlines(readings))
-
-
-def person_steps(reviews):
-    """The step headlines a person approved for a story ({headline key: review})."""
-    return [r["headline"] for r in (reviews or {}).values() if r["decision"] == STEP and r.get("headline")]
-
-
-def rejected_keys(reviews):
-    """The headline keys a person turned down for a story: they never show."""
-    return {k for k, r in (reviews or {}).items() if r["decision"] == NOT_STEP and k != "card"}
-
-
-def offer_order(headlines, context=()):
-    """The order a person is offered a story's step headlines in: one with a
-    word of the event that would settle it first (context:
-    kinds.match_names' stems), then the card's own order
-    (kinds.card_headline: news agencies, national outlets, the rest), a leak
-    first within a rank, then the newest."""
-    ctx = set(context or ())
-    return sorted(headlines, key=lambda h: (not (ctx and K.has_context(h.get("title"), ctx)),
-                                            K.source_rank(h.get("source")), not K.is_leak(h.get("title")),
-                                            -(K.effective_ts(h.get("published")) or 0)))
 
 
 # ── the five places (the approved open-list proposal (2026-11-13) and its replay) ──
@@ -1757,26 +1705,22 @@ def story_idents(story):
     return ids, sorted(x for x in slugs if x)
 
 
-def build_card(story, pick, label, listed_since, steps, reveal, now, checked_at=None, denials=(), hidden=()):
+def build_card(story, pick, label, listed_since, steps, reveal, now, checked_at=None, denials=()):
     """One card of open.json (web/src/types.ts OpenCard) plus "entered" (kept
-    in the store only). steps: the story's steps (both step readings marked
-    them, or a person approved them); denials: headlines both readings
-    called a denial (the other side: the best source, then the newest, of
-    the last 7 days); hidden: headline keys a person turned down, which
-    never show; checked_at: when its "already out" check last ran, None when
-    it read nothing (no headline in the last 7 days)."""
+    in the store only). steps: the story's steps (the step reading marked
+    them); denials: headlines the readings called a denial (the other side:
+    the best source, then the newest, of the last 7 days); checked_at: when
+    its "already out" check last ran, None when it read nothing (no headline
+    in the last 7 days)."""
     text = sentences(story, now)
-    hidden = set(hidden or ())
-    live = [s for s in steps if now - K.LIVE_DAYS * DAY <= (K.effective_ts(s.get("published")) or 0) <= now
-            and _key(s) not in hidden]
+    live = [s for s in steps if now - K.LIVE_DAYS * DAY <= (K.effective_ts(s.get("published")) or 0) <= now]
     fresh = [s for s in live if _fresh(s, now)]
     on_card = K.card_headline(fresh or live)
     detail_lo = now - K.DETAILS_DAYS * DAY
     step_keys = {_key(s) for s in live}
-    other = K.card_headline([h for h in denials or () if _key(h) not in step_keys and _key(h) not in hidden and
+    other = K.card_headline([h for h in denials or () if _key(h) not in step_keys and
                              now - K.HELD_BACK_DAYS * DAY <= (K.effective_ts(h.get("published")) or 0) <= now])
-    rest = [h for h in story.get("headlines") or [] if _key(h) not in step_keys and _key(h) not in hidden
-            and h["ts"] >= detail_lo]
+    rest = [h for h in story.get("headlines") or [] if _key(h) not in step_keys and h["ts"] >= detail_lo]
     rest = sorted(rest, key=lambda h: (K.source_rank(h.get("source")), -h["ts"]))[:K.DETAILS_MAX]
     details = sorted(list(live) + rest, key=lambda h: -(K.effective_ts(h.get("published")) or 0))
     pm = polymarket_block(story, now)
@@ -1803,9 +1747,7 @@ def build_card(story, pick, label, listed_since, steps, reveal, now, checked_at=
 def open_doc(conn, now, keep_days=KEEP_DAYS):
     """open.json from the stored days, newest first. Days before the first
     one with a card are left out: until a list has a card, the page has
-    nothing to show (it says "Coming soon"). A day's "awaiting" counts the
-    stories that would show if a person approved a step only one reading
-    marked."""
+    nothing to show (it says "Coming soon")."""
     stored = store.open_days(conn)
     first = min((d["day"] for d in stored if d["cards"]), default=None)
     days = []
@@ -1815,15 +1757,13 @@ def open_doc(conn, now, keep_days=KEEP_DAYS):
         info = d.get("info") or {}
         days.append({"day": d["day"], "status": d["status"], "run_at": _iso_z(d["run_at"]),
                      "cards": [{k: v for k, v in c.items() if k != "entered"} for c in d["cards"]],
-                     "new_today": int(info.get("new_today") or 0), "held_back": int(info.get("held_back") or 0),
-                     "awaiting": sum(1 for it in info.get("awaiting") or []
-                                     if it.get("why", ONE_READING) in (ONE_READING, AWAITING))})
+                     "new_today": int(info.get("new_today") or 0), "held_back": int(info.get("held_back") or 0)})
     return {
-        "generated_at": local_iso(now), "trial": True,
+        "generated_at": local_iso(now),
         "rules": {"min_volume": K.MIN_VOLUME, "per_day": K.PER_DAY, "at_least": K.AT_LEAST, "live_days": K.LIVE_DAYS,
                   "fresh_days": K.FRESH_DAYS, "stay_days": K.STAY_DAYS, "dated_days": K.DATED_DAYS,
                   "held_back_days": K.HELD_BACK_DAYS, "prompt_version": f"{PROMPT_VERSION} / {OUT_VERSION}",
-                  "model": f"{K.STEP_MODEL} / {K.OPEN_MODEL}", "steps_by": STEPS_BY},
+                  "model": f"{K.STEP_MODEL} / {K.OPEN_MODEL}"},
         "days": days,
     }
 
@@ -1864,7 +1804,7 @@ class Run:
         self.catch_up = catch_up         # a catch-up run (catch_up()): no news search, no new pool entry
         self.unsearched = set()          # catch-up: stories none of whose searches is stored (never listed)
         self.left = defaultdict(set)     # stories the run's time did not reach, by reading (read next run)
-        self.read_new_steps = read_steps  # False: a person's rebuild; the steps come from the stored readings
+        self.read_new_steps = read_steps  # False: no new step reading; the steps come from the stored readings
         self.now = int(now or now_epoch())
         self.today = _day(self.now)
         self.client = client
@@ -1893,7 +1833,6 @@ class Run:
         self.requests = Counter()        # model requests made, by purpose
         self.would_ask = Counter()       # dry run: items that would be asked, by purpose
         self.counts = Counter()
-        self.reviews = {}                # a person's decisions, {story: {headline key: review}}
         self.reveal = {}
         self.since = self.now - FIRST_RUN_HOURS * 3600
         self.short = {}
@@ -2204,7 +2143,7 @@ class Run:
     def last_headlines(self, prev):
         """The news feed was down: a story its searches did not reach takes
         the headlines its card had on the last list (less the steps, which
-        come back from the readings and a person's decisions), so a card
+        come back from the readings), so a card
         that stays keeps its news."""
         for c in (prev or {}).get("cards") or []:
             s = self.stories.get(c["id"])
@@ -2630,21 +2569,16 @@ class Run:
             jobs.append({"key": k, "sha": store.headlines_key(g), "given": g, "run": 1})
         return jobs
 
-    # 7: the steps, the list and the queue a person may override
+    # 7: the steps and the list
     def steps(self, key, provisional=False):
-        """The story's steps: those a person approved and, when STEPS_BY is
-        "model", those both step readings marked; never one a person turned
-        down. provisional=True adds the readings' other steps (both readings'
-        when they wait for a person, and those only one reading marked): the
-        ones a person may approve."""
-        rv = self.reviews.get(key) or {}
-        hidden = rejected_keys(rv)
+        """The story's steps: those the step reading marked. provisional=True
+        adds those only one of two readings marked (the list's rounds read
+        the stories that would show on them)."""
         m = self.model_steps.get(key) or {}
-        both = list(m.get("both") or []) if STEPS_BY == "model" or provisional else []
         out, seen = [], set()
-        for h in person_steps(rv) + both + (list(m.get("one") or []) if provisional else []):
+        for h in list(m.get("both") or []) + (list(m.get("one") or []) if provisional else []):
             k = _key(h)
-            if k not in seen and k not in hidden:
+            if k not in seen:
                 seen.add(k)
                 out.append(h)
         return out
@@ -2652,49 +2586,18 @@ class Run:
     def _live(self, h):
         return self.now - K.LIVE_DAYS * DAY <= (K.effective_ts(h.get("published")) or 0) <= self.now
 
-    def model_candidates(self, key):
-        """A card's live steps from the step reading that no person has
-        decided on (a person may reject one): fresh ones first, then the
-        card's order, up to STEP_HEADLINES."""
-        rv = self.reviews.get(key) or {}
-        hs = [h for h in (self.model_steps.get(key) or {}).get("both") or [] if _key(h) not in rv and self._live(h)]
-        return sorted(hs, key=lambda h: (not _fresh(h, self.now), K.source_rank(h.get("source")),
-                                         -(K.effective_ts(h.get("published")) or 0)))[:STEP_HEADLINES]
-
-    def candidates(self, key, place):
-        """The steps a person is offered for a story the list would add on
-        them: those only one reading marked, and first, when STEPS_BY is
-        "person", those both marked; undecided, of the last 3 days for a new
-        step, of the last 21 for the rest; the card's order."""
-        if place == "dated":
-            return []
-        s = self.stories[key]
-        rv = self.reviews.get(key) or {}
-        m = self.model_steps.get(key) or {}
-        out = []
-        for part in (("both", "one") if STEPS_BY == "person" else ("one",)):
-            hs = [h for h in m.get(part) or [] if _key(h) not in rv and self._live(h)]
-            if place == "new step":
-                hs = [h for h in hs if _fresh(h, self.now)]
-            out += offer_order(hs, (s.get("match") or {}).get("context"))
-        return out[:CANDIDATES]
-
-    def card_decided(self, key):
-        return (self.reviews.get(key) or {}).get("card", {}).get("decision")
-
     def rows(self, readings, provisional=False, only_checked=False):
         """(rows, dated, held) for select(). provisional: count the steps only
-        the first step reading marked too (the queue is worked out on them);
-        only_checked: only stories whose last 7 days both "already out"
-        readings have read (what can be shown). A dated answer due within 3
-        days needs no step; a person may turn its card down."""
+        one step reading marked too; only_checked: only stories whose last 7
+        days the "already out" readings have read (what can be shown). A dated
+        answer due within 3 days needs no step."""
         rows, dated, held = [], [], []
         for k, s in self.stories.items():
             if not (s["kind"] and s["names"]) or k in self.answered:
                 continue
             rs = readings.get(k) or []
             if s["place"] == "dated":
-                if not self.due_dated(k) or self.card_decided(k) == NOT_STEP:
+                if not self.due_dated(k):
                     continue
                 if only_checked and not self.checked(k, rs):
                     continue
@@ -2717,47 +2620,14 @@ class Run:
         return rows, dated, held
 
     def lists(self, readings, prev_cards):
-        """(picks, queue): the day's list (only stories both "already out"
-        readings checked), and the stories a person may override, in this
-        order: the list's cards (SHOWN: with "model", those that rest on the
-        step reading, reject a step to take it off; with "person", those
-        with newer steps the readings marked, approve one to keep the card
-        fresh) and its dated card (DATED_SHOWN), then the stories the list
-        would add on the readings' other steps (AWAITING with "person": both
-        readings', then one's; ONE_READING with "model": one reading's;
-        approve one to count it), in the order the places want them, up to
-        QUEUE_MAX."""
+        """The day's list: only stories the "already out" readings checked."""
         rows, dated, _ = self.rows(readings, only_checked=True)
-        picks = select(rows, dated, prev_cards, self.now)
-        final = {p["id"] for p in picks}
-        out = []
-        for p in picks:
-            if p["place"] == "dated":
-                if not self.card_decided(p["id"]):
-                    out.append(dict(p, why=DATED_SHOWN))
-            elif STEPS_BY == "model" and self.model_candidates(p["id"]):
-                out.append(dict(p, why=SHOWN))
-            elif STEPS_BY == "person" and self.candidates(p["id"], "stays"):
-                out.append(dict(p, why=SHOWN))           # newer steps the readings marked: approve one to keep it fresh
-        prows, pdated, _ = self.rows(readings, provisional=True)
-        gone = set()
-        for _ in range(QUEUE_MAX):
-            got = select([r for r in prows if r["id"] not in gone], [d for d in pdated if d["id"] not in gone],
-                         prev_cards, self.now)
-            new = [p for p in got if p["id"] not in final and p["id"] not in gone]
-            gone.update(p["id"] for p in new)
-            out += [dict(p, why=AWAITING if STEPS_BY == "person" else ONE_READING) for p in new
-                    if self.candidates(p["id"], p["place"])]
-            if not new or len(out) >= QUEUE_MAX:
-                break
-        return picks, out[:QUEUE_MAX]
+        return select(rows, dated, prev_cards, self.now)
 
     def build(self, prev, prev_updated=None):
-        """Steps 5-7: the step reading, then rounds of the list and its queue,
-        with the stories on either read ("already out", twice) until they
-        hold still or the run's time is spent. Returns (picks, held,
-        readings, queue)."""
-        self.reviews = store.open_reviews(self.conn)
+        """Steps 5-7: the step reading, then rounds of the list, with the
+        stories it would take read ("already out") until they hold still or
+        the run's time is spent. Returns (picks, held, readings)."""
         self.answered = store.open_answered(self.conn) | self.answered
         self.shortlist(prev_updated if prev_updated is not None else prev)
         self.read_all_steps()
@@ -2770,10 +2640,10 @@ class Run:
         for _ in range(MAX_ROUNDS):
             if self.down:
                 break
-            picks, queue = self.lists(readings, prev_cards)
-            # the stories that would be listed or offered, whatever their reading, are read
+            picks = self.lists(readings, prev_cards)
+            # the stories that would be listed, whatever their reading, are read
             prov = select(*self.rows(readings, provisional=True)[:2], prev_cards, self.now)
-            ids = list(dict.fromkeys([p["id"] for p in picks + queue + prov]))
+            ids = list(dict.fromkeys([p["id"] for p in picks + prov]))
             fresh_jobs = []
             for run in OUT_RUNS:
                 jobs = [j for j in self.reading_jobs(ids, readings, run) if (j["key"], j["sha"], run) not in asked]
@@ -2787,9 +2657,9 @@ class Run:
                 fresh_jobs += jobs
             if self.dry_run or not fresh_jobs or self.spent():
                 break
-        picks, queue = self.lists(readings, prev_cards)
+        picks = self.lists(readings, prev_cards)
         held = self.rows(readings, provisional=True)[2]
-        return picks, held, readings, queue
+        return picks, held, readings
 
     def stale_list(self, prev, readings):
         """A model was down: the last list's cards that are still live on the
@@ -2812,57 +2682,17 @@ class Run:
             rs = readings.get(p["id"]) or []
             checked = max((r["data"].get("read_at") or r["created_at"] for r in rs), default=None)
             out.append(build_card(s, p, label, since, self.steps(p["id"]), self.reveal.get(p["id"]), self.now,
-                                  checked_at=checked, denials=(self.model_steps.get(p["id"]) or {}).get("denials"),
-                                  hidden=rejected_keys(self.reviews.get(p["id"]))))
+                                  checked_at=checked, denials=(self.model_steps.get(p["id"]) or {}).get("denials")))
         return out
 
     def steps_from(self, key):
-        """Where a listed story's live steps come from: {"model": n, "person": n} (a step a person approved and
-        the readings also marked counts for both), and who put the card's own headline there."""
-        rv = self.reviews.get(key) or {}
-        mine = {_key(h) for h in person_steps(rv) if self._live(h)}
-        model = {_key(h) for h in (self.model_steps.get(key) or {}).get("both") or [] if self._live(h)}
-        model -= rejected_keys(rv)
-        live = [h for h in self.steps(key) if self._live(h)]
-        on = K.card_headline([h for h in live if _fresh(h, self.now)] or live)
-        by = None if on is None else "person and model" if _key(on) in mine and _key(on) in model else \
-            "person" if _key(on) in mine else "model"
-        return {"model": len(model), "person": len(mine), "card_headline_by": by}
-
-    def awaiting(self, queue, readings):
-        """The queue as the store keeps it and --review prints it."""
-        out = []
-        for n, p in enumerate(queue, 1):
-            s = self.stories[p["id"]]
-            text = sentences(s, self.now)
-            pm = polymarket_block(s, self.now)
-            rs = readings.get(p["id"]) or []
-            why = p.get("why", ONE_READING)
-            cands = (self.model_candidates(p["id"]) if STEPS_BY == "model" else self.candidates(p["id"], "stays")) \
-                if why == SHOWN else self.candidates(p["id"], p["place"]) if why in (ONE_READING, AWAITING) else []
-            out.append({"n": n, "story": p["id"], "place": p["place"], "why": why, "kind": s["kind"],
-                        "group": s["group"], "question": text["question"], "who_knows": text["who_knows"],
-                        "polymarket": pm["question"], "url": pm["url"],
-                        "reveal": self.reveal.get(p["id"]) if p["place"] == "dated" else None,
-                        "candidates": [_bare(h) for h in cands],
-                        "model_copy_unmatched": sorted({r["data"]["unmatched"] for r in rs
-                                                        if r["data"].get("unmatched")})})
-        return out
-
-
-APPROVAL_NOTES = {
-    "model": "Cards no longer wait for a person: the step reading (open-step-1 on gemma-4-31b-it) passed the bars on "
-             "2026-11-13's yardstick (story agreement 100%, bar 90%; 83% of the headlines either reading marked "
-             "were real steps, bar 80%; 95% of those both marked). A person's --approve and --reject override it.",
-    "person": "Cards wait for a person: the step reading (open-step-1 on gemma-4-31b-it) proposes the steps (both "
-              "readings must mark a headline) and a person approves each card's step with --approve before it "
-              "shows; --reject turns one down for good.",
-}
+        """How many live steps a listed story has from the step reading."""
+        return {"model": len([h for h in (self.model_steps.get(key) or {}).get("both") or [] if self._live(h)])}
 
 
 def make_run(conn, now=None, client=None, walk=None, search=None, dry_run=False, skip_news=False,
              news_cache_path=NEWS_CACHE, news_max_age_hours=NEWS_MAX_AGE_HOURS, news_limit=None, sleep=time.sleep,
-             step_client=None, workers=STEP_WORKERS, read_steps=True, review_of=None, budget=None, catch_up=False,
+             step_client=None, workers=STEP_WORKERS, read_steps=True, budget=None, catch_up=False,
              news_cache=None, before_news=None, **knobs):
     """A Run with its pool, stories, names, reveal dates and news (steps 1-4), ready for build(). news_cache:
     the searches' store (default a NewsCache at news_cache_path); before_news(run): called just before the
@@ -2879,8 +2709,6 @@ def make_run(conn, now=None, client=None, walk=None, search=None, dry_run=False,
             news_cache=news_cache if news_cache is not None else NewsCache(news_cache_path, news_max_age_hours),
             news_limit=news_limit, sleep=sleep, step_client=steps_client, workers=workers, read_steps=read_steps,
             budget=budget, catch_up=catch_up, **knobs)
-    if review_of and review_of.get("status") != STATUS_UPDATED:
-        r.down = REBUILT_DOWN
     r.build_pool()
     r.build_stories()
     r.name_stories()
@@ -2894,15 +2722,13 @@ def make_run(conn, now=None, client=None, walk=None, search=None, dry_run=False,
 def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT_PATH, dry_run=False,
           skip_news=False, news_cache_path=NEWS_CACHE, news_max_age_hours=NEWS_MAX_AGE_HOURS, news_limit=None,
           report_path=None, sleep=time.sleep, step_client=None, workers=STEP_WORKERS, read_steps=True,
-          review_of=None, budget=None, catch_up=False, carry=None, **knobs):
+          budget=None, catch_up=False, carry=None, **knobs):
     """One day's list: stored, and written to out_path (not in a dry run,
     which asks the model nothing and writes nothing but its report).
     client: names and "already out" (default open_client()); step_client:
     the step reading (default client when one is given, else
-    make_step_client()). read_steps=False: no new step reading (a person's
-    rebuild: the steps come from the stored readings and the decisions).
-    review_of: the stored day a person's decisions rebuild; one the model
-    was down for stays "not updated today", without new cards. A run the
+    make_step_client()). read_steps=False: no new step reading (the steps
+    come from the stored readings). A run the
     model is down for never replaces a list already updated the same day.
     budget: the run's time (a common.Budget, None for no limit): once it is
     spent no new request starts and the list is made from what was read
@@ -2915,7 +2741,7 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
     t0 = time.time()
     r = make_run(conn, now, client=client, walk=walk, search=search, dry_run=dry_run, skip_news=skip_news,
                  news_cache_path=news_cache_path, news_max_age_hours=news_max_age_hours, news_limit=news_limit,
-                 sleep=sleep, step_client=step_client, workers=workers, read_steps=read_steps, review_of=review_of,
+                 sleep=sleep, step_client=step_client, workers=workers, read_steps=read_steps,
                  budget=budget, catch_up=catch_up, **knobs)
     for what, keys in ((carry or {}).get("left") or {}).items():
         r.leave(what, [k for k in keys if k in r.stories])
@@ -2928,7 +2754,7 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
     prev_updated = store.previous_open_day(conn, r.today, status=STATUS_UPDATED)
     if r.news_down:
         r.last_headlines(prev)
-    picks, held, readings, queue = r.build(prev, prev_updated)
+    picks, held, readings = r.build(prev, prev_updated)
     left = {w: len(ks) for w, ks in r.left.items() if ks}
     if left:
         log(r.left_line())
@@ -2942,7 +2768,6 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
         status = STATUS_STALE
         readings = {k: r.history(k) for k, s in r.stories.items() if s["names"]}
         picks, held = r.stale_list(prev, readings)
-        queue = []
     if kept:
         # the model is down, but an earlier run today made the list: it stands (it is not replaced by an older one)
         status = STATUS_UPDATED
@@ -2952,15 +2777,14 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
         log(f"  ! the model is down ({r.down}); today's list made at {_iso_z(earlier['run_at'])} stands unchanged")
     cards = [] if dry_run else [{k: v for k, v in c.items()} for c in earlier["cards"]] if kept else \
         r.cards(picks, prev, readings)
-    awaiting = r.awaiting(queue, readings)
     stories = r.stories
     clients = {}
     for name, c in (("names and already out", r.client), ("steps", r.step_client), ("reveal dates", r.label_client)):
         if isinstance(c, ai.Client) and not any(c is x for x in clients.values()):
             clients[name] = c
     summary = {
-        "day": r.today, "status": status, "run_at": _iso_z(r.now), "dry_run": dry_run, "steps_by": STEPS_BY,
-        "approval": APPROVAL_NOTES[STEPS_BY], "prompt_version": PROMPT_VERSION, "out_version": OUT_VERSION,
+        "day": r.today, "status": status, "run_at": _iso_z(r.now), "dry_run": dry_run,
+        "prompt_version": PROMPT_VERSION, "out_version": OUT_VERSION,
         "models": {"steps": K.STEP_MODEL, "names, reveal dates and already out": K.OPEN_MODEL},
         "counts": dict(r.counts), "left_out_by_words": dict(r.left_out.most_common()),
         "market_rules": dict(r.pool_why.most_common()),
@@ -2983,7 +2807,6 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
                           {"steps_from": "none needed (dated)"})) for p in picks],
         "held_back": [{"id": k, "question": stories[k]["head"]["title"]} for k in held],
         "new_today": sum(1 for c in cards if c["label"] == "new"),
-        "awaiting": awaiting,
     }
     summary["shortlist"] = [{"id": k, "why": why, "title": stories[k]["head"]["title"], "group": stories[k]["group"],
                              "named": bool(stories[k]["names"]), "queries": stories[k]["queries"]}
@@ -2991,18 +2814,15 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
     if idle:
         log(f"catch-up: nothing read changes the {r.today} list; it stays as it was")
     elif kept:
-        summary["awaiting"] = (earlier.get("info") or {}).get("awaiting") or []
         if out_path:
             write_json(open_doc(conn, r.now), out_path)
     elif not dry_run:
         info = {"new_today": summary["new_today"], "held_back": len(held), "held_back_stories": held,
                 "counts": dict(r.counts), "requests": dict(r.requests), "model_down": r.down,
-                "names_down": r.names_down, "awaiting": awaiting, "steps_by": STEPS_BY,
+                "names_down": r.names_down,
                 "step_reading": dict(r.step_stats), "step_failed": sorted(r.step_failed),
                 "step_failed_busy": sorted(r.step_failed_busy), "model_down_busy": r.down_busy,
                 "left_for_next_run": left, "seen_step_headlines": r.seen_step_headlines()}
-        if review_of and not read_steps and review_of.get("day") == r.today:
-            carry_unread(info, review_of)
         store.save_open_day(conn, r.today, status, r.now, cards, version=PROMPT_VERSION, info=info)
         if out_path:
             write_json(open_doc(conn, r.now), out_path)
@@ -3015,124 +2835,13 @@ def daily(conn=None, now=None, client=None, walk=None, search=None, out_path=OUT
         f"{st.get('reading 1: stories with a step', 0)} with a step, {st.get('reading 2: stories read', 0)} read "
         f"again in reverse order, {st.get('reading 2: stories where it also found a step', 0)} with a step again, "
         f"{st.get('reading 2: steps of reading 1 it also marked', 0)} step(s) both readings marked; "
-        f"{sum(r.requests.values())} request(s), {time.time() - t0:.0f} s. Steps by {STEPS_BY}: " +
-        (f"cards need no approval ({len([a for a in awaiting if a['why'] == ONE_READING])} one-reading step(s) a "
-         f"person may approve)" if STEPS_BY == "model" else
-         f"{len([a for a in awaiting if a['why'] == AWAITING])} card(s) wait for a person's approval"))
+        f"{sum(r.requests.values())} request(s), {time.time() - t0:.0f} s")
     return summary
 
 
-# ── a person's override (--review, --approve, --reject) ─────────────────────
-
-def review_text(day):
-    """The latest stored day's queue, as --review prints it."""
-    if not day:
-        return "No open list has been made yet.\n"
-    items = (day.get("info") or {}).get("awaiting") or []
-    lines = [f"Open list {day['day']} ({day['status']}, made {_iso_z(day['run_at'])}): "
-             f"{len(day['cards'])} card(s) shown, {len(items)} item(s) a person may override."]
-    if not items:
-        return "\n".join(lines) + "\n"
-    if ((day.get("info") or {}).get("steps_by") or STEPS_BY) == "person":
-        lines += ["", "The step reading proposes the steps (both readings must mark a headline); a card shows once a "
-                      "person approves its step. Approve with --approve N (its first headline) or N.M; turn one "
-                      "down with --reject N (all its headlines) or N.M. A dated card shows on its own: --reject N "
-                      "takes it off. A rejected headline never shows; an approved one always counts.", ""]
-    else:
-        lines += ["", "Steps come from the step reading (both readings must mark a headline); cards need no approval. "
-                      "Take a shown step off with --reject N (all its headlines) or N.M; count a step only one "
-                      "reading marked with --approve N (its first headline) or N.M. A dated card shows on its own: "
-                      "--reject N takes it off. A rejected headline never shows; an approved one always counts.", ""]
-    for it in items:
-        why = it.get("why", ONE_READING)
-        where = f"{it['place']}, group {it['group']}" + (f", answer due {it['reveal']}" if it.get("reveal") else "")
-        lines.append(f"{it['n']}. {it['question']}  [{where}; {why}]")
-        lines.append(f"   Polymarket asks: {it['polymarket']}  {it['url']}")
-        lines.append(f"   Who would know first: {it['who_knows']}")
-        for i, h in enumerate(it["candidates"], 1):
-            lines.append(f"   {it['n']}.{i}  {h['title']}  ({h.get('source') or 'unknown source'}, "
-                         f"{(h.get('published') or '')[:16].replace('T', ' ')} UTC)")
-            lines.append(f"        {h.get('url') or ''}")
-        if it.get("model_copy_unmatched"):
-            lines.append("   Note: the model said the answer may be out but its copy matched no headline; "
-                         "check the news.")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _pick(items, ref):
-    """(item, headline index or None) for "N" or "N.M"."""
-    m = re.fullmatch(r"(\d+)(?:\.(\d+))?", str(ref).strip())
-    if not m:
-        raise ValueError(f"{ref!r}: give an item number, or item.headline (such as 3.2)")
-    item = next((it for it in items if it["n"] == int(m.group(1))), None)
-    if item is None:
-        raise ValueError(f"{ref!r}: no item {m.group(1)} in the latest queue")
-    i = int(m.group(2)) - 1 if m.group(2) else None
-    if i is not None and not (0 <= i < len(item["candidates"])):
-        raise ValueError(f"{ref!r}: item {item['n']} has {len(item['candidates'])} headline(s)")
-    return item, i
-
-
-def decide(conn, refs, approve, by="person", now=None):
-    """Record a person's decisions on the latest day's queue: approve "N"
-    (the first headline offered, or a dated answer's card) or "N.M" (that
-    headline); reject "N" (every headline offered, or the card) or "N.M".
-    Returns what was recorded, as text lines."""
-    day = store.get_open_day(conn, max((d["day"] for d in store.open_days(conn)), default=""))
-    items = ((day or {}).get("info") or {}).get("awaiting") or []
-    done = []
-    for ref in refs:
-        item, i = _pick(items, ref)
-        if item["place"] == "dated" and not item["candidates"]:
-            store.save_review(conn, item["story"], "card", CARD_OK if approve else NOT_STEP, None, by, now)
-            done.append(f"{'approved' if approve else 'rejected'} the card: {item['question']}")
-            continue
-        hs = [item["candidates"][i]] if i is not None else (item["candidates"][:1] if approve else item["candidates"])
-        for h in hs:
-            store.save_review(conn, item["story"], _key(h), STEP if approve else NOT_STEP, h, by, now)
-            done.append(f"{'a step' if approve else 'not a step'}: {h['title']} ({item['question']})")
-    return done
-
-
 def latest_day(conn):
-    """The latest stored day (the one --review shows and a person's decisions rebuild), or None."""
+    """The latest stored day (the one a catch-up reads), or None."""
     return store.get_open_day(conn, max((d["day"] for d in store.open_days(conn)), default=""))
-
-
-def rebuild_reviewed(conn, now=None, out_path=OUT_PATH, news_cache_path=NEWS_CACHE, news_max_age_hours=None, **kw):
-    """Rebuild the list a person reviewed after their decisions: the latest
-    stored day, at its own run time (or `now`), from its searches up to
-    REVIEW_NEWS_HOURS old, with no new step reading (the steps come from the
-    stored readings and the decisions). What --approve and --reject do after
-    recording, and what the daily job does with decisions made on the review
-    page. kw goes to daily() (report_path, workers, budget, and the fakes
-    tests give). Returns daily()'s summary, or None when no list was made yet."""
-    reviewed = latest_day(conn)
-    if not reviewed:
-        log("no open list has been made yet: nothing to rebuild")
-        return None
-    if now is None:
-        now = int(reviewed["run_at"])
-        log(f"rebuilding the {reviewed['day']} list as made at {_iso_z(now)}")
-    age = REVIEW_NEWS_HOURS if news_max_age_hours is None else news_max_age_hours
-    return daily(conn=conn, now=now, out_path=out_path, news_cache_path=news_cache_path, news_max_age_hours=age,
-                 read_steps=False, review_of=reviewed, **kw)
-
-
-def carry_unread(info, reviewed):
-    """A person's rebuild reads no step: the reviewed day's unread stories stay unread (its failed and left step
-    readings, its seen step headlines), and a day the model was down for keeps why. info: the rebuild's own."""
-    was = reviewed.get("info") or {}
-    left = dict(info.get("left_for_next_run") or {})
-    left.update({w: n for w, n in (was.get("left_for_next_run") or {}).items() if w.startswith("steps") and n})
-    info["left_for_next_run"] = left
-    for f in ("step_failed", "step_failed_busy"):
-        info[f] = sorted(set(info.get(f) or []) | set(was.get(f) or []))
-    if "seen_step_headlines" in was:
-        info["seen_step_headlines"] = was["seen_step_headlines"]
-    if reviewed.get("status") != STATUS_UPDATED and was.get("model_down"):
-        info["model_down"], info["model_down_busy"] = was["model_down"], bool(was.get("model_down_busy"))
 
 
 def left_unread(day):
@@ -3162,14 +2871,14 @@ def catch_up(conn=None, now=None, out_path=OUT_PATH, news_cache_path=NEWS_CACHE,
         return None
     run_at = int(day["run_at"])
     window = "|" + news.build_query("", run_at - K.DETAILS_DAYS * DAY, run_at + DAY).strip()
-    if not any(k.endswith(window) for k in NewsCache(news_cache_path, REVIEW_NEWS_HOURS).data):
+    if not any(k.endswith(window) for k in NewsCache(news_cache_path, STORED_NEWS_HOURS).data):
         problems.note(f"the catch-up changed nothing: the {today} news searches are not stored (the news cache "
                       f"was not saved or restored)")
         return None
     log(f"catch-up: the {today} list (made at {_iso_z(run_at)}) left {n} to read")
     try:
         return daily(conn=conn, now=run_at, out_path=out_path, news_cache_path=news_cache_path,
-                     news_max_age_hours=REVIEW_NEWS_HOURS, catch_up=True, **kw)
+                     news_max_age_hours=STORED_NEWS_HOURS, catch_up=True, **kw)
     except NotStored as e:
         problems.note(f"the catch-up changed nothing: the day's news searches are not all stored ({e})")
         return None
@@ -3371,21 +3080,10 @@ def main(argv=None):
     ap.add_argument("--skip-news", action="store_true", help="with --dry-run: no news searches either")
     ap.add_argument("--news-limit", type=int, default=None, help="search the news for the first N stories only (tests)")
     ap.add_argument("--news-max-age-hours", type=float, default=None,
-                    help=f"reuse a cached search this recent (default {NEWS_MAX_AGE_HOURS}; "
-                         f"{REVIEW_NEWS_HOURS} with --approve / --reject)")
+                    help=f"reuse a cached search this recent (default {NEWS_MAX_AGE_HOURS})")
     ap.add_argument("--news-cache", default=NEWS_CACHE,
                     help="the searches cache (default data/watchlist/cache/open_news.json)")
     ap.add_argument("--report", default=None, help="write the run's summary JSON here")
-    ap.add_argument("--review", action="store_true",
-                    help="print the latest list's queue, numbered: the shown cards' steps (to reject) and the "
-                         "steps only one reading marked (to approve)")
-    ap.add_argument("--approve", nargs="+", metavar="N[.M]", default=None,
-                    help="count these items' headlines as steps (N: its first headline, N.M: its M-th; a dated "
-                         "answer: its card), then rebuild the reviewed list (the latest day, at its own run time, "
-                         "from its searches; no new step reading)")
-    ap.add_argument("--reject", nargs="+", metavar="N[.M]", default=None,
-                    help="mark these items' headlines as not a step, never shown (N: every headline offered; a "
-                         "dated answer: its card), then rebuild the reviewed list")
     ap.add_argument("--workers", type=int, default=STEP_WORKERS,
                     help=f"step readings asked at once (default {STEP_WORKERS})")
     ap.add_argument("--catch-up", action="store_true",
@@ -3401,9 +3099,6 @@ def main(argv=None):
     conn = store.connect(args.db) if args.db else store.default_conn()
     now = to_epoch(args.now) if args.now else None
     age = args.news_max_age_hours
-    if args.review:
-        print(review_text(latest_day(conn)))
-        return
     if args.consistency:
         consistency(args.consistency, conn=conn, now=now, seed=args.seed, sample=args.sample,
                     news_cache_path=args.news_cache, news_max_age_hours=age if age is not None else NEWS_MAX_AGE_HOURS,
@@ -3414,18 +3109,6 @@ def main(argv=None):
     if args.catch_up:
         summary = catch_up(conn=conn, now=now, out_path=args.out, news_cache_path=args.news_cache,
                            report_path=args.report, workers=args.workers, budget=budget)
-    elif args.approve or args.reject:
-        try:
-            done = decide(conn, args.approve or [], True) + decide(conn, args.reject or [], False)
-        except ValueError as e:
-            ap.error(str(e))
-        for line in done:
-            log(f"recorded: {line}")
-        # the list the person reviewed is rebuilt, at its own run time and from its searches (not a new day's)
-        summary = rebuild_reviewed(conn, now=now, out_path=args.out, news_cache_path=args.news_cache,
-                                   news_max_age_hours=age, dry_run=args.dry_run, skip_news=args.skip_news,
-                                   news_limit=args.news_limit, report_path=args.report, workers=args.workers,
-                                   budget=budget)
     else:
         summary = daily(conn=conn, now=now, out_path=args.out, dry_run=args.dry_run, skip_news=args.skip_news,
                         news_cache_path=args.news_cache,
@@ -3438,8 +3121,6 @@ def main(argv=None):
             problems.note(msg, kind)
     if args.dry_run:
         log(json.dumps({k: summary[k] for k in ("counts", "stories", "would_ask", "left_out_by_words")}, indent=1))
-    elif summary["awaiting"]:
-        print(review_text(store.get_open_day(conn, summary["day"])))
 
 
 _ALL_FAILED = re.compile(r"\(all (\d+) readings failed\)")

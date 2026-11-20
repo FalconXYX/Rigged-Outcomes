@@ -2,7 +2,7 @@
 Consolidate a market's raw trades (one row per fill) into positions: one row per (wallet, outcome, side), with
 the binary market's complementary SELL folded into its BUY.
 
-    python3 cleandata.py --input data/<Output>.csv --output data/<Output>_clean.csv
+    python3 -m pipeline.cleandata --input data/<Output>.csv --output data/<Output>_clean.csv
 
 clean_rows() does the work in memory (add_market feeds it a market's fills as they come off the feed, with no
 file); main() is the same over CSV files.

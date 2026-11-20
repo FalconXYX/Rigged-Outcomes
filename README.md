@@ -30,7 +30,7 @@ VITE_API_URL=http://localhost:8788 VITE_TURNSTILE_SITEKEY=1x00000000000000000000
 **Add a market by hand** (what "Add to main page" does; it saves to the API in `WATCHLIST_API_URL`):
 
 ```bash
-python3 add_market.py --condition-id 0x... --slug SLUG --outcome Yes [--dry-run]
+python3 -m pipeline.add_market --condition-id 0x... --slug SLUG --outcome Yes [--dry-run]
 ```
 
 The original class project (the two Dash apps, `run.py`, the scripts and the CSVs in `data/`) lives on the `original-project` branch.
@@ -39,7 +39,7 @@ The original class project (the two Dash apps, `run.py`, the scripts and the CSV
 
 ## What It Does
 
-1. **Fetches** all trades from Polymarket for a given market (Data API v2, via `polymarket_api.py`)
+1. **Fetches** all trades from Polymarket for a given market (Data API v2, via `pipeline/polymarket_api.py`)
 2. **Cleans** data by aggregating trades per user/outcome/side
 3. **Identifies** suspicious whales: big winning bets from brand-new accounts, or from accounts that staked almost everything on this one market
 4. **Visualizes** the result on the site (`web/`)
@@ -49,11 +49,11 @@ The original class project (the two Dash apps, `run.py`, the scripts and the CSV
 
 ## Data Flow
 
-"Add to main page" → the Worker queues an `add` run → the step function (`backend/add_steps.py`, through `add_market.py`):
+"Add to main page" → the Worker queues an `add` run → the step function (`backend/add_steps.py`, through `pipeline/add_market.py`):
 
-- `polymarket_trades.py` (each trade) → `cleandata.py` (aggregate) → the clean CSV
-- `scrape_insiders.py` (detect patterns) → the insiders CSV
-- `export.py` → the market's page and index entry
+- `pipeline/polymarket_trades.py` (each trade) → `pipeline/cleandata.py` (aggregate) → the clean CSV
+- `pipeline/scrape_insiders.py` (detect patterns) → the insiders CSV
+- `pipeline/export.py` → the market's page and index entry
 
 all in memory, saved in D1 (`backend/site.py`: the page, the two CSVs, the index) and served by the Worker at `/api/data/`. The 7 original markets (`markets.json`) are saved the same way, by `python3 -m backend.site originals`.
 
@@ -119,7 +119,6 @@ Vite + React + TypeScript + D3 in `web/`. Every market (the 7 original ones and 
 | `#/` | Home: every market as a card |
 | `#/m/<name>` | Bet timeline with replay and visitors' markers; `/traders`: flagged traders |
 | `#/watchlist` | Open now and Recently closed (below) |
-| `#/review` | The owner's page: the runs, the budget, the Open now queue, what visitors added, a pause switch |
 
 ---
 
@@ -127,7 +126,7 @@ Vite + React + TypeScript + D3 in `web/`. Every market (the 7 original ones and 
 
 Two daily lists made from market text and Google News headlines, read by free Gemini and Gemma models. No prices, trades or wallets. Every day and time is Toronto's.
 
-- **Open now** (`watchlist/opennow.py`): up to 5 open markets where a few people will know the answer first and this week's news shows a step; a person approves each step on `#/review`. A market whose answer is already public (a released game, film, show, album or book included) is dropped. "Watch this market" puts one on the site's watchlist: once it closes with a result, it is added to the main page by itself.
+- **Open now** (`watchlist/opennow.py`): up to 5 open markets where a few people will know the answer first and this week's news shows a step, as the model reads it. A market whose answer is already public (a released game, film, show, album or book included) is dropped. "Watch this market" puts one on the site's watchlist: once it closes with a result, it is added to the main page by itself.
 - **Recently closed** (`watchlist/upsets.py`): 3 closed markets a day someone may have known early; "Add to main page" runs the analysis above on one, and it is on the main page within minutes.
 - **Backend** ([`docs/BACKEND.md`](docs/BACKEND.md)): a Cloudflare Worker and its D1 database (the API, the job queue, the schedule, everything published) wake a Vercel function that does the work in short steps. Both on free plans; nothing runs on GitHub but the site build.
 - **Schedule:** the daily run from 04:00 Toronto time, a catch-up from 10:00 only when work was left; an add starts the moment it is clicked.

@@ -7,7 +7,6 @@
 
 import { CONTRACT, dayBefore, hhmm, toronto, torontoAt } from "./contract";
 import { pruneParts } from "./blobs";
-import { pruneQueue } from "./job";
 import { type Budget, capsOf, computeBudget, readBudget } from "./ledger";
 import { type Ctx, DAY, type Env, clockOf, daysBefore, int, json, now, readBody } from "./lib";
 import { finishRuns, makeRun, runId } from "./queue";
@@ -196,7 +195,7 @@ export async function tick(env: Env, waitUntil: (p: Promise<unknown>) => void): 
  * days, terminal jobs after 14, results, news searches and scratch blobs after 3, the ledger after 60 days, the
  * daily limits after 3, orphan blob parts after one; and what the run's report used to prune: job_runs beyond
  * 200, deleted markers and visitor hashes after 30 days, watched stories a year old that Open now no longer
- * lists, withdrawals no run reported within 30 days, queue days beyond 7.
+ * lists.
  */
 export async function prune(env: Env, at: number, day: string): Promise<void> {
   const oldRuns = `SELECT id FROM runs WHERE state IN ${TERMINAL} AND coalesce(finished_at, created_at) < ?1`;
@@ -221,8 +220,6 @@ export async function prune(env: Env, at: number, day: string): Promise<void> {
     env.DB.prepare("DELETE FROM watches WHERE created_at < ? AND story NOT IN (SELECT id FROM catalog WHERE kind = 'open')").bind(
       at - 365 * DAY,
     ),
-    env.DB.prepare("DELETE FROM open_decisions WHERE decision = 'withdrawn' AND decided_at < ?").bind(at - 30 * DAY),
-    pruneQueue(env),
     env.DB.prepare(
       "INSERT INTO settings (key, value, updated_at) VALUES ('pruned_day', ?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?2",
     ).bind(day, at),

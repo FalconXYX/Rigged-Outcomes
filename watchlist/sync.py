@@ -1,21 +1,14 @@
 """
 The daily job's side of the site's API (worker/: a Cloudflare Worker and its
-D1 database; docs/DEPLOY.md). Visitors and the site's owner write there; the
-job reads what they wrote, acts on it, and reports back:
+D1 database; docs/DEPLOY.md). Visitors write there; the job reads what
+they wrote, acts on it, and reports back:
 
-  pull     GET /api/job/work: the owner's pending decisions on the open
-           list's queue, the markets visitors sent to the main page ("Add
+  pull     GET /api/job/work: the markets visitors sent to the main page ("Add
            to main page" records one as approved at once), the stories on
            the site's one watchlist and the markets added to the main
            page (the closed list keeps their picks, watchlist.upsets)
            -> data/watchlist/work.json, with the API's time of the read
            (read_at)
-  decide   the decisions into the store, as --approve and --reject record
-           them (store.save_review), and the ones the owner took back
-           ("withdrawn") out of it again (a run may have saved them before
-           they were taken back); in "apply" mode the reviewed day is
-           rebuilt at once (opennow.rebuild_reviewed), in "full" and "local"
-           mode the day's run that follows reads them itself
   add      each of those markets through add_market.add (the trades, clean,
            score and its page, built in a scratch folder; the page name made
            from its slug when it has none), its result saved in the database
@@ -42,29 +35,25 @@ job reads what they wrote, acts on it, and reports back:
   catalog  PUT /api/job/catalog: what visitors may write to (the main
            page's markets, markets.json's and the added ones, the closed
            list's picks, the cards of the open list's two newest days)
-  push     PUT /api/job/queue (the latest day's queue, each candidate with
-           its key), the catalog, then POST /api/job/done: the decisions
-           this run saved, only once the state holding them was saved; the
-           requests added (saved in the database, or there already) or
-           failed; the watched stories the add step was done with (their
-           market sent, or on the main page already), which leave the
-           watchlist once Open now no longer lists them; the run (a catch-up
-           run sends no POST: the queue and the catalog only). With
-           --adds-only (the workflow's add run, which restores no state)
-           no queue, and only the catalog's main-page markets
+  push     the catalog, then POST /api/job/done: the requests added (saved
+           in the database, or there already) or failed; the watched stories
+           the add step was done with (their market sent, or on the main
+           page already), which leave the watchlist once Open now no longer
+           lists them; the run (a catch-up run sends no POST: the catalog
+           only). With --adds-only (the workflow's add run, which restores
+           no state) only the catalog's main-page markets
 
     python3 -m watchlist.sync pull [--out data/watchlist/work.json]
-    python3 -m watchlist.sync decide --mode full|apply|local [--work PATH] [--open-out PATH]
     python3 -m watchlist.sync add [--work PATH] [--refresh] [--watched [--db PATH]] [--dry-run]
     python3 -m watchlist.sync catalog [--closed PATH] [--open PATH]
-    python3 -m watchlist.sync push --mode full|apply|local|catchup --status success|partial|failure --started-at EPOCH
+    python3 -m watchlist.sync push --mode full|local|catchup --status success|partial|failure --started-at EPOCH
                                    [--run-url URL] [--outcome STEP=OUTCOME ...] [--adds-only]
 
 The API is WATCHLIST_API_URL with WATCHLIST_JOB_TOKEN (the environment
 first, then ../.env, like the Gemini key). With neither, every command says
 so and does nothing; an API that does not answer (after STEP_WAITS) is a
 recorded problem (watchlist.problems) and never fails a step: the lists run
-without it, and decisions and requests wait for the next run. A refused
+without it, and requests wait for the next run. A refused
 token stops the step (a setup problem); any other refusal (a 4xx: the job
 and the Worker disagree on a request) is recorded as the code's problem.
 When the API does not answer the report's first calls, the catalog is left
@@ -76,27 +65,18 @@ from its steps (watchlist.steps); the commands are for running by hand.
 
 The shapes (worker/src, web/src/lib/api.ts):
 
-  Headline   {title, source, published, url}; a Candidate adds key (opennow.headline_key)
-  QueueItem  one item of opennow's queue (Run.awaiting): {n, story, place, why, kind, group, question,
-             who_knows, polymarket, url, reveal, candidates: [Candidate], model_copy_unmatched}
-  Queue      {day, run_at, steps_by, items: [QueueItem]}                         PUT /api/job/queue
-  Decision   {story, headline_key, decision: "step" | "not a step" | "card approved" | "withdrawn",
-              headline: Headline | null, day, decided_at, applied_at}           (headline_key "card": a dated card;
-                                                                                 "withdrawn": taken back, only in work)
   AddRequest {condition_id, slug, question, url, winner, closed, day, status, name, note, requested_at,
               decided_at, done_at}
-  work       GET /api/job/work -> {now, decisions: [Decision], requests: [AddRequest], watched: [{story}],
-             added: [{condition_id, day}]}
+  work       GET /api/job/work -> {now, requests: [AddRequest], watched: [{story}], added: [{condition_id, day}]}
   watched    POST /api/job/requests {requests: [{condition_id, slug, question, url, winner, closed, day}]}
              -> {requests: [AddRequest], skipped: [message]}
   catalog    PUT /api/job/catalog {markets: [{name, slug}], closed: [{condition_id, slug, question, url, winner,
              closed, day}], open: [{story, question, url}]}
-  done       POST /api/job/done {applied: [{story, headline_key, decided_at}], requests: [{condition_id,
-             status: "added" | "failed", name, note}], watched: [story], run: {mode, status, started_at,
-             finished_at, summary, url}}
+  done       POST /api/job/done {requests: [{condition_id, status: "added" | "failed", name, note}],
+             watched: [story], run: {mode, status, started_at, finished_at, summary, url}}
 
 Files under data/watchlist/ (WATCHLIST_JOB_DIR moves them) the steps leave
-for each other: work.json, decide_results.json, add_results.json, and
+for each other: work.json, add_results.json, and
 state_pulled.json / state_pushed.json (watchlist.state). A results file
 older than the run (--started-at) is never reported.
 """
@@ -116,11 +96,7 @@ from watchlist.common import (JOB_DIR, ROOT, SITE_DATA_DIR, iso, local_day, loca
 TIMEOUT = 20
 RETRY_WAITS = (2, 8, 30)          # seconds before each retry of a 429, a 5xx or a network error
 STEP_WAITS = (5, 20, 60, 120)     # the job's steps here (the work, adding markets, the report): ~3.5 minutes
-QUEUE_LIMIT = 30                  # items PUT /api/job/queue takes at most
 OPEN_DAYS = 2                     # open-list days whose cards visitors may watch
-DECIDED_BY = "person (review page)"
-DECISIONS = ("step", "not a step", "card approved")
-WITHDRAWN = "withdrawn"           # a decision the owner took back: removed from the store, then reported
 STOPPED = "stopped part way while adding it (the step timed out or crashed)"
 FULL = "the main page holds as many added markets as it can"      # the Worker's 409 full
 ADDED_PREFIX = "market:"          # the added markets' blobs (watchlist.blobs)
@@ -248,68 +224,28 @@ def _fresh(doc, started_at):
     return bool(doc) and started_at is not None and int(doc.get("at") or 0) >= int(started_at)
 
 
-# ── pull, decide, add ────────────────────────────────────────────────────────
+# ── pull, add ─────────────────────────────────────────────────────────────
 
 def pull(c, out_path, now=None):
     """GET /api/job/work into work.json; returns it. No API, or one that does not answer: an empty work.json."""
     now = int(now if now is not None else now_epoch())
-    doc = {"fetched_at": now, "configured": c is not None, "decisions": [], "requests": [], "watched": [], "added": []}
+    doc = {"fetched_at": now, "configured": c is not None, "requests": [], "watched": [], "added": []}
     if c is None:
         log(NO_API)
     else:
         try:
             got = c.request("GET", "/api/job/work") or {}
-            doc.update({k: list(got.get(k) or []) for k in ("decisions", "requests", "watched", "added")})
+            doc.update({k: list(got.get(k) or []) for k in ("requests", "watched", "added")})
             if isinstance(got.get("now"), int):
                 doc["read_at"] = got["now"]
-            log(f"work: {len(doc['decisions'])} decision(s), {len(doc['requests'])} market(s) to add, "
+            log(f"work: {len(doc['requests'])} market(s) to add, "
                 f"{len(doc['watched'])} card(s) on the watchlist")
         except ApiError as e:
             if not e.outage:
                 raise                                # a refused token, or a request the API cannot read
             doc["error"] = str(e)
-            problems.note(f"the API did not give the job its work ({e}); decisions and markets to add wait for the "
-                          f"next run")
+            problems.note(f"the API did not give the job its work ({e}); the markets to add wait for the next run")
     _write(out_path, doc)
-    return doc
-
-
-def decide(conn, work, mode, results_path, open_out=OPEN_JSON, rebuild=None, now=None, budget=None):
-    """Save the owner's decisions into the store (applying one twice is harmless: it replaces itself), and take
-    the withdrawn ones out of it (only a decision the review page made); in "apply" mode rebuild the reviewed day
-    when anything changed, within budget (a common.Budget, or None). Writes decide_results.json before the
-    rebuild with "rebuilding": true, and again after it: a rebuild that crashed or was stopped leaves that mark,
-    and the report then leaves its decisions pending (done_payload), so the next run applies them again."""
-    now = int(now if now is not None else now_epoch())
-    saved, changed, withdrawn = [], False, 0
-    for d in work.get("decisions") or []:
-        story, key, decision = d.get("story"), d.get("headline_key"), d.get("decision")
-        headline = d.get("headline") if isinstance(d.get("headline"), dict) else None
-        if not (isinstance(story, str) and story and isinstance(key, str) and key
-                and (decision in DECISIONS or decision == WITHDRAWN) and isinstance(d.get("decided_at"), int)):
-            _warn(f"a decision the job cannot read was skipped: {str(d)[:120]}")
-            continue
-        if decision == WITHDRAWN:
-            changed |= store.delete_review(conn, story, key, by=DECIDED_BY)
-            withdrawn += 1
-            saved.append({"story": story, "headline_key": key, "decided_at": d["decided_at"], "withdrawn": True})
-            continue
-        if (key == "card") != (headline is None):
-            _warn(f"a decision without its headline was skipped ({story!r}, {key!r})")
-            continue
-        store.save_review(conn, story, key, decision, headline, by=DECIDED_BY, at=d["decided_at"])
-        changed = True
-        saved.append({"story": story, "headline_key": key, "decided_at": d["decided_at"]})
-    doc = {"saved": saved, "rebuilt": False, "at": now}
-    _write(results_path, doc)
-    log(f"decisions: {len(saved) - withdrawn} saved to the store" + (f", {withdrawn} taken back" if withdrawn else ""))
-    if mode == "apply" and changed:
-        from watchlist import opennow
-        _write(results_path, dict(doc, rebuilding=True))
-        summary = (rebuild or opennow.rebuild_reviewed)(conn, out_path=open_out,
-                                                        **({"budget": budget} if budget is not None else {}))
-        doc["rebuilt"] = summary is not None
-        _write(results_path, doc)
     return doc
 
 
@@ -343,7 +279,7 @@ def story_markets(conn, story, fetch_event=None, fetch_market=None):
     wins), and the one market of each outcome split into its own story (a card's slug that is none of those
     events' own; store.open_story_idents). [] when the store has no card for it; an event or a market Gamma no
     longer has is left out. Raises PolymarketAPIError when Polymarket does not answer."""
-    import polymarket_api
+    from pipeline import polymarket_api
     from watchlist import filters, net
     fetch_event = fetch_event or net.fetch_event
     fetch_market = fetch_market or polymarket_api.fetch_market
@@ -430,7 +366,7 @@ def watched_request(m):
 
 def main_page_slugs(added, markets_path=None):
     """The slugs on the main page, as add_market compares them (bare_slug): markets.json's and the added ones'."""
-    import add_market
+    from pipeline import add_market
     rows = (_read(markets_path or MARKETS_FILE, []) or []) + list(added or [])
     return {add_market.bare_slug(m.get("slug")) for m in rows if isinstance(m, dict) and m.get("slug")}
 
@@ -444,7 +380,7 @@ def send_watched(c, stories, on_main, markets_of, dry_run=False):
     Returns (rows, finished): the API's requests for the markets sent (AddRequest rows), and the stories done
     with (their market on the main page, or sent: it has a request now), which the run's report takes off the
     watchlist once Open now no longer lists them. Raises ApiError for a refused token."""
-    import add_market
+    from pipeline import add_market
     sent, finished, waiting = {}, [], 0
     for story in stories:
         try:
@@ -491,7 +427,7 @@ def send_watched(c, stories, on_main, markets_of, dry_run=False):
 def _saved_meanwhile(c, r, e):
     """(entry, the added entries) when a refused save (e: 409 moved) was a market another run saved meanwhile under
     its page name: the database's added markets, read again, have one with this market's slug. Else None."""
-    import add_market
+    from pipeline import add_market
     if e.code != "moved":
         return None
     try:
@@ -528,7 +464,7 @@ def add(c, work, results_path, dry_run=False, adder=None, now=None, refresh=Fals
     from watchlist import blobs
     now = int(now if now is not None else now_epoch())
     if adder is None:
-        import add_market
+        from pipeline import add_market
         adder = add_market.add
     results, finished = [], []
 
@@ -642,7 +578,7 @@ def add(c, work, results_path, dry_run=False, adder=None, now=None, refresh=Fals
     return results
 
 
-# ── catalog, queue, done ─────────────────────────────────────────────────────
+# ── catalog, done ────────────────────────────────────────────────────────────
 
 def catalog_payload(markets_path=MARKETS_FILE, closed_path=CLOSED_JSON, open_path=OPEN_JSON, added=None):
     """What visitors may write to; a section whose file is missing is left out (the API keeps the last one).
@@ -678,44 +614,20 @@ def catalog_payload(markets_path=MARKETS_FILE, closed_path=CLOSED_JSON, open_pat
     return out
 
 
-def queue_payload(conn):
-    """The latest stored day's queue for PUT /api/job/queue, each candidate with its key, or None (no day)."""
-    from watchlist import opennow
-    day = opennow.latest_day(conn)
-    if not day:
-        return None
-    info = day.get("info") or {}
-    items = []
-    for it in (info.get("awaiting") or [])[:QUEUE_LIMIT]:
-        if not it.get("story") or len(str(it["story"])) > 200:      # the API's limit; story keys run to about 90
-            problems.note(f"a queue item the API cannot take was left out of the review page: "
-                          f"{str(it.get('story'))[:80]!r}")
-            continue
-        cands = [dict(h, key=opennow.headline_key(h)) for h in it.get("candidates") or []]
-        items.append(dict(it, candidates=[h for h in cands if 0 < len(h["key"]) <= 500]))
-    return {"day": day["day"], "run_at": opennow._iso_z(day["run_at"]),
-            "steps_by": info.get("steps_by") or opennow.STEPS_BY, "items": items}
-
-
-def run_summary(conn, closed_path=CLOSED_JSON, started_at=None, applied=0, added=0, failed=0, withdrawn=0):
-    """One line for the run's report on the review page."""
+def run_summary(conn, closed_path=CLOSED_JSON, started_at=None, added=0, failed=0):
+    """One line for the run's report."""
     from watchlist import opennow
     parts = []
     day = opennow.latest_day(conn)
     if day:
         info = day.get("info") or {}
-        waiting = len(info.get("awaiting") or [])
         parts.append(f"open list {day['day']}: {day['status']}, {len(day['cards'])} card(s), "
-                     f"{int(info.get('new_today') or 0)} new, {waiting} waiting for review")
+                     f"{int(info.get('new_today') or 0)} new")
     closed = _read(closed_path) or {}
     gen = closed.get("generated_at")
     parts.append("closed list: " + ("updated" if gen and started_at and (to_epoch(gen) or 0) >= int(started_at)
                                     else f"as of {local_iso(to_epoch(gen))[:16].replace('T', ' ')}" if gen
                                     else "none yet"))
-    if applied:
-        parts.append(f"{applied} decision(s) applied")
-    if withdrawn:
-        parts.append(f"{withdrawn} taken back")
     if added or failed:
         parts.append(f"{added} market(s) added" + (f", {failed} failed" if failed else ""))
     return "; ".join(parts)
@@ -723,9 +635,7 @@ def run_summary(conn, closed_path=CLOSED_JSON, started_at=None, applied=0, added
 
 def done_payload(conn, job_dir, mode, status, started_at, run_url=None, now=None, closed_path=CLOSED_JSON,
                  outcomes=None, adds_only=False):
-    """POST /api/job/done's body from this run's files: the decisions saved, only when this run saved the
-    state (state_pushed.json) and, in apply mode, rebuilt the reviewed day (a rebuild that crashed or was
-    stopped leaves them pending: decide); the requests added (saved in the database, or there already) and
+    """POST /api/job/done's body from this run's files: the requests added (saved in the database, or there already) and
     failed; the watched stories the add step was done with (send_watched); the run, its status at least partial
     when the run had a problem (watchlist.problems: the steps' records in job_dir and outcomes, {step id: the
     workflow's outcome}), and those problems after its summary. adds_only: a run that only added markets (the
@@ -733,10 +643,6 @@ def done_payload(conn, job_dir, mode, status, started_at, run_url=None, now=None
     now = int(now if now is not None else now_epoch())
     found = problems.collect(started_at, outcomes, job_dir)
     status = problems.status(status, outcomes, found)
-    pushed = _read(os.path.join(job_dir, "state_pushed.json"))
-    decided = _read(os.path.join(job_dir, "decide_results.json"))
-    applied = list(decided["saved"]) if _fresh(decided, started_at) and _fresh(pushed, started_at) and \
-        pushed.get("ok") and not decided.get("rebuilding") else []
     added = _read(os.path.join(job_dir, "add_results.json"))
     results = added.get("results") or [] if _fresh(added, started_at) else []
     watched = [str(x) for x in added.get("watched") or []] if _fresh(added, started_at) else []
@@ -749,9 +655,8 @@ def done_payload(conn, job_dir, mode, status, started_at, run_url=None, now=None
     if adds_only:
         summary = f"{n_added} market(s) added" + (f", {n_failed} failed" if n_failed else "")
     else:
-        summary = run_summary(conn, closed_path, started_at, applied=sum(1 for a in applied if not a.get("withdrawn")),
-                              withdrawn=sum(1 for a in applied if a.get("withdrawn")), added=n_added, failed=n_failed)
-    return {"applied": applied, "requests": reqs, "watched": watched,
+        summary = run_summary(conn, closed_path, started_at, added=n_added, failed=n_failed)
+    return {"requests": reqs, "watched": watched,
             "run": {"mode": mode, "status": status, "started_at": int(started_at or now), "finished_at": now,
                     "summary": problems.summary_with(summary, found), "url": run_url},
             "problems": found}
@@ -793,41 +698,27 @@ def catalog(c, sections=None, **paths):
 
 def push(c, conn, job_dir, mode, status, started_at, run_url=None, now=None, closed_path=CLOSED_JSON,
          open_path=OPEN_JSON, markets_path=MARKETS_FILE, outcomes=None, adds_only=False):
-    """The queue, the catalog, then the run's report (its status and problems from this run's records and the
-    workflow's step outcomes, done_payload). Each call that fails is warned about and none fails the step, except
-    a refused token (a setup problem). adds_only (the workflow's add run, which restores no state, beside a run
-    that may be making the lists): no queue, and the catalog's main-page markets only, so the lists another run
-    publishes are never replaced by older ones."""
+    """The catalog, then the run's report (its status and problems from this run's records and the workflow's
+    step outcomes, done_payload). Each call that fails is warned about and none fails the step, except a refused
+    token (a setup problem). adds_only (the workflow's add run, which restores no state, beside a run that may be
+    making the lists): the catalog's main-page markets only, so the lists another run publishes are never
+    replaced by older ones."""
     if c is None:
         log(NO_API)
         return None
-    q = None if adds_only else queue_payload(conn)
-    down = False
-    if q is not None:
-        try:
-            c.request("PUT", "/api/job/queue", q)
-            log(f"queue: {len(q['items'])} item(s) of {q['day']} sent")
-        except ApiError as e:
-            _api_problem(e, "the queue was not sent", "the review page keeps the last one")
-            down = e.outage
-    if down:                                         # the API is down: its waits go to the report, not the catalog
-        problems.note(f"the catalog was not sent (the API did not answer); {CATALOG_KEEPS}")
-    else:
-        catalog(c, markets_path=markets_path, closed_path=closed_path, open_path=open_path,
-                sections=("markets",) if adds_only else None)
+    catalog(c, markets_path=markets_path, closed_path=closed_path, open_path=open_path,
+            sections=("markets",) if adds_only else None)
     body = done_payload(conn, job_dir, mode, status, started_at, run_url, now, closed_path, outcomes=outcomes,
                         adds_only=adds_only)
     body.pop("problems")                             # in the summary; the job's verdict lists them on its page
-    if mode == "catchup":                            # the review page keeps the daily run's report
-        log(f"catch-up: the queue and the catalog sent, no run report; {body['run']['summary']}")
+    if mode == "catchup":                            # the daily run's report stands
+        log(f"catch-up: the catalog sent, no run report; {body['run']['summary']}")
     else:
         try:
             c.request("POST", "/api/job/done", body)
-            log(f"reported ({body['run']['status']}): {len(body['applied'])} decision(s) applied, "
-                f"{len(body['requests'])} request(s); {body['run']['summary']}")
+            log(f"reported ({body['run']['status']}): {len(body['requests'])} request(s); {body['run']['summary']}")
         except ApiError as e:
-            _api_problem(e, "the run's report was not sent", "the decisions stay pending and are applied again next "
-                                                             "run (harmless)")
+            _api_problem(e, "the run's report was not sent", "the requests are reported again next run (harmless)")
     return body
 
 
@@ -839,11 +730,6 @@ def main(argv=None):
     work_path = os.path.join(JOB_DIR, "work.json")
     p = sub.add_parser("pull")
     p.add_argument("--out", default=work_path)
-    p = sub.add_parser("decide")
-    p.add_argument("--mode", choices=("full", "apply", "local"), required=True)
-    p.add_argument("--work", default=work_path)
-    p.add_argument("--open-out", default=OPEN_JSON, help="where an apply-mode rebuild writes open.json")
-    p.add_argument("--db", default=None)
     p = sub.add_parser("add")
     p.add_argument("--work", default=work_path)
     p.add_argument("--dry-run", action="store_true", help="check each market on Polymarket only")
@@ -857,8 +743,8 @@ def main(argv=None):
     p.add_argument("--closed", default=CLOSED_JSON)
     p.add_argument("--open", default=OPEN_JSON)
     p = sub.add_parser("push")
-    p.add_argument("--mode", choices=("full", "apply", "local", "catchup"), required=True,
-                   help="catchup: the queue and the catalog only (the API keeps runs of the other three)")
+    p.add_argument("--mode", choices=("full", "local", "catchup"), required=True,
+                   help="catchup: the catalog only (the API keeps runs of the other two)")
     p.add_argument("--status", choices=("success", "partial", "failure"), required=True)
     p.add_argument("--started-at", type=int, required=True)
     p.add_argument("--run-url", default=None)
@@ -866,16 +752,11 @@ def main(argv=None):
     p.add_argument("--outcome", action="append", default=[], metavar="STEP=OUTCOME",
                    help="a step's outcome in the workflow, by its step id (watchlist.problems)")
     p.add_argument("--adds-only", action="store_true",
-                   help="the workflow's add run: no queue, the catalog's main-page markets only")
+                   help="the workflow's add run: the catalog's main-page markets only")
     args = ap.parse_args(argv)
 
     if args.cmd == "pull":
         pull(client(STEP_WAITS), args.out)
-    elif args.cmd == "decide":
-        work = _read(args.work, {}) or {}
-        conn = store.connect(args.db) if args.db else store.default_conn()
-        decide(conn, work, args.mode, os.path.join(JOB_DIR, "decide_results.json"), open_out=args.open_out,
-)
     elif args.cmd == "add":
         work = _read(args.work, {}) or {}
         conn = (store.connect(args.db) if args.db else store.default_conn()) if args.watched else None

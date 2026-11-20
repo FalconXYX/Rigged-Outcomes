@@ -103,15 +103,17 @@ const ms = (x) => (x == null ? "never" : `${(x / 1000).toFixed(1)} s`);
 const apiGet = (stack, path) => fetch(`${stack.urls.api}${path}`).then((r) => r.json(), () => null);
 const watching = async (stack, story) => (await apiGet(stack, `/api/watch?story=${encodeURIComponent(story)}`))?.watching;
 const request = async (stack, cid) => (await apiGet(stack, `/api/request?cid=${cid}`))?.request ?? null;
-const overview = (stack) => stack.api("GET", "/api/admin/overview", null, "dev-owner-token").then((r) => r.body);
+const status = (stack) => stack.status();
+/** The stories on the site's watchlist, as the job reads them. */
+const watchedNow = async (stack) => ((await stack.api("GET", "/api/job/work")).body?.watched ?? []).map((w) => w.story);
 const addedBlobs = async (stack) => (await stack.api("GET", "/api/job/blobs?prefix=market:")).body?.blobs ?? [];
 /** The markets' index the Worker serves (the 7 original markets, then the added ones). */
 const siteIndex = (stack) => fetch(`${stack.urls.api}/api/data/index.json`).then((r) => r.json(), () => ({ markets: [] }));
 const bare = (s) => String(s ?? "").split("/").pop().split("#")[0];
 const onIndex = (idx, slug) => (idx.markets ?? []).filter((m) => bare(m.slug) === bare(slug));
 
-/** The backend's add runs (newest first), from the owner's overview. */
-const addRunsAll = async (stack) => ((await overview(stack)).backend?.runs ?? []).filter((r) => r.kind === "add");
+/** The backend's add runs (newest first), from the backend's status. */
+const addRunsAll = async (stack) => ((await status(stack)).runs ?? []).filter((r) => r.kind === "add");
 /** Waits until no add run is queued or running. */
 const addsIdle = (stack) =>
   until(async () => !(await addRunsAll(stack)).some((r) => ["queued", "running"].includes(r.state)), { ms: 20 * 60_000, every: 3000, what: "the add runs to end" });
@@ -129,7 +131,7 @@ async function nextDaily(stack, after) {
 const CARDS_PY = String.raw`
 import json, os, sys
 sys.path.insert(0, os.getcwd())
-import polymarket_api
+from pipeline import polymarket_api
 from watchlist import filters, kinds, net, news, opennow, store, sync
 from watchlist.common import DAY, day_shift, local_bounds, local_day, local_iso, now_epoch
 
@@ -234,7 +236,7 @@ for eid in unclear_events():
 day = doc["days"][0] if doc.get("days") else None
 if day is None or day["day"] != today:
     day = {"day": today, "status": "updated", "run_at": local_iso(now), "cards": [],
-           "new_today": 0, "held_back": 0, "awaiting": 0}
+           "new_today": 0, "held_back": 0}
     doc["days"] = [day] + list(doc.get("days") or [])
 day["cards"] = list(day["cards"]) + cards
 day["new_today"] = len(day["cards"])
@@ -525,8 +527,7 @@ async function main(browser) {
       const on = await waitFace(card, /^Watching/);
       log(`watched "${c.question}" (${ms(on)}; API watching=${await watching(stack, c.story)})`);
     }
-    const ov0 = await overview(stack);
-    log(`the site's watchlist now: ${ov0.watched.map((w) => w.story).join(" | ")}`);
+    log(`the site's watchlist now: ${(await watchedNow(stack)).join(" | ")}`);
 
     let w2AddedAt = null;
     {
@@ -585,13 +586,13 @@ async function main(browser) {
 
     const idx1 = await siteIndex(stack);
     const blobs1 = await addedBlobs(stack);
-    const ov1 = await overview(stack);
     const reqW1 = w1.expect ? await request(stack, w1.expect.cid) : null;
     const reqW2 = await request(stack, picks[1].condition_id);
     const reqLadder = ladder ? await request(stack, ladder.expect.cid) : null;
     const ladderAll = ladder ? (await Promise.all(ladder.cids.map((c) => request(stack, c)))).filter(Boolean) : [];
     const unclearAll = unclear ? (await Promise.all(unclear.cids.map((c) => request(stack, c)))).filter(Boolean) : [];
-    const stillWatched = new Set(ov1.watched.map((w) => w.story));
+    const ov1 = await status(stack);
+    const stillWatched = new Set(await watchedNow(stack));
 
     await row(
       "daily run: a watched market that closed with a result is added with no click",

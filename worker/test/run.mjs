@@ -30,7 +30,6 @@ const env = { ...process.env, WRANGLER_SEND_METRICS: "false", CI: "1" };
 /** Every setting the smoke test needs, so it never depends on what a local .dev.vars holds. */
 const VARS = {
   TURNSTILE_SECRET: "1x0000000000000000000000000000000AA",
-  OWNER_TOKEN: "dev-owner-token",
   JOB_TOKEN: "dev-job-token",
   VISITOR_SALT: "dev-visitor-salt",
   DEV: "on",

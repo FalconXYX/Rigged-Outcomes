@@ -1,6 +1,6 @@
 # What `vercel deploy` leaves out of the step function's upload: the local data/ (the watchlist's store), the
 # site, the Worker, the tests, the docs and anything secret. The function needs only api/, backend/, watchlist/,
-# the pipeline's modules at the root, markets.json and requirements.txt.
+# pipeline/, markets.json and requirements.txt.
 data/
 web/
 worker/

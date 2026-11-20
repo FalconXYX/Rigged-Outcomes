@@ -2,10 +2,9 @@
 // shapes below are the contract it shares with watchlist/sync.py and
 // docs/BACKEND.md, and docs/DEPLOY.md sets it up). Visitors write three things
 // through it: timeline markers, the site's one watchlist of open markets, and
-// closed markets added to the main page; the owner's review page (#/review)
-// reads them, decides the open list's queue and sees the backend's runs and
-// budget. The site's own data that the backend publishes (the lists, the added
-// markets) is read through lib/data.ts. A build without VITE_API_URL and
+// closed markets added to the main page. The site's own data that the backend
+// publishes (the lists, the added markets) is read through lib/data.ts. A
+// build without VITE_API_URL and
 // VITE_TURNSTILE_SITEKEY makes no call at all, and an API that is down, over its
 // free daily limit or slow reads the same: every control still works and
 // remembers what this browser did. Nothing here throws.
@@ -23,126 +22,13 @@ const SEND_MS = 15000;
 
 /* ── The contract's shapes (worker/src; watchlist/sync.py mirrors them) ─── */
 
-export type Headline = { title: string; source: string | null; published: string | null; url: string | null };
-/** key = opennow.headline_key(headline) */
-export type Candidate = Headline & { key: string };
-/** opennow Run.awaiting() item, plus candidates[].key */
-export type QueueItem = {
-  n: number;
-  story: string;
-  place: "new step" | "stays" | "gone quiet" | "dated";
-  why: "on the list" | "awaiting approval" | "one reading" | "dated, on the list";
-  kind: string | null;
-  group: number | null;
-  question: string;
-  who_knows: string;
-  polymarket: string;
-  /** null when it wasn't an https:// link (the API drops it) */
-  url: string | null;
-  reveal: string | null;
-  candidates: Candidate[];
-  model_copy_unmatched: string[];
-};
-export type Queue = { day: string; run_at: string; steps_by: "person" | "model"; items: QueueItem[] };
-export type DecisionValue = "step" | "not a step" | "card approved";
-export type Decision = {
-  story: string;
-  headline_key: string;
-  decision: DecisionValue;
-  headline: Headline | null;
-  day: string;
-  decided_at: number;
-  applied_at: number | null;
-  /** the overview only: the card's question (a decision on a whole card has no headline) */
-  question?: string | null;
-};
 /**
  * approved: its add run (queued the moment it was added) is adding it; added: it is on the main page; failed: the
- * add run couldn't add it (the review page says why; a visitor may add it again); removed: the owner took it off
- * the main page
+ * add run couldn't add it (a visitor may add it again); removed: taken off the main page
  */
 export type RequestStatus = "approved" | "added" | "failed" | "removed";
 export type PublicRequest = { status: RequestStatus; name: string | null; decided_at: number | null; done_at: number | null };
-export type AddRequest = PublicRequest & {
-  condition_id: string;
-  slug: string;
-  question: string;
-  url: string;
-  winner: string;
-  closed: string;
-  day: string;
-  note: string | null;
-  requested_at: number;
-};
 export type Marker = { id: string; t: number; label: string; source: "manual" | "ai"; created_at: number };
-export type AdminMarker = Marker & { market: string; deleted_at: number | null; deleted_by: "owner" | "visitor" | null };
-/** a story on the site's watchlist, since it was put on */
-export type Watched = { story: string; since: number; question: string | null; url: string | null };
-export type JobRun = {
-  id: number;
-  mode: "full" | "apply" | "local";
-  status: "success" | "partial" | "failure";
-  started_at: number;
-  finished_at: number;
-  summary: string | null;
-  url: string | null;
-};
-/** The backend's ledger of Vercel use (docs/BACKEND.md), as the cron last computed it. */
-export type BudgetLevel = "ok" | "tight" | "low" | "stop";
-export type Budget = {
-  level: BudgetLevel;
-  /** the last 30 Toronto days: CPU with its safety margin and each wake-up's share, memory time (GB-ms), calls */
-  cpu_ms_30d: number;
-  gb_ms_30d: number;
-  invocations_30d: number;
-  cpu_ms_today: number;
-  gb_ms_today: number;
-  /** epoch seconds; 0 before the first computation */
-  computed_at: number;
-};
-export type LaneName = "main" | "news" | "model" | "add";
-export type LaneState = {
-  lane: LaneName;
-  /** no step is claimed from it before this (epoch seconds; 0: not paused) */
-  paused_until: number;
-  /** wake-ups sent since its last claim */
-  unanswered: number;
-  last_wake_at: number;
-  last_claim_at: number;
-  /** the last wake-up Vercel didn't take ("HTTP 503", "no answer"), until one goes through */
-  wake_error: string | null;
-};
-export type RunKind = "daily" | "catchup" | "add" | "apply";
-export type RunState = "queued" | "running" | "done" | "partial" | "failed" | "cancelled" | "missed" | "skipped";
-export type BackendRun = {
-  id: string;
-  kind: RunKind;
-  slot: string;
-  state: RunState;
-  created_at: number;
-  started_at: number | null;
-  finished_at: number | null;
-  deadline: number;
-  /** what its jobs reported: `left` (stories left unread), `problems` (one-line strings), `condition_id` (an add); JSON text from some answers */
-  meta: Record<string, unknown> | string | null;
-};
-export type FailedJob = { id: string; kind: string; error: string | null; updated_at: number };
-export type Backend = { budget: Budget; lanes: LaneState[]; runs: BackendRun[]; failed_jobs: FailedJob[] };
-
-export type Overview = {
-  now: number;
-  settings: { writes: "on" | "off" };
-  /** when the API last refused the job's token (epoch seconds) */
-  job_refused_at: number | null;
-  queue: Queue | null;
-  decisions: Decision[];
-  requests: AddRequest[];
-  markers: AdminMarker[];
-  watched: Watched[];
-  runs: JobRun[];
-  /** the queue's latest 15 runs, the failed steps of the last 14 days (latest 10), the lanes and the budget */
-  backend?: Backend;
-};
 
 /* ── Words ────────────────────────────────────────────────────────────── */
 
@@ -155,7 +41,6 @@ export const WORDS: Record<string, string> = {
   busy: "The site has taken all it can today. Try again tomorrow.",
   bot_check: "The bot check didn't pass. Try again.",
   bot_script: "Couldn't load the bot check. Allow challenges.cloudflare.com and try again.",
-  paused: "Visitors' changes are paused right now.",
   bad_label: "That label can't be used: plain words, no links, up to 40 characters.",
   bad_time: "Pick a time within this market's timeline.",
   full: "This timeline has as many markers as it can hold.",
@@ -166,8 +51,6 @@ export const WORDS: Record<string, string> = {
   not_listed: "This market is no longer on the list.",
   on_main: "It's already on the main page.",
   add_failed: "Couldn't add this market to the main page.",
-  unauthorized: "That token was not accepted.",
-  locked: "Too many wrong tokens today. Try again tomorrow.",
   other: "Couldn't send right now. Try again later.",
 };
 
@@ -246,45 +129,6 @@ export async function apiSend<T>(
     }
   }
   return result<T>(await call(method, path, payload, opts.headers ?? {}, SEND_MS));
-}
-
-/* ── The owner's token (#/review) ─────────────────────────────────────── */
-// Kept in this page's memory only, never in localStorage or sessionStorage:
-// every GitHub Pages site of the account shares the parthjain.ca origin, so
-// any script on any of them could read browser storage. Reloading the page
-// asks for the token again (a password manager fills it).
-
-let owner: string | null = null;
-
-export function ownerToken(): string | null {
-  return owner;
-}
-
-export function setOwner(token: string) {
-  forgetOwner();
-  owner = token;
-}
-
-export function forgetOwner() {
-  owner = null;
-  // an earlier build of the review page could keep it in browser storage: never leave a copy there
-  writeKey("ro-owner", null, "session");
-  writeKey("ro-owner", null, "local");
-}
-
-const bearer = (): Record<string, string> => {
-  const t = ownerToken();
-  return t ? { authorization: `Bearer ${t}` } : {};
-};
-
-export async function ownerGet<T>(path: string): Promise<Sent<T>> {
-  if (!apiConfigured) return { ok: false, code: "off", words: WORDS.other };
-  return result<T>(await call("GET", path, undefined, bearer(), SEND_MS));
-}
-
-export async function ownerSend<T>(method: "POST" | "PUT" | "DELETE", path: string, body?: Record<string, unknown>): Promise<Sent<T>> {
-  if (!apiConfigured) return { ok: false, code: "off", words: WORDS.other };
-  return result<T>(await call(method, path, body, bearer(), SEND_MS));
 }
 
 /* ── What this browser remembers ──────────────────────────────────────── */
@@ -382,4 +226,4 @@ export const setLocalMarkers = (market: string, events: unknown[]) =>
   writeKey(`ro-markers:${market}`, events.length ? JSON.stringify(events) : null);
 
 /** Answers that mean "the API can't take it right now", as opposed to a refusal a visitor should read. */
-export const OFFLINE = new Set(["network", "off", "paused", "server", "other"]);
+export const OFFLINE = new Set(["network", "off", "server", "other"]);

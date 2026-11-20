@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { cleanEnv, run, startProcess, until } from "./proc.mjs";
 
 export const JOB_TOKEN = "dev-job-token";
-export const OWNER_TOKEN = "dev-owner-token";
 export const TURNSTILE = {
   pass: { sitekey: "1x00000000000000000000AA", secret: "1x0000000000000000000000000000000AA" },
   fail: { sitekey: "2x00000000000000000000AB", secret: "2x0000000000000000000000000000000AA" },

@@ -61,8 +61,8 @@ def _ans_key(answers):
 
 
 def score(ctx):
-    import add_market as A
-    import polymarket_api
+    from pipeline import add_market as A
+    from pipeline import polymarket_api
     from backend.rubric import cache as cache_mod, fact_sources, pipeline, spec, store, wallet_facts as wf
     from backend.rubric.scorers import get_scorer
 
@@ -175,7 +175,7 @@ def _histories(ctx, market, todo, hists, cur):
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
-    import polymarket_api
+    from pipeline import polymarket_api
     from backend.rubric import wallet_facts as wf
 
     source = wf.Polymarket(None, rate=POLYMARKET_RATE, getter=polymarket_api.get_json)

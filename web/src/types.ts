@@ -1,4 +1,4 @@
-// Data contract produced by ../export.py. Keep in sync with that script.
+// Data contract produced by ../pipeline/export.py. Keep in sync with that script.
 //
 // TIME CONVENTION: every `t` / `start` / `end` is integer epoch SECONDS of the
 // US/Eastern wall clock read as if it were UTC. Build Dates with
@@ -307,7 +307,7 @@ export interface OpenHeadline {
   source: string;
   published: string | null;
   url: string;
-  /** a step: a person approved it (rules.steps_by "person"), or the step reading marked it ("model") */
+  /** a step: the step reading marked it */
   step: boolean;
   /** the step on the card face (Details labels it "On the card") */
   on_card: boolean;
@@ -383,14 +383,10 @@ export interface OpenDay {
   new_today: number;
   /** markets with a new step held back because a headline from the last 7 days may mean the answer is out */
   held_back: number;
-  /** stories whose step headline is waiting for a person's approval (not shown until approved) */
-  awaiting?: number;
 }
 
 export interface OpenData {
   generated_at: string;
-  /** shown as the "Trial" pill while the trial runs */
-  trial: boolean;
   rules: {
     min_volume: number;
     per_day: number;
@@ -402,10 +398,7 @@ export interface OpenData {
     held_back_days: number;
     prompt_version: string;
     model: string;
-    /** who confirms each step: "person" (the step reading suggests steps and a person approves every card's step
-     * before it shows) or "model" (a step shows when the step reading marks it) */
-    steps_by?: "person" | "model";
   };
-  /** newest first; days[0] is the latest list. Empty until a person has approved a first card */
+  /** newest first; days[0] is the latest list. Empty until a list has its first card */
   days: OpenDay[];
 }

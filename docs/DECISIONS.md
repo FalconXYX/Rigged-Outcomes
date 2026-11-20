@@ -6,10 +6,10 @@ Why Rigged Outcomes is built the way it is: one row per decision that still hold
 
 | Decision | Why |
 |---|---|
-| Every fetch uses Data API v2 (`polymarket_api.py`) | Polymarket retired Data API v1 and the subgraph in November 2026 |
+| Every fetch uses Data API v2 (`pipeline/polymarket_api.py`) | Polymarket retired Data API v1 and the subgraph in November 2026 |
 | A failed fetch raises; it is never read as "no trades" | The old fetcher scored busy wallets as brand new |
 | Buys at 99¢ or more are not whales | Paying 99¢ is collecting a payout, not an informed bet |
-| `scrape_insiders.py` refuses a `correct_outcome` that contradicts `win_status` | A wrong outcome once picked superbowl's whales from the losing side |
+| `pipeline/scrape_insiders.py` refuses a `correct_outcome` that contradicts `win_status` | A wrong outcome once picked superbowl's whales from the losing side |
 
 ## Both Watchlist lists
 
@@ -41,7 +41,7 @@ Why Rigged Outcomes is built the way it is: one row per decision that still hold
 | Five places: 1–3 new steps, 4 gone quiet, 5 an answer due within 3 days | Fresh news leads; a quiet story and a dated reveal still get a place |
 | One search, one step reading and one "already out" check per story, capped by the budget | Open now should cost little |
 | Steps are read by `gemma-4-31b-it` | Its own free allowance, separate from Gemini's |
-| A person approves each step (`STEPS_BY = "person"`) | On new stories the reading found real steps 23 times in 37, under the 8-in-10 bar |
+| The model decides the steps; no one approves a card | The user asked for no review step |
 | Every card is re-checked each day; a released game, film, show, album or book counts as out | An answer already public must never show (GTA VI) |
 
 ## Data and the site
@@ -61,7 +61,7 @@ Why Rigged Outcomes is built the way it is: one row per decision that still hold
 |---|---|
 | A Cloudflare Worker queues and schedules; a Vercel function computes. The GitHub Actions job is gone | Free on both with no card; GitHub keeps only the site build |
 | One every-minute cron that decides in Toronto time; the daily run from 04:00 | Daylight saving is handled in code; 04:00 is just after Gemini's quota resets |
-| Each add and each "Apply decisions now" press is its own run | A second click is never lost |
+| Each add is its own run | A second click is never lost |
 | Steps are deadline-driven and checkpoint each item | A step never runs into Vercel's 300 s limit, and loses at most one item |
 | One live step per lane, one heavy step at a time; only the main lane saves the state | Saves never race, and several calls can share one 2 GB instance |
 | Wake-ups are signed, and a firewall rule denies the rest | Junk traffic never invokes the function |

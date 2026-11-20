@@ -35,7 +35,7 @@ from backend.rubric.scorers import get_scorer
 
 DATA = os.path.join(spec.ROOT, "data", "rubric")
 if spec.ROOT not in sys.path:
-    sys.path.insert(0, spec.ROOT)                 # export.py, add_market.py and the rest live at the root
+    sys.path.insert(0, spec.ROOT)                 # the pipeline/ package (export, add_market, ...) lives at the root
 API = "https://rigged-outcomes-api.parthkj6.workers.dev"
 
 
@@ -200,7 +200,7 @@ def cmd_compare(rubric, a):
 def cmd_pages(rubric, a):
     import requests
     from backend.rubric import store
-    import export
+    from pipeline import export
     index = requests.get(f"{a.api}/api/data/index.json", timeout=60).json()
     out_index = []
     for e in index.get("markets") or []:

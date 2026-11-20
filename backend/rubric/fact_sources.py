@@ -64,7 +64,7 @@ def _news(entry):
 
 
 def _flags(prior, conc, first_x=None, percent=None):
-    import scrape_insiders as si
+    from pipeline import scrape_insiders as si
     first_x = prior <= si.FIRST_X_TRADES if first_x is None else bool(first_x)
     percent = conc >= si.PERCENT_VOLUME if percent is None else bool(percent)
     return {"prior_bet_count": int(prior), "concentration": float(conc), "is_first_x": first_x,
@@ -117,9 +117,9 @@ def from_record(entry, clean_csv, insiders_csv, fills):
 def from_live(name, source, api=API):
     """wallet_facts.Market of a market added on the site: today's flags from its page on the site's API
     (GET only), its fills from Polymarket through `source` (cached), its whales as add_market picks them, joined to the page's rows by wallet."""
-    import add_market as A
+    from pipeline import add_market as A
     import pandas as pd
-    import polymarket_api
+    from pipeline import polymarket_api
     import requests
 
     page = requests.get(f"{api}/api/data/markets/{name}.json", timeout=60)

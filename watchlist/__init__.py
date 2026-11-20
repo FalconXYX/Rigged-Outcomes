@@ -19,17 +19,17 @@ Worker's D1 database, run in steps on Vercel from 04:00 Toronto time:
 
   steps    one handler per job kind: the work, the watched markets, the
            closed list's scan, labels, queries, news, checks and publish,
-           the open list's walk, names, news, readings and publish, the
-           report, and "Apply decisions now". Each step works to its own
+           the open list's walk, names, news, readings and publish, and the
+           report. Each step works to its own
            deadline and resumes where it stopped.
   state    the job's memory between runs: the store tables the lists read
            and write, saved in the site's database. Nothing of the job's is
            kept in git.
   blobs    how the job saves a document there: gzip-compressed, in parts,
            through the API's job endpoints (worker/src/blobs.ts).
-  sync     the job's side of the site's API (worker/): the owner's decisions
-           on the open list's queue, the watched markets that closed (sent
-           to the main page), the catalog, and the run's report.
+  sync     the job's side of the site's API (worker/): the markets to add,
+           the watched markets that closed (sent to the main page), the
+           catalog, and the run's report.
   publish  a list published to the site's data (site:<name>.json).
 
 Run modules from the repo root as `python3 -m watchlist.<module>`. Other
@@ -53,8 +53,8 @@ Layers, bottom up (each imports only the ones above it):
            card sentences, step / leak / odds words, source ranks. Pure; it
            imports nothing from the package, so any module can use it.
 
-The legacy pipeline modules (polymarket_api, and add_market for a market
-added to the main page) are reused, never copied.
+The pipeline package's modules (pipeline.polymarket_api, and pipeline.add_market
+for a market added to the main page) are reused, never copied.
 
 Public API (what the lists build on):
 

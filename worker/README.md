@@ -4,7 +4,7 @@ A Cloudflare Worker (`rigged-outcomes-api`) with one D1 database (`rigged-outcom
 
 | Folder | What |
 |---|---|
-| `src/` | The Worker: routes (`index.ts`), the queue, the cron, wake-ups, the budget ledger, published data, and the visitor, owner and job endpoints |
+| `src/` | The Worker: routes (`index.ts`), the queue, the cron, wake-ups, the budget ledger, published data, and the visitor and job endpoints |
 | `src/contract.ts` | The shared constants, the same as `backend/contract.py` |
 | `migrations/` | The D1 tables |
 | `test/` | Unit tests, a smoke test of every endpoint, and the Python client's test |
@@ -24,7 +24,7 @@ npm run dev                # http://127.0.0.1:8788
 - **Step function:** run `python3 -m backend.dev_server` and set `STEP_URL` in `.dev.vars` to its `/api/step`. With `DEV=on` only a local address is ever woken.
 - **Site:** `cd web && VITE_API_URL=http://localhost:8788 VITE_TURNSTILE_SITEKEY=1x00000000000000000000AA npx vite --port 5190 --strictPort`
 - **Markets:** `WATCHLIST_API_URL=http://localhost:8788 WATCHLIST_JOB_TOKEN=dev-job-token python3 -m backend.site originals` puts the 7 original markets in the local database.
-- **Catalog:** fill it first with `WATCHLIST_API_URL=http://localhost:8788 WATCHLIST_JOB_TOKEN=dev-job-token python3 -m watchlist.sync catalog`. The review page's token is `dev-owner-token`.
+- **Catalog:** fill it first with `WATCHLIST_API_URL=http://localhost:8788 WATCHLIST_JOB_TOKEN=dev-job-token python3 -m watchlist.sync catalog`.
 
 ## Test it
 

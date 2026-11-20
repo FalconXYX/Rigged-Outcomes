@@ -28,8 +28,8 @@ import json
 import os
 from datetime import datetime, timezone
 
-import polymarket_api
-from polymarket_api import GAMMA_API, OPERATORS  # noqa: F401
+from pipeline import polymarket_api
+from pipeline.polymarket_api import GAMMA_API, OPERATORS  # noqa: F401
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SLUG       = "us-strikes-iran-by-february-28-2026-227-967-547-688-589-491-592-418-452-924-384-915-464-672-196-157-993-596-269-535-381-391-471-256-988-997-296-225-762-973-292-827-345-182-558-215-794-879-189-761"

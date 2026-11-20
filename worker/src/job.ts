@@ -1,6 +1,6 @@
-// The daily lists' endpoints, behind JOB_TOKEN (watchlist/sync.py, called from the step function's jobs): what
-// to apply, the open list's review queue, the catalog of what visitors may write to, the watched markets sent to
-// the main page (each gets its add run at once), and the run's report. The job's own data (its memory, the lists,
+// The daily lists' endpoints, behind JOB_TOKEN (watchlist/sync.py, called from the step function's jobs): the
+// run's work, the catalog of what visitors may write to, the watched markets sent to the main page (each gets its
+// add run at once), and the run's report. The job's own data (its memory, the lists,
 // added markets) is in blobs.ts; the queue itself in queue.ts; old rows go in the cron's daily prune (cron.ts).
 
 import { CONTRACT } from "./contract";
@@ -8,7 +8,7 @@ import {
   BODY,
   CONDITION_ID,
   type Ctx,
-  DAY_TEXT,
+  DAY,
   HttpError,
   MARKET_NAME,
   PAGE_NAME,
@@ -25,87 +25,67 @@ import {
   readBody,
   text,
 } from "./lib";
-import { decision } from "./owner";
+import { readBudget } from "./ledger";
 import { forgetMarkers } from "./public";
 import { graphJobs } from "./queue";
 import { wakeReady } from "./wake";
 
-/** opennow offers at most QUEUE_MAX (15) stories a day; twice that leaves room. */
-const QUEUE_ITEMS = 30;
-const QUEUE_DAYS = 7;
-/** One queue item is one row, well under D1's 100 KB statement cap even escaped inside json_each's text (a real item is about 3 KB). */
-const ITEM_BYTES = 60_000;
-
 /**
- * What the job applies: pending decisions (a "withdrawn" one included: the job removes it from its store), the
- * markets on their way to the main page (status approved, each with its run), the stories on the site's
- * watchlist, and the markets added to the main page (`added`: condition id and day; the closed list keeps their
- * picks). A read writes nothing.
+ * The run's work: the markets on their way to the main page (status approved, each with its run), the stories
+ * on the site's watchlist, and the markets added to the main page (`added`: condition id and day; the closed
+ * list keeps their picks). A read writes nothing.
  */
 export async function work({ env, clock }: Ctx): Promise<Response> {
   const at = await clock();
-  const [decisions, requests, watched, added] = await env.DB.batch([
-    env.DB.prepare("SELECT * FROM open_decisions WHERE applied_at IS NULL ORDER BY decided_at"),
+  const [requests, watched, added] = await env.DB.batch([
     env.DB.prepare("SELECT * FROM requests WHERE status = 'approved' ORDER BY decided_at"),
     env.DB.prepare("SELECT story FROM watches ORDER BY story"),
     env.DB.prepare("SELECT condition_id, day FROM requests WHERE status = 'added' ORDER BY day, condition_id"),
   ]);
-  return json({ now: at, decisions: decisions.results.map(decision), requests: requests.results, watched: watched.results, added: added.results });
+  return json({ now: at, requests: requests.results, watched: watched.results, added: added.results });
 }
 
 /**
- * Replace one day's review queue (opennow's `awaiting`, each candidate with its headline key), keeping 7 days. The
- * newest day sent is kept as settings.queue_day ({day, run_at, steps_by}), so a day with nothing to check still
- * reads as that day's queue, empty.
+ * The backend at a glance, read only (python3 -m backend.status): the budget, each lane's pause and wake-ups,
+ * the latest 15 runs, the failed jobs of the last 14 days (latest 10), the markets sent to the main page (not
+ * yet added, or added in the last 30 days) and the latest 10 run reports.
  */
-export async function putQueue({ req, env }: Ctx): Promise<Response> {
-  const body = await readBody(req, BODY.job);
-  const day = text(body.day, "day", 10);
-  if (!DAY_TEXT.test(day)) fail(400, "bad_request", "day must be YYYY-MM-DD.");
-  const runAt = text(body.run_at, "run_at", 40);
-  const stepsBy = oneOf(body.steps_by, "steps_by", ["person", "model"] as const);
-  const items = list(body.items, "items", QUEUE_ITEMS).map((v, i) => {
-    const item = obj(v, `items[${i}]`);
-    const n = int(item.n, `items[${i}].n`);
-    const story = text(item.story, `items[${i}].story`, 200);
-    list(item.candidates, `items[${i}].candidates`, 100).forEach((c, j) => {
-      const at = `items[${i}].candidates[${j}]`;
-      const cand = obj(c, at);
-      text(cand.key, `${at}.key`, 500);
-      if (cand.url != null) cand.url = link(cand.url, 4000); // the review page renders these as links (Google News's run long)
-    });
-    if (item.url != null) item.url = link(item.url, 1000);
-    const data = JSON.stringify(item);
-    if (data.length > ITEM_BYTES) fail(413, "too_large", `The queue item for "${story}" is over ${ITEM_BYTES} bytes.`);
-    return { n, story, data };
-  });
-  if (new Set(items.map((i) => i.story)).size !== items.length) fail(400, "bad_request", "A story is in the queue twice.");
-
-  const at = now();
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM open_queue WHERE day = ?").bind(day),
-    ...jsonChunks(items).map((chunk) =>
-      env.DB.prepare(
-        `INSERT INTO open_queue (day, story, n, item, run_at, steps_by, pushed_at)
-         SELECT ?1, json_extract(value, '$.story'), json_extract(value, '$.n'), json_extract(value, '$.data'), ?2, ?3, ?4 FROM json_each(?5)`,
-      ).bind(day, runAt, stepsBy, at, chunk),
-    ),
+export async function status({ env, clock }: Ctx): Promise<Response> {
+  const at = await clock();
+  const [budget, lanes, runs, failed, requests, reports] = await env.DB.batch([
+    env.DB.prepare("SELECT value FROM settings WHERE key = 'budget'"),
+    env.DB.prepare("SELECT lane, paused_until, unanswered, last_wake_at, last_claim_at, wake_error FROM lanes ORDER BY lane"),
     env.DB.prepare(
-      `INSERT INTO settings (key, value, updated_at) VALUES ('queue_day', ?1, ?2)
-       ON CONFLICT (key) DO UPDATE SET value = ?1, updated_at = ?2 WHERE json_extract(?1, '$.day') >= json_extract(settings.value, '$.day')`,
-    ).bind(JSON.stringify({ day, run_at: runAt, steps_by: stepsBy }), at),
-    pruneQueue(env),
+      "SELECT id, kind, slot, state, created_at, started_at, finished_at, deadline, meta FROM runs ORDER BY created_at DESC, id DESC LIMIT 15",
+    ),
+    env.DB.prepare("SELECT id, kind, error, updated_at FROM jobs WHERE state = 'failed' AND updated_at >= ? ORDER BY updated_at DESC LIMIT 10").bind(
+      at - 14 * DAY,
+    ),
+    env.DB.prepare("SELECT * FROM requests WHERE status != 'added' OR done_at >= ? ORDER BY requested_at DESC LIMIT 200").bind(at - 30 * DAY),
+    env.DB.prepare("SELECT * FROM job_runs ORDER BY id DESC LIMIT 10"),
   ]);
-  return noContent();
+  const meta = (v: string) => {
+    try {
+      return JSON.parse(v) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  };
+  return json({
+    now: at,
+    budget: readBudget((budget.results[0] as { value?: string } | undefined)?.value),
+    lanes: lanes.results,
+    runs: (runs.results as { meta: string }[]).map((r) => ({ ...r, meta: meta(r.meta) })),
+    failed_jobs: failed.results,
+    requests: requests.results,
+    reports: reports.results,
+  });
 }
-
-export const pruneQueue = (env: Ctx["env"]) =>
-  env.DB.prepare(`DELETE FROM open_queue WHERE day NOT IN (SELECT DISTINCT day FROM open_queue ORDER BY day DESC LIMIT ${QUEUE_DAYS})`);
 
 /** Text cut to max characters, or null when it isn't text. */
 const clip = (v: unknown, max: number) => (typeof v === "string" && v ? v.slice(0, max) : null);
 
-/** A link the review page may render (https only: never javascript: or data:), up to max characters, or null. */
+/** A link the site may render (https only: never javascript: or data:), up to max characters, or null. */
 const link = (v: unknown, max = 500) =>
   typeof v === "string" && v.length <= max && /^https:\/\/[^\s"<>]+$/.test(v) ? v : null;
 
@@ -266,26 +246,16 @@ export async function addRequests({ req, env, clock, waitUntil }: Ctx): Promise<
 }
 
 /**
- * The run's report. `applied`: decisions the job saved and pushed, marked applied only while their decided_at is
- * unchanged (one decided again meanwhile stays pending); a withdrawn one the job has removed from its store goes.
- * `requests`: what adding the markets did (the page name the job gave one is kept), recorded only while it is
+ * The run's report. `requests`: what adding the markets did (the page name the job gave one is kept), recorded only while it is
  * still approved. `watched`: the watchlist's stories the job is done with (their market sent to the main page,
  * or on it already), each taken off the watchlist once the catalog's open cards no longer list it. `run`: one
  * job_runs row. Old rows go in the cron's daily prune (cron.ts).
  */
 export async function done({ req, env }: Ctx): Promise<Response> {
   // Only what identifies a row is strict here; a long note or summary is cut and a link that isn't https:// is
-  // dropped, so a cosmetic slip can't cost the report its "applied" marks.
+  // dropped, so a cosmetic slip can't cost the report its request marks.
   const body = await readBody(req, BODY.job);
   const at = now();
-  const applied = list(body.applied ?? [], "applied", 2000).map((v, i) => {
-    const a = obj(v, `applied[${i}]`);
-    return {
-      story: text(a.story, `applied[${i}].story`, 200),
-      key: text(a.headline_key, `applied[${i}].headline_key`, 500),
-      at: int(a.decided_at, `applied[${i}].decided_at`),
-    };
-  });
   const requests = list(body.requests ?? [], "requests", 200).map((v, i) => {
     const r = obj(v, `requests[${i}]`);
     const cid = text(r.condition_id, `requests[${i}].condition_id`, 66).toLowerCase();
@@ -304,7 +274,7 @@ export async function done({ req, env }: Ctx): Promise<Response> {
       : (() => {
           const r = obj(body.run, "run");
           return {
-            mode: oneOf(r.mode, "run.mode", ["full", "apply", "local"] as const),
+            mode: oneOf(r.mode, "run.mode", ["full", "local"] as const),
             status: oneOf(r.status, "run.status", ["success", "partial", "failure"] as const),
             started_at: int(r.started_at, "run.started_at"),
             finished_at: int(r.finished_at, "run.finished_at"),
@@ -314,17 +284,6 @@ export async function done({ req, env }: Ctx): Promise<Response> {
         })();
 
   const statements: D1PreparedStatement[] = [];
-  for (const chunk of jsonChunks(applied)) {
-    const reported = `(story, headline_key, decided_at) IN
-      (SELECT json_extract(value, '$.story'), json_extract(value, '$.key'), json_extract(value, '$.at') FROM json_each(?1))`;
-    statements.push(
-      env.DB.prepare(`DELETE FROM open_decisions WHERE decision = 'withdrawn' AND ${reported}`).bind(chunk),
-      env.DB.prepare(`UPDATE open_decisions SET applied_at = ?2 WHERE applied_at IS NULL AND decision != 'withdrawn' AND ${reported}`).bind(
-        chunk,
-        at,
-      ),
-    );
-  }
   for (const chunk of jsonChunks(requests)) {
     statements.push(
       env.DB.prepare(

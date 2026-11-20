@@ -31,8 +31,8 @@ import test_add_pipeline as P  # noqa: E402
 import test_backend_fakeworker as F  # noqa: E402
 import test_rubric_scoring as S  # noqa: E402
 
-import add_market as A  # noqa: E402
-import polymarket_api as api  # noqa: E402
+from pipeline import add_market as A  # noqa: E402
+from pipeline import polymarket_api as api  # noqa: E402
 from backend import add_steps  # noqa: E402
 from backend.rubric import scorers, spec, steps, store  # noqa: E402
 from watchlist import ai, blobs  # noqa: E402
@@ -98,8 +98,8 @@ def add_run(w, slot=1):
 
 
 def score_run(w, name, slot):
-    rid = f"apply:rubric-{slot}"
-    w.runs[rid] = {"id": rid, "kind": "apply", "slot": f"rubric-{slot}", "state": "queued", "meta": {},
+    rid = f"add:rubric-{slot}"                    # a re-score is add-lane work (the apply run kind is gone)
+    w.runs[rid] = {"id": rid, "kind": "add", "slot": f"rubric-{slot}", "state": "queued", "meta": {},
                    "deadline": w.now() + 3600}
     w._insert(rid, "wallets.score", "0", {"name": name}, [])
     return rid

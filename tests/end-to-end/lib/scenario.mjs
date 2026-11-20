@@ -6,7 +6,6 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { failedJobs } from "./outcome.mjs";
 import { secs, sleep } from "./proc.mjs";
-import { OWNER_TOKEN } from "./worker.mjs";
 
 /** Words that would hedge on screen (a card's or a panel's own text). */
 export const HEDGE = /not available|not updated|paused|trial|beta|pending|queued|waiting|may take|up to|within|later|soon|delay|hour|minute|a day|next run|scheduled/i;
@@ -137,31 +136,12 @@ export async function openWatchlist(browser, stack, pick, { timezoneId } = {}) {
 /** The visitor API's record of an add ({request: {...}} or {}). */
 export const request = (stack, pick) => fetch(`${stack.urls.api}/api/request?cid=${pick.condition_id}`).then((r) => r.json(), () => ({}));
 
-/** The owner's review page in a context of its own: the text of its Status and Backend sections. */
-export async function ownerSees(browser, stack) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  const page = await context.newPage();
-  try {
-    await page.goto(`${stack.urls.site}#/review`);
-    await page.locator("form.rv-unlock input[type=password]").fill(OWNER_TOKEN);
-    await page.locator(".rv-unlock button[type=submit]").click();
-    const status = page.locator('section[aria-label="Status"]');
-    await status.waitFor({ timeout: 30_000 });
-    const backend = page.locator("section[aria-labelledby=rv-backend]");
-    return norm(`${await status.innerText()} ${(await backend.count()) ? await backend.innerText() : ""}`);
-  } catch (e) {
-    return `(the review page did not open: ${e.message.split("\n")[0]})`;
-  } finally {
-    await context.close();
-  }
-}
-
 // ---------- what the backend did ----------
 
-/** The add runs of a condition id, newest first (from the owner's overview). */
+/** The add runs of a condition id, newest first (from the backend's status). */
 export async function addRuns(stack, cid) {
-  const o = await stack.overview();
-  return (o?.backend?.runs ?? []).filter((r) => r.kind === "add" && String(r.slot).startsWith(`${cid}:`));
+  const o = await stack.status();
+  return (o?.runs ?? []).filter((r) => r.kind === "add" && String(r.slot).startsWith(`${cid}:`));
 }
 
 /** One line on a run: its state, when it was made, first claimed and finished (seconds after `t0` ms), its jobs. */

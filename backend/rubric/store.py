@@ -81,7 +81,7 @@ def record_of(c, name):
 def publish_page(c, name, part, now=None, by="vercel"):
     """Build the market's page again from its record with the page part attached and save it (page, record,
     index entry). Returns {"name", "v"}, or None when the market has no record."""
-    import add_market
+    from pipeline import add_market
     from backend import site
     got = record_of(c, name)
     if got is None:

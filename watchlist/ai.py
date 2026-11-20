@@ -1234,7 +1234,7 @@ if __name__ == "__main__":
     ap.add_argument("--slug", help="label one market by slug and print the label")
     args = ap.parse_args()
     if args.slug:
-        import polymarket_api
+        from pipeline import polymarket_api
         m = polymarket_api.fetch_market(args.slug)
         print(json.dumps(label_markets([m], refresh=args.refresh), indent=1, ensure_ascii=False))
     elif args.demo:

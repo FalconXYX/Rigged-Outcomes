@@ -7,7 +7,7 @@ and both lists depend on what earlier runs stored: the closed list's
 checks and AI labels (a market is never asked about twice), the open list's
 99c check at an event's first entry (it must never run again: a later jump
 to 99c may be the very case the list is for), its filings, readings, days
-and cards, and a person's decisions. Nothing else in the store is kept
+and cards. Nothing else in the store is kept
 (trade CSVs, wallet look-ups, the earlier scans' results): no list reads it.
 The published lists are saved beside it (site:closed.json, site:open.json,
 put by the daily run's publish steps); the news searches are rows of the
@@ -42,7 +42,7 @@ with no API, an API that does not answer or refuses the token (a runner
 that could not read the saved state must never start from nothing: it would
 record every first-entry 99c check again at today's prices), files that do
 not match their manifest, and a local store holding anything newer than the
-saved state (an open-list day, a decision or a closed check made since):
+saved state (an open-list day or a closed check made since):
 --force replaces the local copy, after backing it up. A fresh database (no
 blob at all but the added markets) is no refusal: the run starts from the
 local store as it is, with a warning, and its push saves the first state.
@@ -62,7 +62,7 @@ for the run's report (watchlist.problems).
 prune removes only what no list reads again: readings over 60 days old
 (the longest look back is the open list's 22-day step history; sooner, but
 never inside 23 days, if the file would grow past ANSWERS_MAX_BYTES), closed
-checks over 45 days old, and the bulky notes (the queue, the seen step
+checks over 45 days old, and the bulky notes (the seen step
 headlines, the held-back stories) of open-list days over 16 days old, except
 the latest updated day's, which the next run reads.
 """
@@ -91,11 +91,9 @@ TABLES = {
     "open_runs": ("day",),
     "open_cards": ("day", "story"),
     "open_listed": ("ident", "day", "story"),
-    "open_reviews": ("story", "headline_key"),
 }
 # The newest stamps: a pull never replaces a store holding something newer than these (without --force)
 LATEST = {"open_runs.run_at": ("open_runs", "run_at"),
-          "open_reviews.decided_at": ("open_reviews", "decided_at"),
           "closed_checks.created_at": ("closed_checks", "created_at")}
 SITE_FILES = ("closed.json", "open.json")
 BACKUPS_KEPT = 3                  # local store copies a pull keeps (watchlist.db.bak-<UTC stamp>)
@@ -104,7 +102,7 @@ ANSWERS_FLOOR_DAYS = K.LIVE_DAYS + 2
 ANSWERS_MAX_BYTES = 30_000_000    # past this, readings go sooner (never inside ANSWERS_FLOOR_DAYS)
 CHECKS_DAYS = 45                  # closed checks kept this long (a market closes once; the job recomputes 2 days)
 RUN_NOTES_DAYS = 16               # open-list days older than this lose their bulky notes
-BULKY_INFO = ("awaiting", "seen_step_headlines", "held_back_stories")
+BULKY_INFO = ("awaiting", "seen_step_headlines", "held_back_stories")   # "awaiting": older days' notes
 # a reading that found a story answered is kept: it keeps the story off the open list for good
 KEEP_ANSWERED = "COALESCE(json_extract(data, '$.answered'), 0) = 0"
 PATIENT_WAITS = (2, 8, 30, 60, 120, 300, 300)  # seconds before each retry of a call here (sync.Client): ~14 min

@@ -30,10 +30,6 @@ Tables (all times are UTC epoch seconds unless the column says _iso/_day):
   open_listed    every event id, event slug and market slug of a shown card,
                  per day: open_listed_since() for the closed list's "On the
                  open list from" line.
-  open_reviews   a person's decisions on the open list's queue: a headline is
-                 a step or not a step for a story, a dated answer's card is
-                 approved or not. They override the step reading: an approved
-                 headline always counts, a rejected one never shows.
 
 One connection per process is shared across threads (check_same_thread is
 off) and every statement runs under LOCK, which is simpler than a
@@ -135,16 +131,6 @@ CREATE TABLE IF NOT EXISTS open_listed (
     day   TEXT NOT NULL,
     story TEXT NOT NULL,
     PRIMARY KEY (ident, day, story)
-);
--- a person's decisions on the open list's approval queue
-CREATE TABLE IF NOT EXISTS open_reviews (
-    story        TEXT NOT NULL,
-    headline_key TEXT NOT NULL,              -- the headline's folded title, or "card" for a dated answer's card
-    decision     TEXT NOT NULL,              -- step | not a step | card approved
-    headline     TEXT,                       -- JSON {title, source, published, url}
-    decided_by   TEXT,
-    decided_at   INTEGER NOT NULL,
-    PRIMARY KEY (story, headline_key)
 );
 """
 
@@ -415,39 +401,6 @@ def open_story_days(conn, story):
     with LOCK:
         return [r["day"] for r in conn.execute("SELECT day FROM open_cards WHERE story=? ORDER BY day",
                                                (story,)).fetchall()]
-
-
-def save_review(conn, story, headline_key, decision, headline=None, by="person", at=None):
-    """Record a person's decision on the open list's queue (replacing an
-    earlier one on the same story and headline): decision "step", "not a
-    step" or "card approved"; headline_key "card" for a dated answer."""
-    with transaction(conn):
-        conn.execute("INSERT OR REPLACE INTO open_reviews (story, headline_key, decision, headline, decided_by, "
-                     "decided_at) VALUES (?,?,?,?,?,?)",
-                     (story, headline_key, decision, _json(headline) if headline else None, by,
-                      int(at) if at is not None else now_epoch()))
-
-
-def delete_review(conn, story, headline_key, by=None):
-    """Remove a person's decision on the open list's queue (the review page
-    took it back), only one recorded as made `by` when given; the headline
-    is then awaiting a decision again. True when one was removed."""
-    with transaction(conn):
-        cur = conn.execute("DELETE FROM open_reviews WHERE story = ? AND headline_key = ?"
-                           + (" AND decided_by = ?" if by else ""), (story, headline_key) + ((by,) if by else ()))
-    return cur.rowcount > 0
-
-
-def open_reviews(conn):
-    """{story: {headline key: {"decision", "headline", "decided_by", "decided_at"}}}: every decision a person made."""
-    out = {}
-    with LOCK:
-        rows = conn.execute("SELECT * FROM open_reviews").fetchall()
-    for r in rows:
-        out.setdefault(r["story"], {})[r["headline_key"]] = {
-            "decision": r["decision"], "headline": json.loads(r["headline"]) if r["headline"] else None,
-            "decided_by": r["decided_by"], "decided_at": r["decided_at"]}
-    return out
 
 
 def open_listed_card(conn, idents):

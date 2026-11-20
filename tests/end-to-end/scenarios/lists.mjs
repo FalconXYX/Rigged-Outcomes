@@ -10,7 +10,7 @@
 //               the page shows exactly 3 cards for it
 //   released    the GTA VI card is gone from the published Open now list and from the page (its game is out, so
 //               its answer is public), and its story is recorded as answered
-//   toronto     with the browser in Tokyo and in UTC, every page (home, a market, the Watchlist, the review page)
+//   toronto     with the browser in Tokyo and in UTC, every page (home, a market, the Watchlist)
 //               shows Toronto days and times ("ET") and never "UTC"; Open now's "Updated" time is the run's in
 //               Toronto; the daily run's day is Toronto's
 //
@@ -27,7 +27,6 @@ import { launch } from "../lib/browser.mjs";
 import { secs, sleep } from "../lib/proc.mjs";
 import { Report, norm, runLine } from "../lib/scenario.mjs";
 import { toronto } from "../lib/toronto.mjs";
-import { OWNER_TOKEN } from "../lib/worker.mjs";
 import { parseArgs, stackOptions, startStack } from "../stack.mjs";
 
 const args = parseArgs(process.argv.slice(2));
@@ -76,8 +75,7 @@ OPEN = os.path.join("web", "public", "data", "open.json")
 doc = json.load(open(OPEN))
 day = doc["days"][0] if doc.get("days") else None
 if day is None or day["day"] != today:
-    day = {"day": today, "status": "updated", "run_at": local_iso(now), "cards": [], "new_today": 0, "held_back": 0,
-           "awaiting": 0}
+    day = {"day": today, "status": "updated", "run_at": local_iso(now), "cards": [], "new_today": 0, "held_back": 0}
     doc["days"] = [day] + list(doc.get("days") or [])
 day["cards"] = list(day["cards"]) + [card]
 with open(OPEN, "w") as fh:
@@ -242,16 +240,6 @@ try {
       const updated = body.match(/Updated ([A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2} ET)/i)?.[1] ?? null;
       notes.push(`${tz} Open now "Updated ${updated}" (the run's Toronto time: ${stamps.join(" or ")})`);
       ok &&= !!updated && stamps.map((x) => x.toUpperCase()).includes(updated.toUpperCase());
-      await p.goto(`${stack.urls.site}#/review`);
-      await p.locator("form.rv-unlock input[type=password]").fill(OWNER_TOKEN);
-      await p.locator(".rv-unlock button[type=submit]").click();
-      await p.locator("section[aria-labelledby=rv-backend]").waitFor({ timeout: 30_000 });
-      await sleep(1000);
-      const bad = await utcLines(p);
-      const backend = norm(await p.locator("section[aria-labelledby=rv-backend]").innerText());
-      const ranET = /\d{2}:\d{2}(–\d{2}:\d{2})? ET/.test(backend);
-      notes.push(`${tz} review page: ${bad.length ? `UTC in "${bad.slice(0, 2).join(" | ")}"` : "no UTC"}, the runs' times ${ranET ? "in ET" : "not in ET"}`);
-      ok &&= !bad.length && ranET;
       await ctx.close();
     }
     const runDay = (await stack.run(daily))?.run;

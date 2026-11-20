@@ -7,18 +7,15 @@ a fake HTTP layer, temporary files, an in-memory store. No network.
 
 Covers no API configured (every command a no-op that exits 0, an empty
 work.json), retries (a 5xx or a network error, never a 4xx) and the token
-never printed, the queue's candidate keys, decisions saved twice harmlessly,
-withdrawn ones taken out of the store, and the apply-mode rebuild, each
-market to add sent to add_market (a market with no page name sent without
+never printed, each market to add sent to add_market (a market with no page name sent without
 one, so it is named from its slug) with the markets added before, and its
 result saved in the database (the fake API, tests/fake_api.py) as a new
 market:<name>, one the database did not answer for left for the next run
 and one it refused reported failed, a step killed part way through adding a
 market still reporting it as failed, the catalog from the published files
-and the added markets, and the run's report: decisions counted as applied
-only once this run saved the state, added and failed markets, results older
-than the run never, and a catch-up run's report (no run sent). And how an add
-or a decision that comes in during a run is never left for the next day:
+and the added markets, and the run's report: added and failed markets,
+results older than the run never, and a catch-up run's report (no run sent).
+And how an add that comes in during a run is never left for the next day:
 the API's time of each read of the work (read_at), the markets to add read
 again right before they are added (add --refresh).
 """
@@ -102,21 +99,9 @@ def captured():
 
 
 def a_day(conn):
-    """A stored open-list day with a queue: one item with two candidate headlines, one dated card."""
+    """A stored open-list day with one card."""
     card = {"id": "jane roe", "place": "new step", "label": "new", "listed_since": "2026-11-13", "question": "Q?"}
-    awaiting = [
-        {"n": 1, "story": "jane roe", "place": "new step", "why": "awaiting approval", "kind": "us_official",
-         "group": 1, "question": "Will Jane Roe leave?", "who_knows": "The President.", "polymarket": "Roe out?",
-         "url": "https://polymarket.com/event/e1", "reveal": None, "model_copy_unmatched": [],
-         "candidates": [{"title": "White House  weighs Jane Roe’s future", "source": "Reuters",
-                         "published": "2026-11-13T01:00:00Z", "url": "https://r/1"},
-                        {"title": "Roe prepares exit", "source": "AP", "published": None, "url": None}]},
-        {"n": 2, "story": "turner", "place": "dated", "why": "dated, on the list", "kind": "jury_prize", "group": 2,
-         "question": "Who wins?", "who_knows": "The jury.", "polymarket": "Turner?", "url": "https://p/2",
-         "reveal": "2026-11-15", "model_copy_unmatched": [], "candidates": []}]
-    store.save_open_day(conn, "2026-11-13", "updated", NOW - 3600, [card],
-                        info={"awaiting": awaiting, "steps_by": "person", "new_today": 1})
-    return awaiting
+    store.save_open_day(conn, "2026-11-13", "updated", NOW - 3600, [card], info={"new_today": 1})
 
 
 def test_no_api_is_a_no_op():
@@ -129,7 +114,7 @@ def test_no_api_is_a_no_op():
             assert sync.main(["catalog", "--closed", os.path.join(tmp, "x"), "--open", os.path.join(tmp, "y")]) == 0
         assert "No API configured" in text.getvalue()
         assert json.load(open(out)) == {"fetched_at": json.load(open(out))["fetched_at"], "configured": False,
-                                        "decisions": [], "requests": [], "watched": [], "added": []}
+                                        "requests": [], "watched": [], "added": []}
         conn = store.connect(":memory:")
         with captured():
             assert sync.push(None, conn, tmp, "full", "success", NOW) is None
@@ -154,7 +139,7 @@ def test_settings_come_from_the_env_file():
 
 def test_retries_and_the_token_never_printed():
     c, waits = fake_client([(503, {"error": "server"}), requests.ConnectionError(f"boom {TOKEN}"),
-                            (200, {"decisions": [], "requests": [], "watched": [{"story": "s"}]})])
+                            (200, {"requests": [], "watched": [{"story": "s"}]})])
     assert c.request("GET", "/api/job/work")["watched"] == [{"story": "s"}]
     assert waits == [2, 8]
     call = c.session.calls[0]
@@ -171,7 +156,7 @@ def test_retries_and_the_token_never_printed():
         out = os.path.join(tmp, "work.json")
         c, waits = fake_client([requests.ConnectionError(f"down {TOKEN}")] * 4)
         doc = sync.pull(c, out, now=NOW)
-        assert waits == list(sync.RETRY_WAITS) and doc["configured"] and doc["decisions"] == [] and doc["error"]
+        assert waits == list(sync.RETRY_WAITS) and doc["configured"] and doc["requests"] == [] and doc["error"]
         conn = store.connect(":memory:")
         a_day(conn)
         c, _ = fake_client([(502, b"<html>error 1027</html>")] * 20)
@@ -190,11 +175,11 @@ def test_retries_and_the_token_never_printed():
 def test_pull_writes_work():
     with tempfile.TemporaryDirectory() as tmp:
         with captured():
-            c, _ = fake_client([(200, {"now": NOW, "decisions": [{"story": "s"}],
+            c, _ = fake_client([(200, {"now": NOW,
                                        "requests": [{"status": "approved", "condition_id": "0x1"}],
                                        "watched": [], "added": [{"condition_id": "0x2", "day": "2026-11-12"}]})])
             doc = sync.pull(c, os.path.join(tmp, "work.json"), now=NOW)
-        assert doc["decisions"] == [{"story": "s"}] and json.load(open(os.path.join(tmp, "work.json")))["requests"]
+        assert "decisions" not in doc and json.load(open(os.path.join(tmp, "work.json")))["requests"]
         # the markets added to the main page, for the closed list (their picks stay on their day)
         from watchlist import upsets
         assert upsets.load_requested(os.path.join(tmp, "work.json")) == {"0x1", "0x2"}
@@ -202,131 +187,7 @@ def test_pull_writes_work():
         assert doc["read_at"] == NOW
 
 
-def test_queue_payload_carries_each_key():
-    conn = store.connect(":memory:")
-    assert sync.queue_payload(conn) is None
-    awaiting = a_day(conn)
-    q = sync.queue_payload(conn)
-    assert q["day"] == "2026-11-13" and q["run_at"] == "2026-11-14T03:17:00Z" and q["steps_by"] == "person"
-    assert len(q["items"]) == 2 and q["items"][0]["n"] == 1
-    keys = [h["key"] for h in q["items"][0]["candidates"]]
-    assert keys == [O.headline_key(h) for h in awaiting[0]["candidates"]] == \
-        ["white house weighs jane roe's future", "roe prepares exit"]
-    assert q["items"][1]["candidates"] == []
-    assert set(q["items"][0]) == set(awaiting[0])                       # the QueueItem shape, nothing more
-
-
-def decisions():
-    h = {"title": "White House weighs Jane Roe's future", "source": "Reuters", "published": "2026-11-13T01:00:00Z",
-         "url": "https://r/1"}
-    return [{"story": "jane roe", "headline_key": O.headline_key(h), "decision": "step", "headline": h,
-             "day": "2026-11-13", "decided_at": NOW - 600, "applied_at": None},
-            {"story": "turner", "headline_key": "card", "decision": "not a step", "headline": None,
-             "day": "2026-11-13", "decided_at": NOW - 500, "applied_at": None},
-            {"story": "bad", "headline_key": "", "decision": "maybe", "headline": None, "day": "x",
-             "decided_at": 1, "applied_at": None}]
-
-
-def test_decisions_saved_twice_are_harmless():
-    conn = store.connect(":memory:")
-    with tempfile.TemporaryDirectory() as tmp, captured():
-        res = os.path.join(tmp, "decide_results.json")
-        first = sync.decide(conn, {"decisions": decisions()}, "full", res, now=NOW)
-        reviews = store.open_reviews(conn)
-        second = sync.decide(conn, {"decisions": decisions()}, "full", res, now=NOW + 1)
-        assert store.open_reviews(conn) == reviews and first["saved"] == second["saved"]
-    assert [s["story"] for s in first["saved"]] == ["jane roe", "turner"]          # the unreadable one skipped
-    assert reviews["jane roe"]["white house weighs jane roe's future"]["decision"] == "step"
-    assert reviews["jane roe"]["white house weighs jane roe's future"]["decided_by"] == sync.DECIDED_BY
-    assert reviews["turner"]["card"] == {"decision": "not a step", "headline": None, "decided_by": sync.DECIDED_BY,
-                                         "decided_at": NOW - 500}
-    assert not first["rebuilt"]
-
-
-def test_a_withdrawn_decision_leaves_the_store():
-    """A decision the owner took back after a run saved it: the next run removes it from the store (only one the
-    review page made), reports it so the API drops it, and an apply run rebuilds only when something changed."""
-    conn = store.connect(":memory:")
-    calls = []
-    rebuild = lambda c, out_path: calls.append(out_path) or {"status": "updated"}  # noqa: E731
-    with tempfile.TemporaryDirectory() as tmp, captured():
-        res = os.path.join(tmp, "decide_results.json")
-        sync.decide(conn, {"decisions": decisions()}, "full", res, now=NOW)
-        store.save_review(conn, "turner", "by hand", "step", {"title": "By hand"}, by="person", at=NOW - 50)
-        key = decisions()[0]["headline_key"]
-        gone = [{"story": "jane roe", "headline_key": key, "decision": "withdrawn", "headline": None,
-                 "day": "2026-11-13", "decided_at": NOW - 100, "applied_at": None},
-                {"story": "turner", "headline_key": "by hand", "decision": "withdrawn", "headline": None,
-                 "day": "2026-11-13", "decided_at": NOW - 90, "applied_at": None}]
-        got = sync.decide(conn, {"decisions": gone}, "apply", res, rebuild=rebuild, now=NOW + 10)
-        reviews = store.open_reviews(conn)
-        assert key not in reviews.get("jane roe", {})                    # the review page's decision is gone
-        assert reviews["turner"]["by hand"]["decided_by"] == "person"    # one made on the command line stays
-        assert got["saved"] == [{"story": "jane roe", "headline_key": key, "decided_at": NOW - 100, "withdrawn": True},
-                                {"story": "turner", "headline_key": "by hand", "decided_at": NOW - 90, "withdrawn": True}]
-        assert calls == [sync.OPEN_JSON] and got["rebuilt"]
-        again = sync.decide(conn, {"decisions": gone}, "apply", res, rebuild=rebuild, now=NOW + 20)
-        assert len(again["saved"]) == 2 and len(calls) == 1               # nothing left to remove: no rebuild
-
-
-def test_apply_mode_rebuilds_the_reviewed_day():
-    conn = store.connect(":memory:")
-    calls = []
-    with tempfile.TemporaryDirectory() as tmp, captured():
-        res = os.path.join(tmp, "decide_results.json")
-        rebuild = lambda c, out_path: calls.append(out_path) or {"status": "updated"}  # noqa: E731
-        got = sync.decide(conn, {"decisions": decisions()}, "apply", res, open_out="/x/open.json", rebuild=rebuild,
-                          now=NOW)
-        assert calls == ["/x/open.json"] and got["rebuilt"] and json.load(open(res))["rebuilt"]
-        sync.decide(conn, {"decisions": []}, "apply", res, rebuild=rebuild, now=NOW)     # nothing saved: no rebuild
-        assert len(calls) == 1
-
-        # a rebuild that fails still leaves the saved decisions on record
-        def broken(c, out_path):
-            raise RuntimeError("model down")
-        try:
-            sync.decide(conn, {"decisions": decisions()}, "apply", res, rebuild=broken, now=NOW + 5)
-            raise AssertionError("no error")
-        except RuntimeError:
-            pass
-        assert len(json.load(open(res))["saved"]) == 2 and json.load(open(res))["at"] == NOW + 5
-
-
-def test_a_crashed_rebuild_leaves_its_decisions_pending():
-    # apply mode: the rebuild's start is on record (decide_results.json "rebuilding"), so a rebuild that crashed
-    # (or a step stopped part way) is never reported applied, even once the state was saved: the decisions stay
-    # pending and the next run applies them again; a rebuild that ran is reported as before
-    conn = store.connect(":memory:")
-    with tempfile.TemporaryDirectory() as job, captured():
-        res = os.path.join(job, "decide_results.json")
-
-        def broken(c, out_path):
-            raise RuntimeError("a bug in the rebuild")
-        try:
-            sync.decide(conn, {"decisions": decisions()}, "apply", res, rebuild=broken, now=NOW + 5)
-            raise AssertionError("no error")
-        except RuntimeError:
-            pass
-        assert json.load(open(res))["rebuilding"] is True and len(json.load(open(res))["saved"]) == 2
-        json.dump({"ok": True, "version": "a" * 32, "changed": True, "at": NOW + 30},
-                  open(os.path.join(job, "state_pushed.json"), "w"))
-        assert sync.done_payload(conn, job, "apply", "partial", NOW)["applied"] == []
-        fine = lambda c, out_path: {"status": "updated"}  # noqa: E731
-        sync.decide(conn, {"decisions": decisions()}, "apply", res, rebuild=fine, now=NOW + 6)
-        assert "rebuilding" not in json.load(open(res)) and json.load(open(res))["rebuilt"]
-        assert len(sync.done_payload(conn, job, "apply", "success", NOW)["applied"]) == 2
-        # full and local runs rebuild nothing: their saved decisions are reported once the state is saved
-        sync.decide(conn, {"decisions": decisions()}, "full", res, now=NOW + 7)
-        assert len(sync.done_payload(conn, job, "full", "success", NOW)["applied"]) == 2
-
-
-def _files(job, pushed_at=None, decided_at=None, added_at=None, results=None):
-    if pushed_at is not None:
-        json.dump({"ok": True, "version": "a" * 32, "changed": True, "at": pushed_at},
-                  open(os.path.join(job, "state_pushed.json"), "w"))
-    if decided_at is not None:
-        json.dump({"saved": [{"story": "jane roe", "headline_key": "k", "decided_at": 5}], "rebuilt": False,
-                   "at": decided_at}, open(os.path.join(job, "decide_results.json"), "w"))
+def _files(job, added_at=None, results=None):
     if added_at is not None:
         json.dump({"results": results, "at": added_at}, open(os.path.join(job, "add_results.json"), "w"))
 
@@ -339,21 +200,13 @@ RESULTS = [{"condition_id": "0x1", "status": "added", "name": "gemini-carbon", "
             "saved": False}]
 
 
-def test_applied_only_once_this_run_pushed_the_state():
+def test_the_report_names_the_run():
     conn = store.connect(":memory:")
-    started = NOW
     with tempfile.TemporaryDirectory() as job:
-        body = sync.done_payload(conn, job, "full", "success", started, now=NOW + 60)
-        assert body["applied"] == [] and body["requests"] == []
-        _files(job, pushed_at=started - 86_400, decided_at=started + 10)          # yesterday's save
-        assert sync.done_payload(conn, job, "full", "success", started)["applied"] == []
-        _files(job, pushed_at=started + 30)
-        body = sync.done_payload(conn, job, "apply", "partial", started, "https://run/1", now=NOW + 60)
-        assert body["applied"] == [{"story": "jane roe", "headline_key": "k", "decided_at": 5}]
-        assert body["run"] == {"mode": "apply", "status": "partial", "started_at": started, "finished_at": NOW + 60,
+        body = sync.done_payload(conn, job, "local", "partial", NOW, "https://run/1", now=NOW + 60)
+        assert set(body) == {"requests", "watched", "run", "problems"} and body["requests"] == []
+        assert body["run"] == {"mode": "local", "status": "partial", "started_at": NOW, "finished_at": NOW + 60,
                                "summary": body["run"]["summary"], "url": "https://run/1"}
-        _files(job, decided_at=started - 1)                                      # an older run's results
-        assert sync.done_payload(conn, job, "full", "success", started)["applied"] == []
 
 
 def test_added_and_failed_are_reported():
@@ -372,7 +225,7 @@ def test_added_and_failed_are_reported():
         assert sync.done_payload(conn, job, "full", "success", started)["requests"] == []
 
 
-def test_push_sends_the_queue_the_catalog_and_the_report():
+def test_push_sends_the_catalog_and_the_report():
     conn = store.connect(":memory:")
     a_day(conn)
     with tempfile.TemporaryDirectory() as tmp, captured():
@@ -390,47 +243,43 @@ def test_push_sends_the_queue_the_catalog_and_the_report():
                    dict(card, id="acme")]}, {"day": "2026-11-12", "cards": [dict(card, id="old")]}]}, open(opened, "w"))
         added = {"name": "market:gemini-carbon", "meta": {"entry": {"name": "gemini-carbon", "slug": "gemini-carbon-ship",
                                                                     "output": "GeminiCarbon", "correct_outcome": "Yes"}}}
-        c, _ = fake_client([(204, None), (200, {"blobs": [added]}), (200, {"market": 2, "closed": 1, "open": 2}),
-                            (204, None)])
+        c, _ = fake_client([(200, {"blobs": [added]}), (200, {"market": 2, "closed": 1, "open": 2}), (204, None)])
         body = sync.push(c, conn, tmp, "full", "success", NOW, run_url="https://run/2", now=NOW + 99,
                          closed_path=closed, open_path=opened, markets_path=markets)
         # a missing file leaves its section out (the API keeps the last one)
         assert set(sync.catalog_payload(markets, os.path.join(tmp, "none.json"), opened)) == {"markets", "open"}
     calls = c.session.calls
     assert [(x["method"], x["url"].split("example")[1]) for x in calls] == [
-        ("PUT", "/api/job/queue"), ("GET", "/api/job/blobs?prefix=market:"), ("PUT", "/api/job/catalog"),
-        ("POST", "/api/job/done")]
-    assert calls[0]["json"]["items"][0]["candidates"][0]["key"] == "white house weighs jane roe's future"
-    cat = calls[2]["json"]
+        ("GET", "/api/job/blobs?prefix=market:"), ("PUT", "/api/job/catalog"), ("POST", "/api/job/done")]
+    cat = calls[1]["json"]
     assert cat["markets"] == [{"name": "usiran", "slug": "us-strikes-iran"},
                               {"name": "gemini-carbon", "slug": "gemini-carbon-ship"}]
     assert cat["closed"] == [dict({k: pick[k] for k in ("condition_id", "slug", "question", "url", "winner",
                                                           "closed")}, day="2026-11-13")]
     assert cat["open"] == [{"story": "jane roe", "question": "Will Jane Roe leave?", "url": "https://p/e1"},
                            {"story": "acme", "question": "Will Jane Roe leave?", "url": "https://p/e1"}]
-    assert calls[3]["json"] == body and body["run"]["url"] == "https://run/2"
-    assert body["run"]["summary"].startswith("open list 2026-11-13: updated, 1 card(s), 1 new, 2 waiting for review")
+    assert calls[2]["json"] == body and body["run"]["url"] == "https://run/2" and "applied" not in body
+    assert body["run"]["summary"].startswith("open list 2026-11-13: updated, 1 card(s), 1 new;")
     assert "closed list: updated" in body["run"]["summary"]
 
 
-def test_a_catch_up_run_sends_the_queue_and_the_catalog_but_no_run():
-    # the API keeps runs of the full, apply and local modes only: a catch-up run's report sends the day's queue
-    # (new readings may wait for a person) and the catalog, and the review page keeps the daily run's report
+def test_a_catch_up_run_sends_the_catalog_but_no_run():
+    # the API keeps runs of the full and local modes only: a catch-up run sends the catalog, and the daily run's
+    # report stands
     conn = store.connect(":memory:")
     a_day(conn)
     with tempfile.TemporaryDirectory() as tmp, captured():
-        c, _ = fake_client([(204, None), (200, {"blobs": []}), (200, {"market": 0, "closed": 0, "open": 0})])
+        c, _ = fake_client([(200, {"blobs": []}), (200, {"market": 0, "closed": 0, "open": 0})])
         body = sync.push(c, conn, tmp, "catchup", "success", NOW, now=NOW + 99,
                          closed_path=os.path.join(tmp, "none.json"), open_path=os.path.join(tmp, "none.json"),
                          markets_path=os.path.join(tmp, "none.json"))
     assert [(x["method"], x["url"].split("example")[1]) for x in c.session.calls] == [
-        ("PUT", "/api/job/queue"), ("GET", "/api/job/blobs?prefix=market:"), ("PUT", "/api/job/catalog")]
-    assert body["run"]["mode"] == "catchup" and body["applied"] == [] and body["requests"] == []
+        ("GET", "/api/job/blobs?prefix=market:"), ("PUT", "/api/job/catalog")]
+    assert body["run"]["mode"] == "catchup" and body["requests"] == []
 
 
 def test_an_add_run_reports_only_its_markets():
-    # the workflow's add run (no saved state restored; another run may be making the lists meanwhile): no queue,
-    # the catalog's main-page markets only (closed.json and open.json on its disk are old copies), and a summary
+    # the workflow's add run (no saved state restored; another run may be making the lists meanwhile): the catalog's main-page markets only (closed.json and open.json on its disk are old copies), and a summary
     # of what it added
     conn = store.connect(":memory:")
     a_day(conn)
@@ -444,7 +293,7 @@ def test_an_add_run_reports_only_its_markets():
         added = {"name": "market:gemini-carbon", "meta": {"entry": {"name": "gemini-carbon", "slug": "gemini-carbon-ship",
                                                                     "output": "GeminiCarbon", "correct_outcome": "Yes"}}}
         c, _ = fake_client([(200, {"blobs": [added]}), (200, {"market": 2, "closed": 1, "open": 1}), (204, None)])
-        body = sync.push(c, conn, tmp, "apply", "success", NOW, now=NOW + 99, closed_path=stale, open_path=stale,
+        body = sync.push(c, conn, tmp, "local", "success", NOW, now=NOW + 99, closed_path=stale, open_path=stale,
                          markets_path=markets, adds_only=True)
     calls = c.session.calls
     assert [(x["method"], x["url"].split("example")[1]) for x in calls] == [
@@ -452,7 +301,6 @@ def test_an_add_run_reports_only_its_markets():
     assert calls[1]["json"] == {"markets": [{"name": "usiran", "slug": "us-strikes-iran"},
                                             {"name": "gemini-carbon", "slug": "gemini-carbon-ship"}]}
     assert body["run"]["summary"] == "1 market(s) added" and body["requests"][0]["condition_id"] == "0x1"
-    assert body["applied"] == []
 
 
 def test_the_catalog_leaves_the_markets_out_when_the_added_ones_cannot_be_read():
@@ -662,7 +510,7 @@ def test_add_refresh_reads_the_markets_to_add_again():
         return built(name or slug, slug)
 
     first = {"requests": [{"condition_id": "0x1", "slug": "m-1", "name": None, "winner": "Yes", "status": "approved"}]}
-    later = {"now": NOW + 3600, "decisions": [], "watched": [],
+    later = {"now": NOW + 3600, "watched": [],
              "requests": [{"condition_id": "0x2", "slug": "m-2", "name": None, "winner": "No", "status": "approved"}]}
     with tempfile.TemporaryDirectory() as tmp:
         res = os.path.join(tmp, "add_results.json")
@@ -878,7 +726,7 @@ def test_the_daily_run_adds_the_watched_markets_that_closed():
     with tempfile.TemporaryDirectory() as tmp:
         res, markets = (os.path.join(tmp, n) for n in ("add_results.json", "markets.json"))
         json.dump([{"name": "hooli", "slug": "event-x/m-e1#3", "output": "Hooli"}], open(markets, "w"))
-        api = RequestsApi({"now": NOW + 5, "decisions": [], "watched": work["watched"]}, rows)
+        api = RequestsApi({"now": NOW + 5, "watched": work["watched"]}, rows)
         blobs.put_json(api, "market:pied", {}, {"entry": {"name": "pied", "slug": "m-f1"}})
         real = sync.MARKETS_FILE
         sync.MARKETS_FILE = markets

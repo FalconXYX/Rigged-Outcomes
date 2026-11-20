@@ -11,7 +11,7 @@ A run ends green unless a person must fix something:
            requirements.lock failing while PyPI answers)
   outside  everything else: a service that still did not answer after its retries (Polymarket, Google News,
            the model, the site's API, PyPI), a list kept as it was, a step stopped at its time limit. A
-           warning, a line in the run's report (the review page's status shows it) and in the job's summary;
+           warning, a line in the run's report (python3 -m backend.status shows it) and in the job's summary;
            the run stays green
 
 Each step runs inside guard() (the modules' __main__): the step is recorded as running, then as done, stopped
@@ -41,13 +41,12 @@ STATUSES = ("success", "partial", "failure")
 # the job's steps, as the workflow names them (its step ids) and as a person reads them
 LABELS = {"install": "installing the Python packages",
           "pull": "restoring the state", "work": "fetching the work",
-          "decide": "applying the decisions", "closed": "the closed list", "open": "the open list",
+          "closed": "the closed list", "open": "the open list",
           "save": "saving the state", "add": "adding the markets", "report": "the report"}
 # what stands when a step gives up on a service that does not answer
 KEEPS = {"closed": "it keeps its last version", "open": "it keeps its last version",
-         "decide": "the decisions are saved and the next run rebuilds the list",
-         "work": "the decisions and the markets to add wait for the next run",
-         "add": "the markets to add wait for the next run", "report": "the review page keeps the last report"}
+         "work": "the markets to add wait for the next run",
+         "add": "the markets to add wait for the next run", "report": "the last report stands"}
 
 # steps that run no guarded Python, and what their failure means: an outside problem (the run stays green), or,
 # when the step said the fault is ours (--broken), a crash
@@ -301,7 +300,7 @@ def red(problems):
 
 
 def status(given, outcomes, problems):
-    """The run's status for the review page: failure when the state was not restored or saved or a person must
+    """The run's status for its report: failure when the state was not restored or saved or a person must
     fix something, partial when anything else went wrong, else what the caller said."""
     rank = STATUSES.index(given if given in STATUSES else "success")
     outcomes = outcomes or {}

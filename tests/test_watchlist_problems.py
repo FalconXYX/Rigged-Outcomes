@@ -183,9 +183,9 @@ def test_steps_stopped_never_started_or_not_installed():
         assert any("stopped at its time limit" in p["message"] for p in found)
         assert verdict(NOW - 60, {"open": "failure", "save": "failure", "install": "failure"}, job)[0] == 0
         # a step that failed without ever reaching its guard (an import error): the code, so the run fails
-        found = P.collect(NOW - 60, {"decide": "failure"}, job)
-        assert [(p["step"], p["kind"]) for p in found if p["step"] == "decide"] == [("decide", "crash")]
-        assert verdict(NOW - 60, {"decide": "failure"}, job)[0] == 1
+        found = P.collect(NOW - 60, {"catalog": "failure"}, job)
+        assert [(p["step"], p["kind"]) for p in found if p["step"] == "catalog"] == [("catalog", "crash")]
+        assert verdict(NOW - 60, {"catalog": "failure"}, job)[0] == 1
         # an older run's records never count
         assert P.collect(now_epoch() + 3600, {"open": "success"}, job) == []
 
@@ -606,7 +606,7 @@ def test_the_api_down_while_restoring_saving_and_reporting():
     api = FakeApi()
     with place() as kw, captured():
         seeded = store.connect(":memory:")
-        store.save_review(seeded, "acme", "acme talks", "step", {"title": "Acme talks"}, at=NOW - DAY)
+        store.save_filing(seeded, "acme", None, None, "rule")
         with captured():
             S.push(seeded, api, seed=True, now=NOW - DAY, **kw)
         # restoring: the API still down after its retries -> not restored (the lists are not made), green
@@ -622,7 +622,7 @@ def test_the_api_down_while_restoring_saving_and_reporting():
         assert state_cli("push", api, kw) == 3
         assert records(kw["job_dir"])["problems"][-1]["kind"] == "outside"
         assert verdict(NOW - 60, {"pull": "success", "save": "failure"}, kw["job_dir"])[0] == 0
-    # reporting: the queue, the catalog and the report not taken -> warned about and recorded, never raised
+    # reporting: the catalog and the report not taken -> warned about and recorded, never raised
     conn = store.connect(":memory:")
     with tempfile.TemporaryDirectory() as job, captured() as out:
         down = FakeApi()
@@ -669,22 +669,22 @@ def test_the_api_down_while_restoring_saving_and_reporting():
 
 
 def test_a_report_with_the_api_down_spends_its_waits_on_the_report():
-    # the queue not taken (the API down): the catalog is not tried, so the report gets the step's time
+    # the added markets not read (the API down): the catalog is not sent, so the report gets the step's time
     conn = store.connect(":memory:")
-    store.save_open_day(conn, "2026-11-16", "updated", NOW, [], info={"awaiting": [], "new_today": 0})
+    store.save_open_day(conn, "2026-11-16", "updated", NOW, [], info={"new_today": 0})
     with tempfile.TemporaryDirectory() as job, captured() as out:
         api = FakeApi()
-        api.fail_next(503, "server", method="PUT", path="/api/job/queue")
+        api.fail_next(503, "server", method="GET", path="/api/job/blobs")
         assert P.guard("report", lambda: sync.push(api, conn, job, "full", "success", NOW - 60, now=NOW) and 0,
                        job_dir=job) == 0
         paths = [p for _, p, _ in api.log]
-        assert paths == ["/api/job/queue", "/api/job/done"], paths
+        assert paths == ["/api/job/blobs?prefix=market:", "/api/job/done"], paths
         msgs = [p["message"] for p in records(job)["problems"]]
-        assert any(m.startswith("the queue was not sent") for m in msgs)
+        assert any(m.startswith("the markets added before could not be read") for m in msgs)
         assert any(m.startswith("the catalog was not sent (the API did not answer)") for m in msgs)
         # the report that went through says so: partial, with the problems after its summary
         done = api.log[-1][2]
-        assert done["run"]["status"] == "partial" and "problems: the queue was not sent" in done["run"]["summary"]
+        assert done["run"]["status"] == "partial" and "problems: the markets added before" in done["run"]["summary"]
         assert "problems" not in done and "reported (partial)" in out.getvalue()
 
 
@@ -694,7 +694,7 @@ def test_the_work_and_a_refused_token_mid_run():
         down.fail_next(503, "server")
         assert P.guard("work", lambda: sync.pull(down, os.path.join(job, "work.json"), now=NOW) and 0,
                        job_dir=job) == 0
-        assert json.load(open(os.path.join(job, "work.json")))["decisions"] == []
+        assert json.load(open(os.path.join(job, "work.json")))["requests"] == []
         assert records(job)["problems"][0]["kind"] == "outside"
         refused = FakeApi()
         refused.fail_next(401, "unauthorized")

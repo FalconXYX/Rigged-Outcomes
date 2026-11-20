@@ -521,8 +521,8 @@ function ClosedSection({ data, mainSlugs }: { data: ClosedData | null; mainSlugs
 }
 
 export function WatchlistPage() {
-  // the lists and the index, each kept up to date while the page is open (lib/data.ts): a newly published day, an
-  // owner's decision or a market added to the main page shows without a reload
+  // the lists and the index, each kept up to date while the page is open (lib/data.ts): a newly published day or a
+  // market added to the main page shows without a reload
   const data = useClosed();
   const open = useOpen();
   const index = useIndex();

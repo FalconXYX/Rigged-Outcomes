@@ -69,7 +69,7 @@ export interface WakeOpts {
   only?: readonly Lane[];
   /** Not this lane (the caller of /complete that claims again itself). */
   except?: Lane;
-  /** A visitor's or the owner's action: goes out at once while fewer than handler_free_wakes are unanswered. */
+  /** A visitor's action: goes out at once while fewer than handler_free_wakes are unanswered. */
   handler?: boolean;
 }
 

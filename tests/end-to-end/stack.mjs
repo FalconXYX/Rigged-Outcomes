@@ -35,7 +35,7 @@ import { Site } from "./lib/site.mjs";
 import { dayBefore, toronto } from "./lib/toronto.mjs";
 import { missingPackages, snapshot, workspace } from "./lib/tree.mjs";
 import { LocalVercel, WAKE_SECRET } from "./lib/vercel.mjs";
-import { JOB_TOKEN, OWNER_TOKEN, TURNSTILE, execute, migrate, startWorker } from "./lib/worker.mjs";
+import { JOB_TOKEN, TURNSTILE, execute, migrate, startWorker } from "./lib/worker.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO = join(HERE, "..", "..");
@@ -50,8 +50,8 @@ const dailyDone = (day, at) =>
  * Start a stack. Options: portBase (required), state (folder), botFail (Turnstile's always-failing keys), daily
  * (let the first tick start today's daily run), cron (default true: fire the trigger every minute), maxS (the
  * step server's per-call limit), seed ({picks, cards} or false), pyEnv (more environment for the step function's
- * Python), keep, quiet, log. Returns the stack: its urls, vercel, cron, site, seed, python(), api(), owner(),
- * overview(), run(), runOf(), waitRun(), clock(), tick(), devTick(), sql(), stopApi()/startApi() and
+ * Python), keep, quiet, log. Returns the stack: its urls, vercel, cron, site, seed, python(), api(),
+ * status(), run(), runOf(), waitRun(), clock(), tick(), devTick(), sql(), stopApi()/startApi() and
  * stop({keepState}). Each stack stops only the processes it started, so several share one node process.
  */
 export async function startStack(opts) {
@@ -143,7 +143,6 @@ export async function startStack(opts) {
       procs,
       vars: {
         TURNSTILE_SECRET: keys.secret,
-        OWNER_TOKEN,
         JOB_TOKEN,
         VISITOR_SALT: `e2e-salt-${base}`,
         ALLOWED_ORIGINS: `${site.origin},http://localhost:${ports.site}`,
@@ -249,20 +248,19 @@ export async function startStack(opts) {
     };
     /** The job's endpoints (job token). */
     const api = (method, path, body, token = JOB_TOKEN) => call(method, path, body, token);
-    /** The owner's endpoints (owner token). */
-    const owner = (method, path, body) => call(method, path, body, OWNER_TOKEN);
-    const overview = async () => (await owner("GET", "/api/admin/overview")).body;
+    /** The backend at a glance (GET /api/job/status): {now, budget, lanes, runs, failed_jobs, requests, reports}. */
+    const status = async () => (await api("GET", "/api/job/status")).body;
     /** A run and its jobs ({run, jobs}), or null. */
     const getRun = async (id) => {
       const r = await api("GET", `/api/job/run?id=${encodeURIComponent(id)}`);
       return r.status === 200 ? r.body : null;
     };
-    /** The add run of a condition id (the newest), from the review page's overview. */
+    /** The add run of a condition id (the newest), from the backend's status. */
     const runOf = async (cid) => {
-      const o = await overview();
+      const o = await status();
       const req = (o?.requests ?? []).find((q) => q.condition_id === cid);
       if (req?.run_id) return req.run_id;
-      const runs = (o?.backend?.runs ?? []).filter((r) => r.kind === "add" && String(r.slot).startsWith(`${cid}:`));
+      const runs = (o?.runs ?? []).filter((r) => r.kind === "add" && String(r.slot).startsWith(`${cid}:`));
       return runs[0]?.id ?? null;
     };
     /** Waits until a run is terminal (or `pred(run, jobs)` holds); returns {run, jobs}. */
@@ -278,7 +276,7 @@ export async function startStack(opts) {
     /** The Worker's clock: move it to `to` (epoch seconds; null puts it back); returns its new now. */
     const clock = async (to) => (await api("POST", "/api/dev/clock", { now: to })).body?.now;
     /** The Worker's now, in epoch seconds. */
-    const workerNow = async () => (await overview()).now;
+    const workerNow = async () => (await status()).now;
     /** The Cron Trigger once, through wrangler's scheduled path (what Cloudflare fires). */
     const tick = () => cron.tick();
     /** The same tick through POST /api/dev/tick, which answers what it made: {created, woke, expired}. */
@@ -323,8 +321,7 @@ export async function startStack(opts) {
       today,
       python,
       api,
-      owner,
-      overview,
+      status,
       run: getRun,
       runOf,
       waitRun,
@@ -387,8 +384,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     [
       "",
       `  Watchlist page   ${stack.urls.site}#/watchlist`,
-      `  Review page      ${stack.urls.site}#/review   (token ${OWNER_TOKEN})`,
-      `  Runs             curl -s -H 'authorization: Bearer ${OWNER_TOKEN}' ${a}/api/admin/overview | jq '.backend.runs'`,
+      `  Runs             curl -s -H 'authorization: Bearer ${JOB_TOKEN}' ${a}/api/job/status | jq '.runs'`,
       `  Daily run now    curl -s -X POST -H 'authorization: Bearer ${JOB_TOKEN}' ${a}/api/dev/clock -d '{"now": <04:00 Toronto tomorrow>}'   (the next tick starts it)`,
       `  Vercel calls     curl -s ${stack.vercel.url}/__dev/calls | jq '.calls'`,
       `  Logs             ${stack.dirs.logs}`,

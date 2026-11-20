@@ -231,7 +231,7 @@ export function useAsync<T>(fn: () => Promise<T>, key: string): Async<T> {
 
 /* ── The files the backend republishes ────────────────────────────────── */
 // The index (a market added to the main page joins it), the closed list and the open list change as the backend
-// publishes: an add, the day's lists, an owner's decision applied. While a view that shows one is open and in
+// publishes: an add, the day's lists. While a view that shows one is open and in
 // view, it is read again every REFRESH_MS and when the page comes back into view (a cheap 304 while it is
 // unchanged); a newer copy takes the old one's place in every view. Every read is a request to the Worker, whose
 // free plan allows 100,000 a day for the site and the backend together, so a tab left open asks rarely: the

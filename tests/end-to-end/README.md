@@ -9,7 +9,6 @@ node tests/end-to-end/scenarios/smoke.mjs                       # "+ Add to main
 node tests/end-to-end/scenarios/add.mjs --only main             # every way an add can go: main, botfail, faults, daily (one process per group runs them side by side)
 node tests/end-to-end/scenarios/watch.mjs                       # "Watch this market", and the daily run adding a watched market
 node tests/end-to-end/scenarios/markers.mjs                     # timeline markers (again with --bot-fail --port-base 9660)
-node tests/end-to-end/scenarios/owner.mjs                       # the review page and the runs it queues
 node tests/end-to-end/scenarios/lists.mjs                       # 3 a day, a released game dropped from Open now, Toronto time with no UTC
 node tests/end-to-end/scenarios/schedule.mjs                    # 04:00 Toronto across daylight saving, a missed day, the catch-up, the budget ledger
 node tests/end-to-end/stack.mjs --port-base 9700                # a stack to click around in by hand (Ctrl-C stops it)
@@ -22,7 +21,6 @@ node tests/end-to-end/stack.mjs --port-base 9700                # a stack to cli
 | lists | 9560–9563 | the daily run, 20 to 40 min |
 | schedule | 9580–9583 | 10 min |
 | watch | 9600–9603 | the daily run plus 15 min |
-| owner | 9620–9623 | two daily runs plus 30 min |
 | markers | 9640–9643 | 10 min |
 
 ## What a stack is (`stack.mjs`)
@@ -39,14 +37,14 @@ Four ports from `--port-base`: the API, Vercel, the site, wrangler's inspector.
 
 ## For scenarios (`startStack()`)
 
-- **Backend:** `overview()`, `run(id)`, `runOf(cid)`, `waitRun(id)`, `clock(epoch | null)`, `workerNow()`, `tick()` (the scheduled path), `devTick()` (`POST /api/dev/tick`, which answers what it made), `api()` and `owner()` for the job and owner endpoints.
+- **Backend:** `status()` (`GET /api/job/status`), `run(id)`, `runOf(cid)`, `waitRun(id)`, `clock(epoch | null)`, `workerNow()`, `tick()` (the scheduled path), `devTick()` (`POST /api/dev/tick`, which answers what it made), `api()` for the job endpoints.
 - **Faults:** `vercel.fault({status: 503, error: "DEPLOYMENT_PAUSED"})`, `vercel.fault({drop: n})` (lost wake-ups), `vercel.kill()` (every instance, mid-step), `vercel.maxSeconds(s)`, `vercel.calls()`; `stopApi()`/`startApi()`; `sql(statements)` runs SQL on the stack's D1 with the Worker stopped for it (the budget ledger's rows).
 - **Shared helpers:** `lib/scenario.mjs` (the results table, card faces, watchers, hedging words, run lines) and `lib/outcome.mjs` (stop a wait as soon as an add clearly went wrong).
 - Each stack stops only the processes it started, empties its state folder at start, and removes it when it stops cleanly; a scenario keeps the folder of a stack whose checks failed, and `--keep` keeps it always.
 
 ## Left out on purpose
 
-- **Gemini is never called.** `py/sitecustomize.py` answers the key check and answers every model request with "daily quota used up" (`E2E_GEMINI=busy`: "overloaded"). The owner scenario gives the open list an in-process fake model client of its own. Python processes refuse production hosts.
+- **Gemini is never called.** `py/sitecustomize.py` answers the key check and answers every model request with "daily quota used up" (`E2E_GEMINI=busy`: "overloaded"). Python processes refuse production hosts.
 - **Package installs:** this Mac's `python3` with the repo's requirements and the repo's node_modules are used.
 - **Requirements:** `npm install` in `web/` and `worker/`, and playwright-core with Chromium (paths in `lib/browser.mjs`, or set `E2E_PLAYWRIGHT` and `E2E_CHROME`).
 

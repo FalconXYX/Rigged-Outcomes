@@ -2,7 +2,7 @@
 // step function claims one job of a lane under a lease, checkpoints what it finds as it goes, completes the step
 // with one of four outcomes (done, partial, later, error), and reads back its run's results and the news
 // searches. This file also makes runs and their jobs (makeRun), for the schedule (cron.ts), a visitor's add
-// (public.ts), a watched market (job.ts) and "Apply decisions now" (owner.ts).
+// (public.ts) and a watched market (job.ts).
 
 import { CONTRACT, JOB_KINDS, type JobKind, type Lane, RUN_GRAPHS, type RunKind, isJobKind, toronto } from "./contract";
 import { addUsage, blockedText, capsOf, readBudget } from "./ledger";

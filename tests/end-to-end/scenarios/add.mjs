@@ -44,7 +44,6 @@ import {
   norm,
   onMainLink,
   openWatchlist,
-  ownerSees,
   panelOf,
   request,
   runLine,
@@ -366,25 +365,23 @@ await group("faults", 8, { big: 1 }, 5, async (stack, browser, all) => {
       await stack.vercel.fault({ status: 503, error: "DEPLOYMENT_PAUSED" });
       let during = null;
       let lane = null;
-      let owner = null;
       let clearedAt = null;
       const res = await addAndWait(stack, page, p, "paused", {
         before: async () => {
           await addButton(page, p).click();
           await sleep(90_000); // a tick or two: the wake-up refused, the lane backing off
           during = await faceOf(page, p);
-          lane = (await stack.overview()).backend?.lanes?.find((l) => l.lane === "add");
-          owner = await ownerSees(browser, stack);
+          lane = (await stack.status()).lanes?.find((l) => l.lane === "add");
           await stack.vercel.fault({});
           clearedAt = Date.now();
         },
       });
       const after = res.landed ? res.t.landed - clearedAt : null;
-      const pass = during === "Adding to the main page" && lane?.wake_error === "HTTP 503" && /HTTP 503/.test(owner) && res.landed && after <= WITHIN_MS && !hedges(res.w).length;
+      const pass = during === "Adding to the main page" && lane?.wake_error === "HTTP 503" && res.landed && after <= WITHIN_MS && !hedges(res.w).length;
       report.row(
         "Vercel paused (503 DEPLOYMENT_PAUSED)",
-        `while Vercel refuses, the card keeps reading "Adding to the main page" (no error: the visitor can do nothing), the add lane records "HTTP 503" and the review page names it with its fix; once Vercel takes calls the add lands by itself within ${WITHIN_MS / 60_000} min`,
-        `90 s after the click: "${during}"; add lane: unanswered ${lane?.unanswered}, wake_error ${lane?.wake_error}; review page: "${(owner.match(/Vercel didn't take[^.]*\.[^.]*\./) ?? [owner.slice(0, 160)])[0]}". Fault cleared +${secs(res.t.click, clearedAt)} s; landed ${after !== null ? `${Math.round(after / 1000)} s after that` : "never"}. ${await stages(stack, res)}. ${await callsLine(stack, res.t.click, "add")}`,
+        `while Vercel refuses, the card keeps reading "Adding to the main page" (no error: the visitor can do nothing), the add lane records "HTTP 503"; once Vercel takes calls the add lands by itself within ${WITHIN_MS / 60_000} min`,
+        `90 s after the click: "${during}"; add lane: unanswered ${lane?.unanswered}, wake_error ${lane?.wake_error}. Fault cleared +${secs(res.t.click, clearedAt)} s; landed ${after !== null ? `${Math.round(after / 1000)} s after that` : "never"}. ${await stages(stack, res)}. ${await callsLine(stack, res.t.click, "add")}`,
         pass,
       );
       if (!pass) await report.shot(page, "paused");

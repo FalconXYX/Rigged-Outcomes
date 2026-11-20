@@ -30,7 +30,6 @@ Run these from `worker/`:
    | Name | Value |
    |---|---|
    | `TURNSTILE_SECRET` | Turnstile's Secret key |
-   | `OWNER_TOKEN` | A random value: your password for the review page |
    | `JOB_TOKEN` | A random value: the job's key to the API |
    | `VISITOR_SALT` | A random value |
    | `WAKE_SECRET` | A random value: signs the API's calls to Vercel |
@@ -88,19 +87,16 @@ Before pushing, run the tests: `python3 tests/test_*.py`, `cd worker && npm test
 ## Day to day
 
 - **The daily run:** at 4 AM Toronto time. If a step couldn't finish, a catch-up runs at 10 AM.
-- **The review page:** `https://<your site>/#/review`, unlocked with `OWNER_TOKEN`. It shows:
-  - the Open now queue;
-  - recent runs and any failed step;
-  - how much of Vercel's free allowance is used.
+- **How it's going:** `python3 -m backend.status` prints recent runs, failed steps and how much of Vercel's free allowance is used.
 - **The free allowance:** adds wait when Vercel use reaches 65% of the free monthly allowance, and all work stops at 80%. That keeps the account from being paused.
 
 ## If something breaks
 
 | Problem | Fix |
 |---|---|
+| See recent runs, failed steps and the budget | `python3 -m backend.status` |
 | See the API's errors | `cd worker && npx wrangler tail` |
 | See the job's log | `npx vercel logs --deployment <your-project>.vercel.app` |
-| Stop visitors' changes | The pause switch on the review page |
 | Stop all work on Vercel | Set the Worker's `WAKE_SECRET` to a new random value. Set it back to resume |
 | Take a market off the main page | `python3 -m backend.site rm NAME` |
 | Undo a bad save of a list | `python3 -m watchlist.blobs versions site:closed.json`, then `python3 -m watchlist.blobs restore site:closed.json <version>`. The same works for `site:open.json` and `state` |

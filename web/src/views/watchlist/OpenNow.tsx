@@ -273,8 +273,7 @@ function HowPicked({ data }: { data: OpenData }) {
         Polymarket markets with at least ${fmtInt(r.min_volume)} traded whose answer a few people learn before the public
         (no games, prices, weather, elections, public counts, mention markets or scheduled releases). A market is listed
         when headlines from the last 7 days show those people taking a concrete step toward the answer, such as talks or a
-        search for a candidate, as read by a model that never sees prices or trading
-        {r.steps_by !== "model" && " and confirmed by a person"}. One of the {fmtInt(r.per_day)} places goes to a market whose
+        search for a candidate, as read by a model that never sees prices or trading. One of the {fmtInt(r.per_day)} places goes to a market whose
         last step is {fmtInt(r.fresh_days + 1)} to {fmtInt(r.live_days)} days old, and one to an answer decided in advance
         that comes out within {plural(r.dated_days, "day")}. A market leaves the list once its answer is public, which
         includes the game, film, show, album or book it is about coming out.

@@ -27,13 +27,13 @@ A Cloudflare Worker queues and schedules the work; a Vercel function does it in 
 ## The life of the daily run
 
 1. From 04:00, the cron creates the day's `daily` run (15 jobs).
-2. `daily.begin` loads the state and applies the owner's decisions; `watch.check` sends watched markets that closed to the main page.
+2. `daily.begin` loads and prunes the state; `watch.check` sends watched markets that closed to the main page.
 3. **Recently closed:** scan closed markets, label them, search the news, judge, then `closed.publish` puts the day's 3 picks.
-4. **Open now:** walk the open markets, name the stories, search, read each for a step and for "already out", then `open.publish` puts the list.
-5. `daily.end` updates the review queue and the catalog, and reports the run.
+4. **Open now:** walk the open markets, name the stories, search, read each for a step and for "already out", then `open.publish` puts the list. A story is a card when the reading marks a step; no one approves it.
+5. `daily.end` updates the catalog and reports the run.
 6. When work was left, a `catchup` run from 10:00 finishes the Open now readings.
 
-"Apply decisions now" is a one-job `apply` run: it rebuilds today's Open now from stored searches, with no model. A run past its deadline starts nothing new; its final jobs publish what is there, so a day always has lists.
+A run past its deadline starts nothing new; its final jobs publish what is there, so a day always has lists.
 
 ## Jobs and lanes
 
@@ -70,7 +70,7 @@ One Cron Trigger runs every minute. Each tick works out Toronto time and does wh
 | 03:30 | Old rows are pruned |
 | 04:00 | The daily run (deadline 09:30) |
 | 10:00 to 12:00 | A catch-up, only when the daily run left work |
-| Any time | An add or an "Apply decisions now" press starts at once |
+| Any time | An add starts at once |
 
 ## Limits and budget
 
@@ -98,9 +98,10 @@ One Cron Trigger runs every minute. Each tick works out Toronto time and does wh
 | `job_blobs`, `job_blob_parts`, `job_blob_versions` | Files: the state, the lists, the markets and their index, gzipped |
 | `requests` | "Add to main page" requests and their status |
 | `watches`, `markers` | The site's watchlist and visitors' timeline markers |
-| `open_queue`, `open_decisions` | The Open now review queue and the owner's decisions |
 | `catalog`, `quota` | What visitors may write to, and the daily limits |
-| `job_runs`, `settings` | Run reports for the review page; the pause switch, the budget and small flags |
+| `job_runs`, `settings` | Run reports; the budget and small flags |
+
+`open_queue` and `open_decisions` (an old approval step) are no longer used.
 
 ## Endpoints
 
@@ -108,10 +109,10 @@ One Cron Trigger runs every minute. Each tick works out Toronto time and does wh
 |---|---|---|
 | `/api/data/...` | The site | The markets' index, the two lists and each market's page |
 | `/api/markers`, `/api/watch`, `/api/request` | Visitors, with Turnstile | Timeline markers, the watchlist, Add to main page |
-| `/api/admin/...` | The owner (`OWNER_TOKEN`) | The review page: overview, decisions, settings, Apply decisions now |
 | `/api/job/claim`, `checkpoint`, `complete` | The step function (`JOB_TOKEN`) | Take a job, save progress, report the outcome |
 | `/api/job/results`, `news/get`, `run` | The step function | A run's results, stored searches, a run's jobs |
-| `/api/job/work`, `queue`, `catalog`, `requests`, `done` | The step function | The daily run's inputs and reports |
+| `/api/job/work`, `catalog`, `requests`, `done` | The step function | The daily run's inputs and reports |
+| `/api/job/status` | `python3 -m backend.status` | Runs, failed steps, budget (read only) |
 | `/api/job/blobs/...` | The step function | Read and write files |
 | `/api/dev/clock`, `/api/dev/tick` | Tests (`DEV=on` only) | Move the Worker's clock; run a tick now |
 | `/api/step` (on Vercel) | The Worker | A signed wake-up for one lane |

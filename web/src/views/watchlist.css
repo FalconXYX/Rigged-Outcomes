@@ -1018,7 +1018,7 @@ a.op-quote:hover .op-quote-text {
   color: var(--text-3);
 }
 
-/* "+ Add to main page · The site's owner reviews each request", "Watch this
+/* "+ Add to main page", "Watch this
    market · …": a quiet text button, then what happens next, no box around
    it. A longer
    note wraps beside its button. */
@@ -1107,8 +1107,8 @@ a.op-quote:hover .op-quote-text {
 
 /* On the card, beside "Details": "+ Add to main page", "Watch this
    market", a text button in the card's colour (a closed card's verdict, an
-   open card's indigo); once used, the result in its place ("Requested · waiting for
-   review", "Watching · 3 visitors · Stop watching"). */
+   open card's indigo); once used, the result in its place ("On the main page →",
+   "Watching · Stop watching"). */
 .wl-act {
   display: inline-flex;
   flex-wrap: wrap;

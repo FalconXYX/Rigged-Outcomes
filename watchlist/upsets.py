@@ -347,7 +347,7 @@ def vocabulary(market, conn=None, folded=()):
     {"kind", "group"} from its event's title and its question (None when the
     open list's rules leave such a market out or cannot place it), plus
     "who_knows": the sentence its "Open now" card carried, when it was on
-    one (a card a person approved, so the two lists say the same thing)."""
+    one (so the two lists say the same thing)."""
     ev = filters.event_of(market)
     f = kinds.file_event(ev.get("title") or market.get("question"), market.get("question"))
     kind = f.kind if f.how == "rule" else None

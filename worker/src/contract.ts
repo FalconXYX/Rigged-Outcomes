@@ -1,7 +1,7 @@
 // The backend's shared constants (docs/BACKEND.md): job kinds and their lanes, run graphs, states, outcomes,
 // deadlines, caps, the time zone, the schedule and the budget thresholds. backend/contract.py holds the same
 // CONTRACT object (tests/test_backend_contract.py compares the two), so the Worker
-// and the Vercel step function always agree. Builders read this file; changes go through the contract's owner.
+// and the Vercel step function always agree. Builders read this file.
 //
 // The block between the two markers is strict JSON (no comments, no trailing commas): the Python test parses it.
 
@@ -22,11 +22,10 @@ export const CONTRACT = {
     "prune_at": "03:30",
     "budget_every_min": 10,
     "add_run_s": 129600,
-    "apply_run_s": 3600,
     "final_grace_s": 3600
   },
-  "run_kinds": ["daily", "catchup", "add", "apply"],
-  "run_priority": { "apply": 0, "add": 1, "daily": 2, "catchup": 3 },
+  "run_kinds": ["daily", "catchup", "add"],
+  "run_priority": { "add": 1, "daily": 2, "catchup": 3 },
   "run_states": ["queued", "running", "done", "partial", "failed", "cancelled", "missed", "skipped"],
   "run_terminal": ["done", "partial", "failed", "cancelled", "missed", "skipped"],
   "lanes": ["main", "news", "model", "add"],
@@ -50,7 +49,6 @@ export const CONTRACT = {
     "open.out":       { "lane": "model", "heavy": false, "need_s": 130, "final": false, "handler": "watchlist.steps:open_out" },
     "open.publish":   { "lane": "main",  "heavy": false, "need_s": 120, "final": true,  "handler": "watchlist.steps:open_publish" },
     "daily.end":      { "lane": "main",  "heavy": false, "need_s": 60,  "final": true,  "handler": "watchlist.steps:daily_end" },
-    "apply.decide":   { "lane": "main",  "heavy": false, "need_s": 120, "final": true,  "handler": "watchlist.steps:apply_decide" },
     "add.fetch":      { "lane": "add",   "heavy": true,  "need_s": 120, "final": false, "handler": "backend.add_steps:fetch" },
     "add.whales":     { "lane": "add",   "heavy": false, "need_s": 60,  "final": false, "handler": "backend.add_steps:whales" },
     "add.export":     { "lane": "add",   "heavy": true,  "need_s": 60,  "final": true,  "handler": "backend.add_steps:export" }
@@ -82,9 +80,6 @@ export const CONTRACT = {
     "add": [
       { "kind": "add.fetch",      "after": [] },
       { "kind": "add.export",     "after": ["add.fetch", "add.whales"] }
-    ],
-    "apply": [
-      { "kind": "apply.decide",   "after": [] }
     ]
   },
   "retry": {

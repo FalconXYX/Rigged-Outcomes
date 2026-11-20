@@ -1,6 +1,6 @@
 // Waiting on an open page for what a person waits for (an add's "On the main page →"), and stopping as soon as the
 // outcome is clearly wrong instead of at the timeout. It reads the page, and the add's run in the backend through
-// the owner's overview and the job's run endpoint (neither is a visitor call, so it changes nothing the page asks
+// the job's status and run endpoints (neither is a visitor call, so it changes nothing the page asks
 // about).
 
 import { sleep } from "./proc.mjs";

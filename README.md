@@ -117,7 +117,6 @@ Vite + React + TypeScript + D3 in `web/`. Every market (the 7 original ones and 
 | `#/` | Home: every market as a card |
 | `#/m/<name>` | Bet timeline with replay and visitors' markers; `/traders`: flagged traders |
 | `#/watchlist` | Open now and Recently closed (below) |
-| `#/review` | The owner's page: the runs, the budget, the Open now queue, what visitors added, a pause switch |
 
 ---
 
@@ -125,7 +124,7 @@ Vite + React + TypeScript + D3 in `web/`. Every market (the 7 original ones and 
 
 Two daily lists made from market text and Google News headlines, read by free Gemini and Gemma models. No prices, trades or wallets. Every day and time is Toronto's.
 
-- **Open now** (`watchlist/opennow.py`): up to 5 open markets where a few people will know the answer first and this week's news shows a step; a person approves each step on `#/review`. A market whose answer is already public (a released game, film, show, album or book included) is dropped. "Watch this market" puts one on the site's watchlist: once it closes with a result, it is added to the main page by itself.
+- **Open now** (`watchlist/opennow.py`): up to 5 open markets where a few people will know the answer first and this week's news shows a step, as the model reads it. A market whose answer is already public (a released game, film, show, album or book included) is dropped. "Watch this market" puts one on the site's watchlist: once it closes with a result, it is added to the main page by itself.
 - **Recently closed** (`watchlist/upsets.py`): 3 closed markets a day someone may have known early; "Add to main page" runs the analysis above on one, and it is on the main page within minutes.
 - **Backend** ([`docs/BACKEND.md`](docs/BACKEND.md)): a Cloudflare Worker and its D1 database (the API, the job queue, the schedule, everything published) wake a Vercel function that does the work in short steps. Both on free plans; nothing runs on GitHub but the site build.
 - **Schedule:** the daily run from 04:00 Toronto time, a catch-up from 10:00 only when work was left; an add starts the moment it is clicked.

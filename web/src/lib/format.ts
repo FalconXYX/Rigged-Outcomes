@@ -47,9 +47,8 @@ export const fmtLongDate = d3.utcFormat("%B %-d, %Y");
 export const fmtT = (t: number) => `${fmtDateTime(toDate(t))} ET`;
 
 /* ── Toronto time ─────────────────────────────────────────────────────── */
-// The backend keeps every day as a Toronto calendar day (docs/BACKEND.md), and every moment the Watchlist and
-// the review page show (a list's run, a check, a headline's date, a run on the review page) is read on
-// Toronto's clock, daylight saving included, whatever the visitor's own zone. Exported market seconds above
+// The backend keeps every day as a Toronto calendar day (docs/BACKEND.md), and every moment the Watchlist shows
+// (a list's run, a check, a headline's date) is read on Toronto's clock, daylight saving included, whatever the visitor's own zone. Exported market seconds above
 // are already Eastern wall-clock time and keep their own helpers.
 
 const TORONTO = new Intl.DateTimeFormat("en-CA", {

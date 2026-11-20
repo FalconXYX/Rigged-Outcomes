@@ -1,27 +1,26 @@
 // Rigged Outcomes API: one Cloudflare Worker in front of one D1 database (migrations/), the backend's clock and
-// queue (docs/BACKEND.md). This file routes /api/* to the visitor (public.ts), published data (data.ts), owner
-// (owner.ts), job (job.ts, blobs.ts), queue (queue.ts) and development (cron.ts, DEV=on only) endpoints, answers
+// queue (docs/BACKEND.md). This file routes /api/* to the visitor (public.ts), published data (data.ts), job
+// (job.ts, blobs.ts), queue (queue.ts) and development (cron.ts, DEV=on only) endpoints, answers
 // CORS for the site's own origins only, turns every failure into {"error": code, "message": plain English} (any
 // unexpected throw is 500 "server", with no stack), and runs the every-minute Cron Trigger (cron.ts).
 
 import { commitBlob, deleteBlob, getBlob, getPart, listBlobs, listVersions, putPart } from "./blobs";
 import { devClock, devTick, tick } from "./cron";
 import { data } from "./data";
-import { addRequests, done, putCatalog, putQueue, work } from "./job";
-import { type Ctx, type Env, HttpError, authorize, dev, json, lazyClock, log, writesOn } from "./lib";
-import { apply, deleteDecision, deleteMarker, overview, putDecision, putSettings } from "./owner";
+import { addRequests, done, putCatalog, status, work } from "./job";
+import { type Ctx, type Env, HttpError, authorize, dev, json, lazyClock, log } from "./lib";
 import { addMarker, addRequest, getMarkers, getRequest, getWatch, undoMarker, unwatch, watch } from "./public";
 import { checkpoint, claim, complete, getRun, newsGet, results } from "./queue";
 
 type Handler = (ctx: Ctx) => Promise<Response>;
 
-const health: Handler = async ({ env }) => json({ ok: true, writes: await writesOn(env) });
+const health: Handler = async () => json({ ok: true });
 
 /** The files /api/data/ serves: the index, the two lists and each added market's page. */
 const DATA = /^\/api\/data\/((?:index|closed|open)\.json|markets\/[^/]+\.json)$/;
 
 /** [method, path, who may call it, handler]; a path's groups become ctx.params. "dev": the job's token, and only with DEV=on (404 otherwise). */
-const ROUTES: [string, RegExp, "visitor" | "owner" | "job" | "dev", Handler][] = [
+const ROUTES: [string, RegExp, "visitor" | "job" | "dev", Handler][] = [
   ["GET", /^\/api\/health$/, "visitor", health],
   ["GET", DATA, "visitor", data],
   ["HEAD", DATA, "visitor", data],
@@ -33,14 +32,9 @@ const ROUTES: [string, RegExp, "visitor" | "owner" | "job" | "dev", Handler][] =
   ["DELETE", /^\/api\/watch$/, "visitor", unwatch],
   ["GET", /^\/api\/request$/, "visitor", getRequest],
   ["POST", /^\/api\/request$/, "visitor", addRequest],
-  ["GET", /^\/api\/admin\/overview$/, "owner", overview],
-  ["PUT", /^\/api\/admin\/decisions$/, "owner", putDecision],
-  ["DELETE", /^\/api\/admin\/decisions$/, "owner", deleteDecision],
-  ["DELETE", /^\/api\/admin\/markers\/([^/]+)$/, "owner", deleteMarker],
-  ["PUT", /^\/api\/admin\/settings$/, "owner", putSettings],
-  ["POST", /^\/api\/admin\/apply$/, "owner", apply],
   ["GET", /^\/api\/job\/work$/, "job", work],
-  ["PUT", /^\/api\/job\/queue$/, "job", putQueue],
+  ["GET", /^\/api\/job\/status$/, "job", status],
+  ["GET", /^\/api\/job\/status$/, "job", status],
   ["PUT", /^\/api\/job\/catalog$/, "job", putCatalog],
   ["POST", /^\/api\/job\/requests$/, "job", addRequests],
   ["POST", /^\/api\/job\/done$/, "job", done],
@@ -88,7 +82,7 @@ async function route(req: Request, env: Env, url: URL, ctx: ExecutionContext): P
     if (who === "dev" && !dev(env)) break;
     pathMatched = true;
     if (method !== req.method) continue;
-    if (who !== "visitor") await authorize(req, env, who === "dev" ? "job" : who);
+    if (who !== "visitor") await authorize(req, env);
     return handler({ req, env, url, params: m.slice(1).map(decode), waitUntil: (task) => ctx.waitUntil(task), clock: lazyClock(env) });
   }
   if (pathMatched) throw new HttpError(405, "bad_method", `${req.method} is not allowed here.`);

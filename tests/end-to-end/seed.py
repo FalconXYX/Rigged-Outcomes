@@ -191,14 +191,14 @@ def main(argv=None):
             })
     run_at = local_iso(now)
     doc = {
-        "generated_at": run_at, "trial": False,
+        "generated_at": run_at,
         "rules": {"min_volume": kinds.MIN_VOLUME, "per_day": kinds.PER_DAY, "at_least": kinds.AT_LEAST,
                   "live_days": kinds.LIVE_DAYS, "fresh_days": kinds.FRESH_DAYS, "stay_days": kinds.STAY_DAYS,
                   "dated_days": kinds.DATED_DAYS, "held_back_days": kinds.HELD_BACK_DAYS,
                   "prompt_version": f"{opennow.PROMPT_VERSION} / {opennow.OUT_VERSION}",
-                  "model": f"{kinds.STEP_MODEL} / {kinds.OPEN_MODEL}", "steps_by": opennow.STEPS_BY},
+                  "model": f"{kinds.STEP_MODEL} / {kinds.OPEN_MODEL}"},
         "days": [{"day": today, "status": "updated",
-                  "run_at": run_at, "cards": cards, "new_today": len(cards), "held_back": 0, "awaiting": 0}]
+                  "run_at": run_at, "cards": cards, "new_today": len(cards), "held_back": 0}]
         if cards else [],
     }
     with open(os.path.join(args.out, "open.json"), "w") as f:

@@ -1,12 +1,12 @@
 // Timeline markers ("at this time, this happened") beyond the ones export.py
 // takes from markets.json. Any visitor can add one: the site's API keeps it
 // (lib/api.ts) and everyone sees it. Whoever added a marker can remove it for
-// 24 hours (this browser keeps its undo token); the site's owner can remove
-// any on the review page. A model may add them later (source "ai"). A page
+// 24 hours (this browser keeps its undo token). A model may add them later
+// (source "ai"). A page
 // left open asks for the market's markers again every minute while it is in
 // view (and when it comes back into view), so others' markers and removals
 // show by themselves. A marker the API can't take right now (it doesn't
-// answer, or the owner has paused visitors' changes) shows at once and is kept
+// answer) shows at once and is kept
 // in this browser, then sent once the API takes it (when the page asks again,
 // every half minute while one waits, or when the browser is back online). With
 // no API in the build the editor keeps markers in this browser.
@@ -34,8 +34,8 @@ export function withAddedEvents(market: MarketData, added: AddedEvent[], bounds:
 /** "off": no API in the build (the markers are kept in this browser); "loading"; "ready": the API has answered. */
 export type MarkerStatus = "off" | "loading" | "ready";
 
-type MarkersReply = { listed: boolean; writes: boolean; markers: Marker[] };
-type Kept = { events: AddedEvent[]; writes: boolean };
+type MarkersReply = { listed: boolean; markers: Marker[] };
+type Kept = { events: AddedEvent[] };
 /** A marker added here that the API hasn't taken yet ("ev_" id); `after`: a Toronto day before which it isn't sent again (a daily limit). */
 type Waiting = AddedEvent & { after?: string };
 
@@ -64,8 +64,6 @@ function merged(api: AddedEvent[], mine: Waiting[]): AddedEvent[] {
 export type AddedEvents = {
   events: AddedEvent[];
   status: MarkerStatus;
-  /** false while the owner has paused visitors' changes (adds are then kept in this browser and sent once allowed) */
-  writes: boolean;
   /** add a marker; an error in words, or null once it is added */
   add: (t: number, label: string, slot?: HTMLElement | null) => Promise<string | null>;
   /** remove one of this browser's markers; an error in words, or null once it is gone */
@@ -76,9 +74,9 @@ export type AddedEvents = {
 
 export function useAddedEvents(name: string): AddedEvents {
   const first = (): { name: string; status: MarkerStatus } & Kept => {
-    if (!apiConfigured) return { name, status: "off", events: session.get(name)?.events ?? localMarkers<AddedEvent>(name), writes: true };
+    if (!apiConfigured) return { name, status: "off", events: session.get(name)?.events ?? localMarkers<AddedEvent>(name) };
     const kept = session.get(name);
-    return { name, status: kept ? "ready" : "loading", events: merged(kept?.events ?? [], waiting(name)), writes: kept?.writes ?? true };
+    return { name, status: kept ? "ready" : "loading", events: merged(kept?.events ?? [], waiting(name)) };
   };
   const [state, setState] = useState(first);
   const current = state.name === name ? state : first();
@@ -91,17 +89,12 @@ export function useAddedEvents(name: string): AddedEvents {
       session.set(name, next);
       api.current = next.events;
     }
-    setState((s) => ({
-      name,
-      status: "ready",
-      events: merged(api.current, waiting(name)),
-      writes: next?.writes ?? (s.name === name ? s.writes : true),
-    }));
+    setState({ name, status: "ready", events: merged(api.current, waiting(name)) });
   };
 
   useEffect(() => {
     if (!apiConfigured) {
-      setState({ name, status: "off", events: session.get(name)?.events ?? localMarkers<AddedEvent>(name), writes: true });
+      setState({ name, status: "off", events: session.get(name)?.events ?? localMarkers<AddedEvent>(name) });
       return;
     }
     api.current = session.get(name)?.events ?? [];
@@ -123,7 +116,7 @@ export function useAddedEvents(name: string): AddedEvents {
           setLocalMarkers(name, rest);
           const m = fromMarker(r.data.marker);
           api.current = [...api.current.filter((x) => x.id !== m.id), m].sort(byTime);
-          session.set(name, { events: api.current, writes: true });
+          session.set(name, { events: api.current });
         } else if (!r.ok && NEVER.has(r.code)) setLocalMarkers(name, rest);
         else {
           if (!r.ok && TODAY.has(r.code)) setLocalMarkers(name, [...rest, { ...e, after: dayAfter(today) }]);
@@ -138,8 +131,8 @@ export function useAddedEvents(name: string): AddedEvents {
       const r = await apiGet<MarkersReply>(`/api/markers?market=${encodeURIComponent(name)}`);
       // no answer (or not listed): what shows stays, and the next ask tries again
       if (!live || !r || r.listed !== true || !Array.isArray(r.markers)) return;
-      show({ events: r.markers.map(fromMarker).sort(byTime), writes: r.writes !== false });
-      if (r.writes !== false && !sending && waiting(name).length) {
+      show({ events: r.markers.map(fromMarker).sort(byTime) });
+      if (!sending && waiting(name).length) {
         sending = true;
         await send().finally(() => (sending = false));
       }
@@ -172,7 +165,7 @@ export function useAddedEvents(name: string): AddedEvents {
     const e: Waiting = { id: `ev_${Date.now().toString(36)}`, t, label, source: "manual" };
     if (current.status === "off") {
       const events = [...current.events, e].sort(byTime);
-      session.set(name, { events, writes: true });
+      session.set(name, { events });
       setLocalMarkers(name, events.filter((x) => x.id.startsWith("ev_")));
       setState((s) => (s.name === name ? { ...s, events } : s));
     } else {
@@ -190,7 +183,7 @@ export function useAddedEvents(name: string): AddedEvents {
     if (typeof r.data.undo === "string") saveUndo(r.data.marker.id, r.data.undo);
     const m = fromMarker(r.data.marker);
     api.current = [...api.current.filter((e) => e.id !== m.id), m].sort(byTime);
-    session.set(name, { events: api.current, writes: current.writes });
+    session.set(name, { events: api.current });
     show();
     return null;
   };
@@ -198,7 +191,7 @@ export function useAddedEvents(name: string): AddedEvents {
   const remove = async (id: string): Promise<string | null> => {
     if (current.status === "off") {
       const events = current.events.filter((e) => e.id !== id);
-      session.set(name, { events, writes: true });
+      session.set(name, { events });
       setLocalMarkers(name, events.filter((x) => x.id.startsWith("ev_")));
       setState((s) => (s.name === name ? { ...s, events } : s));
       return null;
@@ -214,14 +207,14 @@ export function useAddedEvents(name: string): AddedEvents {
     if (!r.ok && r.code !== "not_found") return r.words;
     dropUndo(id);
     api.current = api.current.filter((e) => e.id !== id);
-    session.set(name, { events: api.current, writes: current.writes });
+    session.set(name, { events: api.current });
     show();
     return null;
   };
 
   const canRemove = (id: string) => current.status === "off" || id.startsWith("ev_") || undoOf(id) != null;
 
-  return { events: current.events, status: current.status, writes: current.writes, add, remove, canRemove };
+  return { events: current.events, status: current.status, add, remove, canRemove };
 }
 
 /* `t` is the US/Eastern wall clock read as UTC (types.ts), so a

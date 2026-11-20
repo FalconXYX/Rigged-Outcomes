@@ -16,14 +16,14 @@ word-for-word "already out" copy check, the odds and betting filter and the
 (the approved open-list proposal (2026-11-13), Nov 6-13: Huang's 3-day stay,
 Syria and Israel held back, the dated place) and its faster variant, the
 caps, a short day never padded, the labels, and whole runs: a first day
-whose cards need no approval, a second reading that disagrees, a person's override (a rejected
-headline never shows, an approved one always counts), a day the model is
+whose cards show on the readings' steps, a second reading that disagrees, no
+step and no card but the dated one, a day the model is
 down (yesterday's live cards stay, none added, "not updated today"), one
 story's reading failing, a day an answer comes out (held back), a re-run
 on the same news asking nothing (headlines over the cap are not new), a
 re-run while the model is down keeping the day's earlier list, every step
-reading refused counting as down, a person's rebuild of the reviewed day
-reading no new step, the consistency test's files, and the run's time
+reading refused counting as down, a rebuild of the day reading no new step,
+the consistency test's files, and the run's time
 budget on a fake clock (no step reading starts in the time kept for
 "already out", which stops when the budget is spent; what was read is
 stored and kept, the list is made from it and the day is "updated"; the
@@ -34,8 +34,8 @@ from a request's second try, reset by an answer, cut at the budget), step
 readers stopping once the model is down, and the catch-up run (nothing to
 read: nothing done; only what the day's run left is read, with no search,
 naming or new pool entry; searches not stored: it stops first; a reading
-that changes nothing, or Polymarket alone, leaves the list byte for byte; a
-person's rebuild keeps what was left; its wiring in the workflow).
+that changes nothing, or Polymarket alone, leaves the list byte for byte;
+its wiring in the workflow).
 """
 import contextlib
 import csv
@@ -68,9 +68,6 @@ def two_readings(fn):
     run.__name__ = fn.__name__
     return run
 
-SHIPPED_STEPS_BY = O.STEPS_BY
-O.STEPS_BY = "model"     # the whole runs below test the readings' own steps; test_steps_wait_for_a_person_when_set
-                         # tests the approval the module ships with
 
 
 # ── pool ─────────────────────────────────────────────────────────────────────
@@ -416,7 +413,7 @@ def test_threads():
     assert th["lutnick"] == th["nvidia ceo"] and th["huang"] != th["lutnick"] and th["x"] != th["huang"]
 
 
-def test_readings_and_person_steps():
+def test_readings_and_holds():
     a, b = _h("Board weighs A", 5), _h("Plain report B", 6)
     rs = [{"headlines_sha1": "s1", "run": 1, "data": {"given": [a, b], "out": None}},
           {"headlines_sha1": "s1", "run": 2, "data": {"given": [a], "out": None}}]
@@ -425,18 +422,10 @@ def test_readings_and_person_steps():
     # a headline published before the last reading but given only now is new: by its words, not its time
     late = _h("Board weighs C", 30)
     assert not r.covered(rs, 1, [a, b, late])
-    rv = {O._key(a): {"decision": O.STEP, "headline": O._bare(a)},
-          O._key(late): {"decision": O.NOT_STEP, "headline": O._bare(late)},
-          "card": {"decision": O.NOT_STEP, "headline": None}}
-    assert [h["title"] for h in O.person_steps(rv)] == ["Board weighs A"]
-    assert O.rejected_keys(rv) == {O._key(late)}                   # a rejected dated card is not a headline
     held = [{"headlines_sha1": "x", "run": 1, "data": {"out": O._bare(_h("It happened", 10)), "out_status": "unclear"}}]
     assert O.is_held(held, NOW) and not O.is_held(rs, NOW)
     old = [{"headlines_sha1": "x", "run": 1, "data": {"out": O._bare(_h("It happened", 24 * 8)), "out_status": "out"}}]
     assert not O.is_held(old, NOW)
-    # offered to a person in the card's order: agencies first, a leak first within a rank, then the newest
-    hs = [_h("Board weighs it", 2, "Blog"), _h("Board weighs it, sources say", 9, "Blog"), _h("Board weighs plan", 20, "Reuters")]
-    assert [h["title"] for h in O.offer_order(hs)] == ["Board weighs plan", "Board weighs it, sources say", "Board weighs it"]
 
 
 def test_already_out_reads_every_headline():
@@ -455,7 +444,7 @@ def test_already_out_reads_every_headline():
                     {"subject": "Ruritania"})
     assert d["out"]["title"] == "Ruritania strikes Freedonia's capital" and d["out_status"] == "out"
     d = O.check_out({"already_out": "Ruritania attacked", "already_out_status": "out"}, given, {"subject": "Ruritania"})
-    assert d["out"] is None and d["unmatched"] == "out"                       # counted as none, shown to the person
+    assert d["out"] is None and d["unmatched"] == "out"   # counted as none
 
 
 def test_outcome_shapes_split_and_whole():
@@ -885,17 +874,17 @@ def test_whole_runs():
         out = os.path.join(tmp, "open.json")
         client = FakeClient()
         s1 = _run(conn, NOW, client, out)
-        # the step reading confirms the steps: the cards show with nobody's approval
+        # the step reading decides the steps: the cards show on them
         doc = json.load(open(out))
-        assert doc["rules"]["steps_by"] == "model" and doc["rules"]["prompt_version"].startswith(O.PROMPT_VERSION)
-        assert s1["status"] == "updated" and s1["steps_by"] == "model" and "no longer wait" in s1["approval"]
+        assert "steps_by" not in doc["rules"] and doc["rules"]["prompt_version"].startswith(O.PROMPT_VERSION)
+        assert s1["status"] == "updated" and "awaiting" not in s1 and "approval" not in s1
         assert s1["counts"]["events in the pool (pass the closed list's rules)"] == 4      # the Fed and the 99c one out
         day = doc["days"][0]
-        assert day["day"] == "2026-11-13" and day["status"] == "updated" and day["awaiting"] == 0, day
+        assert day["day"] == "2026-11-13" and day["status"] == "updated" and "awaiting" not in day, day
         assert [c["id"] for c in day["cards"]] == [ROE_K, ACME_K, TURNER_K]
         assert day["new_today"] == 3 and day["held_back"] == 1 and s1["new_today"] == 3
         assert RUR_K in [h["id"] for h in s1["held_back"]]                      # "hit by 'enemy strike'": unclear
-        assert [p["steps_from"] for p in s1["picks"][:2]] == [{"model": 1, "person": 0, "card_headline_by": "model"}] * 2
+        assert [p["steps_from"] for p in s1["picks"][:2]] == [{"model": 1}] * 2
         # one step prompt per any-day story with a step-word headline, then the second reading of each that
         # marked a step, in reverse order; the dated story is not read for steps
         steps = client.steps_asked()
@@ -931,11 +920,6 @@ def test_whole_runs():
         assert roe["polymarket"] == {"question": "Jane Roe out as Secretary of Widgets by December 31?", "other_dates": [],
                                      "url": "https://polymarket.com/event/e1"}
         assert store.open_listed_since(conn, "e1") == "2026-11-13" and store.open_listed_since(conn, "m21") == "2026-11-13"
-        # the queue a person may override: the shown cards' steps, then the dated card
-        assert [(w["n"], w["story"], w["why"]) for w in s1["awaiting"]] == [
-            (1, ROE_K, O.SHOWN), (2, ACME_K, O.SHOWN), (3, TURNER_K, O.DATED_SHOWN)], s1["awaiting"]
-        text = O.review_text(store.get_open_day(conn, "2026-11-13"))
-        assert "1. Will Jane Roe leave the Widgets Department?" in text and "cards need no approval" in text
 
         # the same day again: every headline was read, nothing is asked again
         again = FakeClient()
@@ -978,7 +962,7 @@ def plus_search(query, after=None, before=None, limit=None):
 @two_readings
 def test_second_reading_must_agree():
     # a model that marks only the headline it is shown first: the second reading (reverse order) disagrees on
-    # Acme's two headlines, so neither counts; a person may approve one
+    # Acme's two headlines, so neither counts
     conn = store.connect(":memory:")
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "open.json")
@@ -988,54 +972,16 @@ def test_second_reading_must_agree():
         assert len(acme) == 2 and [t for _, t in step_lines(acme[1])] == [t for _, t in reversed(step_lines(acme[0]))]
         assert s["step_reading"]["reading 2: steps of reading 1 it did not mark"] == 1
         day = json.load(open(out))["days"][0]
-        assert [c["id"] for c in day["cards"]] == [ROE_K, TURNER_K] and day["awaiting"] == 1, day
-        item = next(w for w in s["awaiting"] if w["story"] == ACME_K)
-        assert item["why"] == O.ONE_READING and len(item["candidates"]) == 2
-        assert "Acme and Globex announce a merger" in O.review_text(store.get_open_day(conn, "2026-11-13"))
-        O.decide(conn, [f"{item['n']}.2"], True, now=NOW)
-        s2 = _run(conn, NOW, FakeClient(mark=lambda n, t: n == 1), out, plus_search)
-        day = json.load(open(out))["days"][0]
-        acme_card = next(c for c in day["cards"] if c["id"] == ACME_K)
-        assert acme_card["headline"]["title"] == item["candidates"][1]["title"]
-        assert next(p for p in s2["picks"] if p["id"] == ACME_K)["steps_from"]["card_headline_by"] == "person"
+        assert [c["id"] for c in day["cards"]] == [ROE_K, TURNER_K], day
 
 
-def test_a_persons_decisions_override_the_reading():
+def test_no_step_no_card_but_the_dated_one():
+    # the reading marks no step: only the dated card shows (it needs none)
     conn = store.connect(":memory:")
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "open.json")
-        s = _run(conn, NOW, FakeClient(), out)
-        # a rejected headline never shows: Roe's step taken off, and the Turner card
-        n_roe = next(w["n"] for w in s["awaiting"] if w["story"] == ROE_K)
-        n_turner = next(w["n"] for w in s["awaiting"] if w["story"] == TURNER_K)
-        done = O.decide(conn, [str(n_roe), str(n_turner)], False, now=NOW)
-        assert len(done) == 2
-        s2 = _run(conn, NOW, FakeClient(), out)
-        day = json.load(open(out))["days"][0]
-        assert [c["id"] for c in day["cards"]] == [ACME_K], day["cards"]
-        assert ROE_K not in [w["story"] for w in s2["awaiting"]] and TURNER_K not in [w["story"] for w in s2["awaiting"]]
-        for c in day["cards"]:
-            assert "White House weighs Jane Roe's future, officials say" not in [h["title"] for h in c["headlines"]]
-        try:
-            O.decide(conn, ["7"], True)
-            raise AssertionError("an item not in the queue was accepted")
-        except ValueError:
-            pass
-    # an approved headline always counts, even when the reading marks no step (today's approvals stand)
-    conn = store.connect(":memory:")
-    with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, "open.json")
-        never = FakeClient(mark=lambda n, t: False)
-        s = _run(conn, NOW, never, out)
-        assert [c["id"] for c in json.load(open(out))["days"][0]["cards"]] == [TURNER_K] and not [
-            w for w in s["awaiting"] if w["why"] != O.DATED_SHOWN]
-        h = {"title": "White House weighs Jane Roe's future, officials say", "source": "Reuters",
-             "published": ts_iso(-10), "url": "https://news/White House weighs Jane Roe's future, officials say"}
-        store.save_review(conn, ROE_K, O._key(h), O.STEP, h, "person", NOW)
-        s = _run(conn, NOW, FakeClient(mark=lambda n, t: False), out)
-        cards = json.load(open(out))["days"][0]["cards"]
-        assert [c["id"] for c in cards] == [ROE_K, TURNER_K] and cards[0]["headline"]["title"] == h["title"]
-        assert s["picks"][0]["steps_from"] == {"model": 0, "person": 1, "card_headline_by": "person"}
+        _run(conn, NOW, FakeClient(mark=lambda n, t: False), out)
+        assert [c["id"] for c in json.load(open(out))["days"][0]["cards"]] == [TURNER_K]
 
 
 def test_one_failed_reading_leaves_its_story_unread():
@@ -1120,71 +1066,20 @@ def test_a_down_rerun_keeps_the_days_list():
             assert d2["day"] == "2026-11-14" and d2["new_today"] == 0 and d2["status"] == "not updated today"
 
 
-def test_a_persons_rebuild_reads_no_new_step():
-    # --approve / --reject rebuild the reviewed day at its own run time without a new step reading: a later
-    # step headline is not read, the rejected card goes, the rest stay as they were
+def test_a_rebuild_reads_no_new_step():
+    # a rebuild of the day at its own run time with no new step reading (read_steps=False, as open.publish
+    # does): a later step headline is not read, and the cards stay as they were
     conn = store.connect(":memory:")
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "open.json")
-        s = _run(conn, NOW, FakeClient(), out)
-        n_acme = next(w["n"] for w in s["awaiting"] if w["story"] == ACME_K)
-        O.decide(conn, [str(n_acme)], False, now=NOW)
-        reviewed = store.get_open_day(conn, "2026-11-13")
+        _run(conn, NOW, FakeClient(), out)
+        made = store.get_open_day(conn, "2026-11-13")
         c = FakeClient()
-        s2 = O.daily(conn=conn, now=reviewed["run_at"], client=c, walk=lambda: EVENTS, search=plus_search,
-                     out_path=out, news_cache_path=None, sleep=lambda s: None, workers=1, read_steps=False,
-                     review_of=reviewed)
+        s2 = O.daily(conn=conn, now=made["run_at"], client=c, walk=lambda: EVENTS, search=plus_search,
+                     out_path=out, news_cache_path=None, sleep=lambda s: None, workers=1, read_steps=False)
         assert not c.steps_asked() and s2["status"] == "updated", s2["step_reading"]
         day = json.load(open(out))["days"][0]
-        assert [x["id"] for x in day["cards"]] == [ROE_K, TURNER_K] and day["run_at"] == "2026-11-13T09:00:00Z"
-        # a day the model was down for stays "not updated today" when a person rebuilds it
-        _run(conn, NOW + DAY, FakeClient(down=True), out)
-        stale = store.get_open_day(conn, "2026-11-14")
-        c = FakeClient()
-        s3 = O.daily(conn=conn, now=stale["run_at"], client=c, walk=lambda: EVENTS, search=fake_search,
-                     out_path=out, news_cache_path=None, sleep=lambda s: None, workers=1, read_steps=False,
-                     review_of=stale)
-        assert s3["status"] == "not updated today" and not c.prompts
-        assert [x["id"] for x in json.load(open(out))["days"][0]["cards"]] == [ROE_K, TURNER_K]
-
-
-@two_readings
-def test_steps_wait_for_a_person_when_set():
-    # STEPS_BY "person" (the fallback in the approved open-list proposal (2026-11-13) when the bars are not
-    # met, as they were not out of sample on 2026-11-14): the readings' steps are only proposed; a card shows
-    # once a person approves its step, and a dated card still shows on its own
-    assert SHIPPED_STEPS_BY == "person"
-    conn = store.connect(":memory:")
-    old = O.STEPS_BY
-    O.STEPS_BY = "person"
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            out = os.path.join(tmp, "open.json")
-            s = _run(conn, NOW, FakeClient(), out)
-            doc = json.load(open(out))
-            day = doc["days"][0]
-            assert [c["id"] for c in day["cards"]] == [TURNER_K] and doc["rules"]["steps_by"] == "person", day
-            waiting = [w for w in s["awaiting"] if w["why"] == O.AWAITING]
-            assert [w["story"] for w in waiting] == [ROE_K, ACME_K] and day["awaiting"] == 2, s["awaiting"]
-            assert waiting[0]["candidates"][0]["title"] == "White House weighs Jane Roe's future, officials say"
-            assert "a card shows once a person approves its step" in O.review_text(store.get_open_day(conn, "2026-11-13"))
-            O.decide(conn, [str(waiting[0]["n"])], True, now=NOW)
-            c = FakeClient()
-            s2 = O.daily(conn=conn, now=NOW, client=c, walk=lambda: EVENTS, search=fake_search, out_path=out,
-                         news_cache_path=None, sleep=lambda s: None, workers=1, read_steps=False,
-                         review_of=store.get_open_day(conn, "2026-11-13"))
-            assert not c.steps_asked()
-            assert [x["id"] for x in json.load(open(out))["days"][0]["cards"]] == [ROE_K, TURNER_K]
-            assert [w["story"] for w in s2["awaiting"] if w["why"] == O.AWAITING] == [ACME_K]
-            # day 2: the readings mark a newer step for Roe's card: it is offered so the card can stay fresh
-            s3 = _run(conn, NOW + DAY, FakeClient(), out)
-            shown = [w for w in s3["awaiting"] if w["why"] == O.SHOWN]
-            assert [w["story"] for w in shown] == [ROE_K], s3["awaiting"]
-            assert shown[0]["candidates"][0]["title"] == "Jane Roe prepares exit plan, sources say"
-            assert json.load(open(out))["days"][0]["awaiting"] == len([w for w in s3["awaiting"]
-                                                                       if w["why"] == O.AWAITING])
-    finally:
-        O.STEPS_BY = old
+        assert [x["id"] for x in day["cards"]] == [ROE_K, ACME_K, TURNER_K] and day["run_at"] == "2026-11-13T09:00:00Z"
 
 
 def test_naming_down_does_not_cost_the_day():
@@ -1202,7 +1097,7 @@ def test_naming_down_does_not_cost_the_day():
         s = _run(conn, NOW, busy, out)
         assert s["names_down"] and not s["model_down"] and s["status"] == "updated", s
         assert len([p for p in busy.prompts if p.startswith("You fill in names")]) == O.MODEL_TRIES
-        assert s["stories"]["named"] == 0 and s["awaiting"] == [] and s["picks"] == []
+        assert s["stories"]["named"] == 0 and s["picks"] == []
         # the same day's re-run names them, reads them and lists them
         s2 = _run(conn, NOW, FakeClient(), out)
         assert not s2["names_down"] and s2["status"] == "updated" and len(s2["picks"]) == 3, s2["picks"]
@@ -1576,41 +1471,6 @@ def test_news_past_the_budget_keeps_the_last_list():
         assert d2["day"] == "2026-11-14" and [x["id"] for x in d2["cards"]] == [x["id"] for x in day1["cards"]]
 
 
-def test_headline_key():
-    # the key a decision is stored under (store.open_reviews), which the job sends with every candidate
-    assert O.headline_key is O._key
-    assert O.headline_key({"title": "  White House  weighs Jane Roe’s future "}) == \
-        O.headline_key({"title": "white house weighs jane roe's future"}) == "white house weighs jane roe's future"
-    assert O.headline_key(None) == "" and O.headline_key({}) == ""
-
-
-def test_rebuild_reviewed_is_the_approve_path():
-    # rebuild_reviewed() does what --approve / --reject did after recording: the latest day at its own run time,
-    # no new step reading; the same decision on two copies of a store gives the same list either way
-    outs = []
-    with tempfile.TemporaryDirectory() as tmp:
-        for way in ("daily", "rebuild"):
-            conn = store.connect(":memory:")
-            out = os.path.join(tmp, f"{way}.json")
-            s = _run(conn, NOW, FakeClient(), out)
-            O.decide(conn, [str(next(w["n"] for w in s["awaiting"] if w["story"] == ACME_K))], False, now=NOW)
-            c = FakeClient()
-            if way == "daily":
-                reviewed = store.get_open_day(conn, "2026-11-13")
-                got = O.daily(conn=conn, now=reviewed["run_at"], client=c, walk=lambda: EVENTS, search=plus_search,
-                              out_path=out, news_cache_path=None, sleep=lambda s: None, workers=1, read_steps=False,
-                              review_of=reviewed, news_max_age_hours=O.REVIEW_NEWS_HOURS)
-            else:
-                got = O.rebuild_reviewed(conn, out_path=out, news_cache_path=None, client=c, walk=lambda: EVENTS,
-                                         search=plus_search, sleep=lambda s: None, workers=1)
-            assert not c.steps_asked() and got["status"] == "updated" and got["run_at"] == "2026-11-13T09:00:00Z"
-            outs.append((json.load(open(out)), got["awaiting"], O.latest_day(conn)["cards"]))
-    assert outs[0] == outs[1]
-    assert [c["id"] for c in outs[0][0]["days"][0]["cards"]] == [ROE_K, TURNER_K]
-    # no list yet: nothing to rebuild
-    assert O.rebuild_reviewed(store.connect(":memory:"), out_path=None) is None
-
-
 @two_readings
 def test_news_down_keeps_the_last_list():
     # NEWS_DOWN_AFTER searches failing in a row: the feed is given up on, no model is asked after it, the last
@@ -1801,39 +1661,6 @@ def test_a_catch_up_that_changes_nothing_leaves_the_list_as_it_was():
             assert set(_asked(client.steps_asked())) == (set() if cut else {RUR_Q}) and not client.outs_asked()
             # a reading that found no step is still stored: the next run does not ask it again
             assert bool(store.open_answer_history(conn, RUR_K, O.PROMPT_VERSION)) == read
-
-
-@two_readings
-def test_a_persons_rebuild_keeps_what_was_left_unread():
-    # an apply run's rebuild reads no step: the day's unread stories stay unread (for the catch-up, and for the
-    # next day's shortlist, which reads them as new), and a day the model was down for keeps why
-    conn = store.connect(":memory:")
-    with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, "open.json")
-        clock = Clock()
-        with contextlib.redirect_stdout(io.StringIO()):
-            O.daily(conn=conn, now=NOW, client=SlowClient(clock, step_minutes=20), walk=lambda: EVENTS,
-                    search=fake_search, out_path=out, news_cache_path=None, sleep=lambda s: None, workers=1,
-                    budget=Budget(60 * 60, clock=clock))
-            was = store.get_open_day(conn, "2026-11-13")["info"]
-            O.rebuild_reviewed(conn, out_path=out, news_cache_path=None, client=FakeClient(), walk=lambda: EVENTS,
-                               search=fake_search, sleep=lambda s: None, workers=1)
-        info = store.get_open_day(conn, "2026-11-13")["info"]
-        assert info["left_for_next_run"] == was["left_for_next_run"] == {"steps 1": 1, "steps 2": 2}
-        assert info["seen_step_headlines"] == was["seen_step_headlines"]
-        assert not [x for x in info["seen_step_headlines"] if x.startswith(RUR_K + "\x1f")]
-        assert O.left_unread(store.get_open_day(conn, "2026-11-13")) == 3
-    stale = {"day": "2026-11-13", "status": O.STATUS_STALE,
-             "info": {"model_down": "step reading: the model was busy or down", "model_down_busy": True,
-                      "step_failed": ["a", "c"], "step_failed_busy": ["a"],
-                      "left_for_next_run": {"steps 1": 2, "names": 1}, "seen_step_headlines": ["a\x1fx"]}}
-    info = {"model_down": O.REBUILT_DOWN, "model_down_busy": False, "left_for_next_run": {"already out": 1},
-            "step_failed": [], "step_failed_busy": [], "seen_step_headlines": ["a\x1fx", "b\x1fy"]}
-    O.carry_unread(info, stale)
-    assert info == {"model_down": "step reading: the model was busy or down", "model_down_busy": True,
-                    "step_failed": ["a", "c"], "step_failed_busy": ["a"],
-                    "left_for_next_run": {"already out": 1, "steps 1": 2}, "seen_step_headlines": ["a\x1fx"]}
-    assert O.left_unread({"info": info}) == 1 + 2 + 1 + 1
 
 
 if __name__ == "__main__":

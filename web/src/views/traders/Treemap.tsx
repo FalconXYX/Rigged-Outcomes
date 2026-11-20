@@ -1,12 +1,23 @@
 import * as d3 from "d3";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
-import type { Trader, TraderCategory, TradersData } from "../../types";
+import type { RubricDisplay, Trader, TradersData } from "../../types";
 import { TipRow, Tooltip } from "../../components/ui";
 import { fmtInt, fmtPct, fmtUSD, fmtUSDCompact, shortAddr } from "../../lib/format";
 import { prefersReducedMotion, useSize } from "../../lib/useSize";
-import { CATEGORY_ORDER, type CategoryName, type Focus, type Pin, type TreemapCategory, type TreemapLeaf, type TreemapNode, type TreemapRoot, type TreemapWallet } from "./model";
-import { CAT_COLOR, catTint, font, headerMix, inkOn, restMix, subInkOn, textWidth, useFontVersion, usePalette } from "./paint";
-import { CategoryKey, PinCard } from "./TraderCard";
+import {
+  groupOf,
+  type Focus,
+  type Group,
+  type Grouping,
+  type Pin,
+  type TreemapCategory,
+  type TreemapLeaf,
+  type TreemapNode,
+  type TreemapRoot,
+  type TreemapWallet,
+} from "./model";
+import { font, headerMix, inkOn, restMix, subInkOn, textWidth, tint, useFontVersion, usePalette } from "./paint";
+import { GroupKey, PinCard, SpectrumTipRows } from "./TraderCard";
 
 const HEADER = 20; // category header band height
 const GAP = 2; // surface gap between tiles
@@ -37,7 +48,7 @@ type HeaderMode = { mode: "top" } | { mode: "side"; width: number } | { mode: "n
 interface Placed {
   key: string;
   kind: "header" | "wallet" | "rest";
-  category: TraderCategory;
+  category: string;
   node: TreemapCategory | TreemapLeaf;
   rect: Rect;
   opacity: number;
@@ -50,14 +61,16 @@ type Layout = Map<string, Placed>;
 interface Props {
   data: TradersData;
   tree: TreemapRoot;
-  names: Record<TraderCategory, CategoryName>;
+  grouping: Grouping;
+  /** Present in the insider-score view (tooltip and card read the answers). */
+  rubric?: RubricDisplay;
   focus: Focus;
   onFocus: (f: Focus) => void;
   onLeave: () => void;
   pin: Pin | null;
   onPin: (p: Pin | null) => void;
-  zoomCat: TraderCategory | null;
-  onZoom: (c: TraderCategory | null) => void;
+  zoomCat: string | null;
+  onZoom: (c: string | null) => void;
   walletRows: Map<string, number[]>;
   /** Tallest the chart may be (px); it is never shorter than 360. */
   maxHeight?: number;
@@ -206,7 +219,7 @@ function headerMode(cat: TreemapCategory, w: number, h: number, narrow: boolean)
 }
 
 /** Overview: categories with a header band (top, side or none), wallets inside. */
-function layoutAll(tree: TreemapRoot, W: number, H: number, narrow: boolean): { placed: Layout; leafAreas: Map<TraderCategory, Rect> } {
+function layoutAll(tree: TreemapRoot, W: number, H: number, narrow: boolean): { placed: Layout; leafAreas: Map<string, Rect> } {
   // Pass 1: category blocks. A node's own padding never moves the node, so
   // these are the blocks pass 2 lays out too.
   const blocks = squarify(W, H)(hierarchy(tree));
@@ -224,7 +237,7 @@ function layoutAll(tree: TreemapRoot, W: number, H: number, narrow: boolean): { 
     })(hierarchy(tree));
 
   const placed: Layout = new Map();
-  const leafAreas = new Map<TraderCategory, Rect>();
+  const leafAreas = new Map<string, Rect>();
   for (const c of root.children ?? []) {
     const cat = c.data as TreemapCategory;
     const m = modes.get(cat.key) ?? { mode: "none" };
@@ -267,7 +280,7 @@ function layoutAll(tree: TreemapRoot, W: number, H: number, narrow: boolean): { 
 type AllLayout = ReturnType<typeof layoutAll>;
 
 /** A category's wallets re-squarified to fill the chart. */
-function layoutLeaves(tree: TreemapRoot, W: number, H: number, cat: TraderCategory): Layout {
+function layoutLeaves(tree: TreemapRoot, W: number, H: number, cat: string): Layout {
   const out: Layout = new Map();
   const node = tree.children.find((c) => c.category === cat);
   if (!node) return out;
@@ -283,14 +296,14 @@ const lerp = (a: number, b: number, e: number) => a + (b - a) * e;
 
 /** Remainder-tile hatch: one pattern per category (pattern content can't inherit the tile's color). */
 const HATCH = 7;
-const hatchId = (c: TraderCategory) => `tr-hatch-${c}`;
+const hatchId = (c: string) => `tr-hatch-${c.replace(/[^A-Za-z0-9_-]/g, "_")}`;
 
 /**
  * The overview under a partial zoom (e = 0 → overview, 1 → the category's
  * wallet area fills the chart). One affine map for every tile, so nothing
  * overlaps; tiles outside the category fade as they slide off.
  */
-function zoomedOverview(all: AllLayout, cat: TraderCategory, W: number, H: number, e: number): Layout {
+function zoomedOverview(all: AllLayout, cat: string, W: number, H: number, e: number): Layout {
   const a = all.leafAreas.get(cat);
   if (!a) return all.placed;
   const kx = W / Math.max(1e-6, a.x1 - a.x0);
@@ -310,7 +323,7 @@ function zoomedOverview(all: AllLayout, cat: TraderCategory, W: number, H: numbe
 }
 
 /** Static layout for a zoom state (every key present, so hit-testing and highlights can look anything up). */
-function staticLayout(tree: TreemapRoot, all: AllLayout, W: number, H: number, cat: TraderCategory | null): Layout {
+function staticLayout(tree: TreemapRoot, all: AllLayout, W: number, H: number, cat: string | null): Layout {
   if (!cat || !all.leafAreas.has(cat)) return all.placed;
   const out = zoomedOverview(all, cat, W, H, 1);
   for (const [k, p] of out) if (p.category === cat && p.kind !== "header") out.set(k, { ...p, opacity: 0 });
@@ -329,7 +342,7 @@ interface Frame {
  * re-squarified wallets dissolve in on top. Out: the reverse. Any other
  * change (resize, data, legend) snaps.
  */
-function useZoomTransition(tree: TreemapRoot, all: AllLayout | null, W: number, H: number, zoomCat: TraderCategory | null) {
+function useZoomTransition(tree: TreemapRoot, all: AllLayout | null, W: number, H: number, zoomCat: string | null) {
   const [frame, setFrame] = useState<Frame | null>(null);
   const latest = useRef({ tree, all, W, H });
   const prevCat = useRef(zoomCat);
@@ -438,7 +451,7 @@ function leafLabel(p: Placed, narrow: boolean): LeafLabel | null {
 
 /* ── Component ─────────────────────────────────────────────────────── */
 
-export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin, zoomCat, onZoom, walletRows, maxHeight = 640 }: Props) {
+export function Treemap({ data, tree, grouping, rubric, focus, onFocus, onLeave, pin, onPin, zoomCat, onZoom, walletRows, maxHeight = 640 }: Props) {
   const [wrapRef, { width: W }] = useSize<HTMLDivElement>();
   const svgRef = useRef<SVGSVGElement>(null);
   const pal = usePalette();
@@ -448,18 +461,19 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
   // theme: light or dark ink, whichever contrasts more (every category clears
   // 4.5:1 that way in both themes). Re-resolved when the theme changes.
   const inks = useMemo(() => {
-    const out = {} as Record<TraderCategory, { solid: string; rest: string; hdr: string; hdrSub: string }>;
-    for (const c of CATEGORY_ORDER) {
-      const band = pal.rgb(catTint(c, hdrMix));
-      out[c] = {
-        solid: inkOn(pal.rgb(CAT_COLOR[c]), pal),
-        rest: inkOn(pal.rgb(catTint(c, mix)), pal),
+    const out: Record<string, { solid: string; rest: string; hdr: string; hdrSub: string }> = {};
+    for (const g of grouping.groups) {
+      const band = pal.rgb(tint(g.color, hdrMix));
+      out[g.id] = {
+        solid: inkOn(pal.rgb(g.color), pal),
+        rest: inkOn(pal.rgb(tint(g.color, mix)), pal),
         hdr: inkOn(band, pal),
         hdrSub: subInkOn(band, pal),
       };
     }
     return out;
-  }, [pal, mix, hdrMix]);
+  }, [pal, mix, hdrMix, grouping]);
+  const groupFor = useCallback((id: string): Group => grouping.byId.get(id) ?? grouping.groups[0], [grouping]);
   const [tip, setTip] = useState<{ key: string; x: number; y: number } | null>(null);
   const [kbKey, setKbKey] = useState<string | null>(null);
   // Roving tabindex: the treemap is one Tab stop (this tile), arrow keys walk
@@ -523,20 +537,21 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
     }
     const tr = traderAt(focus.row);
     if (!tr) return null;
+    const gid = groupOf(grouping, focus.row).id;
     const wk = `w:${focus.row}`;
-    const target = display.has(wk) ? wk : `rest:${tr.category}`;
-    return (p) => p.key === target || (p.kind === "header" && p.category === tr.category);
-  }, [focus, traderAt, display]);
+    const target = display.has(wk) ? wk : `rest:${gid}`;
+    return (p) => p.key === target || (p.kind === "header" && p.category === gid);
+  }, [focus, traderAt, display, grouping]);
 
   const outlineKey = useMemo(() => {
     if (focus?.kind === "wallet") {
       const tr = traderAt(focus.row);
       if (!tr) return null;
-      return display.has(`w:${focus.row}`) ? `w:${focus.row}` : `rest:${tr.category}`;
+      return display.has(`w:${focus.row}`) ? `w:${focus.row}` : `rest:${groupOf(grouping, focus.row).id}`;
     }
     if (focus?.kind === "rest") return `rest:${focus.category}`;
     return null;
-  }, [focus, traderAt, display]);
+  }, [focus, traderAt, display, grouping]);
 
   /* ── Events (delegated) ──────────────────────────────────────────── */
 
@@ -627,7 +642,7 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
       return (
         <>
           <div className="tip-title tr-tip-title tr-tip-cat-title">
-            <CategoryKey category={c.category} />
+            <GroupKey group={groupFor(c.category)} />
             {c.name}
           </div>
           <TipRow value={fmtUSD(c.value)} label="Volume" />
@@ -645,13 +660,16 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
             {fmtInt(leaf.count)} more wallet{leaf.count === 1 ? "" : "s"}
           </div>
           <div className="tr-tip-cat">
-            <CategoryKey category={leaf.category} />
-            {names[leaf.category].label}
+            <GroupKey group={groupFor(leaf.category)} />
+            {groupFor(leaf.category).label}
           </div>
           <TipRow value={fmtUSD(leaf.value)} label="Combined position" />
           <TipRow value={fmtPct(leaf.pctOfTotal)} label="of total whale stake" />
-          <TipRow value={fmtPct(leaf.pctOfCategory)} label="of category" />
-          <div className="tip-sub">Smaller than the top 15 in this category{zoomCat ? "" : " · click to zoom in"}</div>
+          <TipRow value={fmtPct(leaf.pctOfCategory)} label={`of ${grouping.noun}`} />
+          <div className="tip-sub">
+            Smaller than the top 15 in this {grouping.noun}
+            {zoomCat ? "" : " · click to zoom in"}
+          </div>
         </>
       );
     }
@@ -663,15 +681,21 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
           <span className="mono">{shortAddr(leaf.id)}</span>
         </div>
         <div className="tr-tip-cat">
-          <CategoryKey category={leaf.category} />
-          {names[leaf.category].label}
+          <GroupKey group={groupFor(leaf.category)} />
+          {groupFor(leaf.category).label}
         </div>
         <TipRow value={fmtUSD(leaf.value)} label="Position" />
         <TipRow value={fmtPct(leaf.pctOfTotal)} label="of total whale stake" />
-        <TipRow value={fmtPct(leaf.pctOfCategory)} label="of category" />
-        <TipRow value={fmtInt(leaf.priorBets)} label="Prior bets" />
-        <TipRow value={fmtPct(leaf.concentration)} label="Portfolio concentration" />
-        {tr && <TipRow value={tr.riskScore.toFixed(1)} label="Risk score / 100" />}
+        <TipRow value={fmtPct(leaf.pctOfCategory)} label={`of ${grouping.noun}`} />
+        {rubric && tr?.spectrum ? (
+          <SpectrumTipRows rubric={rubric} s={tr.spectrum} />
+        ) : (
+          <>
+            <TipRow value={fmtInt(leaf.priorBets)} label="Prior bets" />
+            <TipRow value={fmtPct(leaf.concentration)} label="Portfolio concentration" />
+            {tr && <TipRow value={tr.riskScore.toFixed(1)} label="Risk score / 100" />}
+          </>
+        )}
         {sib > 0 && (
           <div className="tip-sub">
             + {sib} other whale position{sib === 1 ? "" : "s"} from this wallet
@@ -688,6 +712,8 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
     const h = y1 - y0;
     if (w < 0.5 || h < 0.5 || p.opacity <= 0.01) return null;
     const cat = p.category;
+    const group = groupFor(cat);
+    const ink = inks[cat] ?? inks[grouping.groups[0].id];
     const node = p.node;
     const hiddenCat = node.hidden;
     const dim = onKey && !onKey(p);
@@ -724,28 +750,28 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
       const kx = x0 + HDR_PAD + DOT / 2;
       return (
         <g key={key} {...common} aria-label={`${c.label}, ${fmtUSD(c.value)}. ${zoomCat === cat ? "Zoom out" : "Zoom in"}`}>
-          <rect x={x0} y={y0} width={w} height={h} rx={Math.min(TILE_RX, h / 2, w / 2)} style={{ fill: catTint(cat, hdrMix) }} />
+          <rect x={x0} y={y0} width={w} height={h} rx={Math.min(TILE_RX, h / 2, w / 2)} style={{ fill: tint(group.color, hdrMix) }} />
           {lab && (
             <g className="hdr-label">
-              {/* Category key: identity comes from the dot, the text stays ink. */}
-              <circle cx={kx} cy={cy} r={DOT / 2} className="hdr-key" style={{ fill: CAT_COLOR[cat] }} />
-              {cat === "critical" && <circle cx={kx} cy={cy} r={DOT * 0.18} className="hdr-key-core" />}
+              {/* Group key: identity comes from the dot, the text stays ink. */}
+              <circle cx={kx} cy={cy} r={DOT / 2} className="hdr-key" style={{ fill: group.color }} />
+              {group.core && <circle cx={kx} cy={cy} r={DOT * 0.18} className="hdr-key-core" />}
               {(lab.name || lab.pct) && (
                 <text x={x0 + HDR_PAD + DOT + DOT_GAP} y={cy} dy="0.35em" style={{ fontSize: fs }}>
                   {lab.name && (
-                    <tspan className="hdr-l" style={{ fill: inks[cat].hdr }}>
+                    <tspan className="hdr-l" style={{ fill: ink.hdr }}>
                       {lab.name}
                     </tspan>
                   )}
                   {lab.pct && (
-                    <tspan className="hdr-p" dx={lab.name ? 5 : 0} style={{ fill: inks[cat].hdrSub }}>
+                    <tspan className="hdr-p" dx={lab.name ? 5 : 0} style={{ fill: ink.hdrSub }}>
                       {lab.pct}
                     </tspan>
                   )}
                 </text>
               )}
               {lab.money && (
-                <text x={x1 - HDR_PAD} y={cy} dy="0.35em" textAnchor="end" className="hdr-r" style={{ fontSize: fs, fill: inks[cat].hdrSub }}>
+                <text x={x1 - HDR_PAD} y={cy} dy="0.35em" textAnchor="end" className="hdr-r" style={{ fontSize: fs, fill: ink.hdrSub }}>
                   {lab.money}
                 </text>
               )}
@@ -758,8 +784,8 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
     const leaf = node as TreemapLeaf;
     const rest = leaf.kind === "rest";
     // The remainder is many wallets, not one: a hatched wash, never a solid wallet fill.
-    const fill = rest ? `url(#${hatchId(cat)})` : CAT_COLOR[cat];
-    const ink = rest ? inks[cat].rest : inks[cat].solid;
+    const fill = rest ? `url(#${hatchId(cat)})` : group.color;
+    const leafInk = rest ? ink.rest : ink.solid;
     const lab = !animating ? leafLabel(p, narrow) : null;
     const rx = Math.min(TILE_RX, Math.min(w, h) / 3);
     const s1 = lab?.lines[0]?.size ?? 12;
@@ -775,7 +801,7 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
       >
         <rect x={x0} y={y0} width={w} height={h} rx={rx} style={{ fill }} />
         {lab && (
-          <text className={`leaf-text${rest ? " on-hatch" : ""}`} style={rest ? { fill: ink, stroke: catTint(cat, mix) } : { fill: ink }}>
+          <text className={`leaf-text${rest ? " on-hatch" : ""}`} style={rest ? { fill: leafInk, stroke: tint(group.color, mix) } : { fill: leafInk }}>
             {lab.lines.map((l, i) => {
               let y = y0 + PAD + s1 * 0.95;
               for (let j = 0; j < i; j++) y += lab.lines[j + 1].size * (lab.lines[j + 1].cls === "l1" ? 1.25 : 1.3);
@@ -837,13 +863,16 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
                     patternUnits="userSpaceOnUse"
                     patternTransform="rotate(45)"
                   >
-                    <rect width={HATCH} height={HATCH} style={{ fill: catTint(c.category, mix) }} />
-                    <line x1={HATCH / 2} y1={0} x2={HATCH / 2} y2={HATCH} className="hatch-line" style={{ stroke: CAT_COLOR[c.category] }} />
+                    <rect width={HATCH} height={HATCH} style={{ fill: tint(groupFor(c.category).color, mix) }} />
+                    <line x1={HATCH / 2} y1={0} x2={HATCH / 2} y2={HATCH} className="hatch-line" style={{ stroke: groupFor(c.category).color }} />
                   </pattern>
                 ))}
               </defs>
               <rect width={W} height={H} className="tr-bg" />
-              <g role="group" aria-label="Whale positions by category. Arrow keys move between tiles; Enter pins a wallet or zooms a category.">
+              <g
+                role="group"
+                aria-label={`Whale positions by ${grouping.noun}. Arrow keys move between tiles; Enter pins a wallet or zooms a ${grouping.noun}.`}
+              >
                 {items.map((p) => tileEl(p))}
               </g>
               {overlayItems && <g style={{ opacity: frame?.overlayOpacity ?? 0 }}>{overlayItems.map((p) => tileEl(p, "o:"))}</g>}
@@ -860,7 +889,8 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
             {showPin && !docked && pinPlaced && (
               <PinCard
                 trader={pinTrader!}
-                names={names}
+                group={groupOf(grouping, pin!.row)}
+                rubric={rubric}
                 totalVolume={tree.value}
                 anchor={{ x: (pinPlaced.rect.x0 + pinPlaced.rect.x1) / 2, y: (pinPlaced.rect.y0 + pinPlaced.rect.y1) / 2 }}
                 container={{ width: W, height: H }}
@@ -873,7 +903,8 @@ export function Treemap({ data, tree, names, focus, onFocus, onLeave, pin, onPin
       {showPin && docked && (
         <PinCard
           trader={pinTrader!}
-          names={names}
+          group={groupOf(grouping, pin!.row)}
+          rubric={rubric}
           totalVolume={tree.value}
           docked
           onClose={() => onPin(null)}

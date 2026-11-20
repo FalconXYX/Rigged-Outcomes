@@ -53,7 +53,8 @@ export const CONTRACT = {
     "apply.decide":   { "lane": "main",  "heavy": false, "need_s": 120, "final": true,  "handler": "watchlist.steps:apply_decide" },
     "add.fetch":      { "lane": "add",   "heavy": true,  "need_s": 120, "final": false, "handler": "backend.add_steps:fetch" },
     "add.whales":     { "lane": "add",   "heavy": false, "need_s": 60,  "final": false, "handler": "backend.add_steps:whales" },
-    "add.export":     { "lane": "add",   "heavy": true,  "need_s": 60,  "final": true,  "handler": "backend.add_steps:export" }
+    "add.export":     { "lane": "add",   "heavy": true,  "need_s": 60,  "final": true,  "handler": "backend.add_steps:export" },
+    "wallets.score":  { "lane": "add",   "heavy": true,  "need_s": 120, "final": false, "handler": "backend.rubric.steps:score" }
   },
   "run_graphs": {
     "daily": [
@@ -196,7 +197,8 @@ export const CONTRACT = {
     "site": "^site:(index|closed|open)\\.json$",
     "site_market": "^site:markets/[a-z0-9][a-z0-9-]{1,31}\\.json$",
     "market": "^market:[a-z0-9][a-z0-9-]{1,31}$",
-    "scratch": "^scratch:[0-9a-f]{16}:[a-z0-9_.-]{1,40}$"
+    "scratch": "^scratch:[0-9a-f]{16}:[a-z0-9_.-]{1,40}$",
+    "rubric": "^rubric:[a-z0-9][a-z0-9-]{1,31}$"
   },
   "history_blobs": ["state", "site:index.json", "site:closed.json", "site:open.json"],
   "prune": {

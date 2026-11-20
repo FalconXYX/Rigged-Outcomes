@@ -23,6 +23,7 @@ A Cloudflare Worker queues and schedules the work; a Vercel function does it in 
 4. Each `add.whales` batch fetches those wallets' earlier trades.
 5. `add.export` scores the whales, publishes the market's page and the new index to D1, and marks the request `added`.
 6. The open page sees `added` and reads "On the main page →". No site rebuild.
+7. `wallets.score` gives every whale its insider score (Gemini's Decisions API, [WALLET_RUBRIC.md](WALLET_RUBRIC.md)) and publishes the page again with it. It runs where Vercel's settings have `WALLET_SCORES=on`.
 
 ## The life of the daily run
 
@@ -95,7 +96,7 @@ One Cron Trigger runs every minute. Each tick works out Toronto time and does wh
 | `runs`, `jobs` | The queue: each run's kind, state and deadline; each job's lane, lease and cursor |
 | `job_results`, `news_cache` | What a step hands to later steps of its run; the latest Google News search per query |
 | `usage`, `lanes` | The ledger (CPU, GB-ms and calls per Toronto day and job kind); each lane's pause and wake-up back-off |
-| `job_blobs`, `job_blob_parts`, `job_blob_versions` | Files: the state, the lists, the markets and their index, gzipped |
+| `job_blobs`, `job_blob_parts`, `job_blob_versions` | Files: the state, the lists, the markets and their index, each market's insider scores (`rubric:<name>`), gzipped |
 | `requests` | "Add to main page" requests and their status |
 | `watches`, `markers` | The site's watchlist and visitors' timeline markers |
 | `open_queue`, `open_decisions` | The Open now review queue and the owner's decisions |

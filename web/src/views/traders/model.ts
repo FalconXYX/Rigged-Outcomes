@@ -8,6 +8,67 @@ import type { Trader, TraderCategory, TradersData } from "../../types";
 /** Draw / legend / treemap order — the Dash app's `cat_colors` dict order. */
 export const CATEGORY_ORDER: readonly TraderCategory[] = ["normal", "newAccount", "concentration", "critical"];
 
+/** The cut-off categories' mark colours (series tokens). */
+export const CATEGORY_COLOR: Record<TraderCategory, string> = {
+  normal: "var(--c-normal)",
+  newAccount: "var(--c-new)",
+  concentration: "var(--c-concentration)",
+  critical: "var(--c-critical)",
+};
+
+/* ── Groups: what the charts colour, toggle and pool by ─────────────── */
+// The charts never know whether they show today's four cut-off categories or
+// the rubric's insider-score bands: both arrive as a Grouping (categoryGrouping
+// here, bandGrouping in spectrum.ts), lowest tier first.
+
+export interface Group {
+  id: string;
+  /** Legend / card label, e.g. "New account (≤10 prior trades)" or "Suspicious". */
+  label: string;
+  /** Compact label for tight treemap headers and legend tags. */
+  short: string;
+  /** CSS colour of the group's marks. */
+  color: string;
+  /** The top tier: its marks carry a surface-coloured core (a second channel beside colour). */
+  core: boolean;
+  /** Counted in the "flagged" totals. */
+  flagged: boolean;
+}
+
+export interface Grouping {
+  mode: "spectrum" | "cutoffs";
+  /** What one group is called in running text ("category", "band"). */
+  noun: string;
+  /** Lowest tier first: the draw order and the legend order. */
+  groups: readonly Group[];
+  byId: ReadonlyMap<string, Group>;
+  /** The group of each row of the TradersData the charts are given. */
+  rowGroup: readonly string[];
+}
+
+/** Today's four categories (scrape_insiders flags) as a Grouping. */
+export function categoryGrouping(t: TradersData): Grouping {
+  const names = categoryNames(t.thresholds);
+  const groups: Group[] = CATEGORY_ORDER.map((c) => ({
+    id: c,
+    label: names[c].label,
+    short: names[c].short,
+    color: CATEGORY_COLOR[c],
+    core: c === "critical",
+    flagged: c !== "normal",
+  }));
+  return {
+    mode: "cutoffs",
+    noun: "category",
+    groups,
+    byId: new Map(groups.map((g) => [g.id, g])),
+    rowGroup: t.traders.map((tr) => tr.category),
+  };
+}
+
+/** Group of a row (falls back to the lowest tier, so a stray id never breaks a chart). */
+export const groupOf = (g: Grouping, row: number): Group => g.byId.get(g.rowGroup[row]) ?? g.groups[0];
+
 /** Wallets shown per category in the treemap (`cat_df.nlargest(15, ...)`). */
 export const TOP_N = 15;
 
@@ -44,26 +105,31 @@ function reconcile(computed: number, exported: number | undefined, tol: number):
  * ratio = suspicious / total × 100 (0 when there is no volume),
  * whales = row count, flagged = is_suspicious row count.
  * Volumes are cents, the ratio 4 dp — identical to the exported totals.
+ *
+ * With a grouping in spectrum mode, "flagged" is the rows in its flagged
+ * bands, and nothing is reconciled with the exported (cut-off) totals.
  */
-export function computeTraderSummary(t: TradersData): TraderSummary {
+export function computeTraderSummary(t: TradersData, g?: Grouping): TraderSummary {
+  const spectrum = g?.mode === "spectrum";
   let total = 0;
   let suspicious = 0;
   let flagged = 0;
-  for (const tr of t.traders) {
+  t.traders.forEach((tr, row) => {
     total += tr.position;
-    if (tr.suspicious) {
+    if (spectrum ? groupOf(g, row).flagged : tr.suspicious) {
       suspicious += tr.position;
       flagged += 1;
     }
-  }
+  });
   const n = t.traders.length;
-  const totalVolume = reconcile(roundTo(total, 2), t.totalVolume, n * 0.005 + 1e-6);
-  const suspiciousVolume = reconcile(roundTo(suspicious, 2), t.suspiciousVolume, flagged * 0.005 + 1e-6);
+  const ex = spectrum ? undefined : t;
+  const totalVolume = reconcile(roundTo(total, 2), ex?.totalVolume, n * 0.005 + 1e-6);
+  const suspiciousVolume = reconcile(roundTo(suspicious, 2), ex?.suspiciousVolume, flagged * 0.005 + 1e-6);
   const pct = totalVolume > 0 ? (suspiciousVolume / totalVolume) * 100 : 0;
   return {
     totalVolume,
     suspiciousVolume,
-    pctSuspicious: reconcile(roundTo(pct, 4), t.pctSuspicious, 1e-3),
+    pctSuspicious: reconcile(roundTo(pct, 4), ex?.pctSuspicious, 1e-3),
     totalWhales: n,
     flaggedAccounts: flagged,
   };
@@ -96,9 +162,13 @@ export function categoryNames(th: TradersData["thresholds"]): Record<TraderCateg
   };
 }
 
-export function countByCategory(t: TradersData): Record<TraderCategory, number> {
-  const out: Record<TraderCategory, number> = { normal: 0, newAccount: 0, concentration: 0, critical: 0 };
-  for (const tr of t.traders) out[tr.category] += 1;
+/** Rows per group id (every group present, zero when empty). */
+export function countByGroup(g: Grouping): Map<string, number> {
+  const out = new Map<string, number>(g.groups.map((x) => [x.id, 0]));
+  g.rowGroup.forEach((_, row) => {
+    const id = groupOf(g, row).id;
+    out.set(id, (out.get(id) ?? 0) + 1);
+  });
   return out;
 }
 
@@ -111,7 +181,8 @@ export interface TreemapWallet {
   /** Index into TradersData.traders. */
   row: number;
   id: string;
-  category: TraderCategory;
+  /** Group id (a cut-off category or a band). */
+  category: string;
   value: number;
   /** Percent of the total whale stake. */
   pctOfTotal: number;
@@ -128,7 +199,7 @@ export interface TreemapWallet {
 export interface TreemapRest {
   kind: "rest";
   key: string;
-  category: TraderCategory;
+  category: string;
   value: number;
   count: number;
   /** Row indices folded into this tile. */
@@ -145,7 +216,7 @@ export type TreemapLeaf = TreemapWallet | TreemapRest;
 export interface TreemapCategory {
   kind: "category";
   key: string;
-  category: TraderCategory;
+  category: string;
   /** Category name without the share, e.g. "Normal whale". */
   name: string;
   short: string;
@@ -190,23 +261,23 @@ export function topByPosition(traders: readonly Trader[], rows: readonly number[
 }
 
 /**
- * Root "Total whale stake" → one node per category with volume > 0 (Dash
- * order) → its top 15 wallets by position, plus one remainder leaf holding
- * the rest of the category (branchvalues="total" semantics: a category's
- * area is its full volume). Leaf values sum exactly to their category value.
+ * Root "Total whale stake" → one node per group with volume > 0 (the
+ * grouping's order) → its top 15 wallets by position, plus one remainder leaf
+ * holding the rest of the group (branchvalues="total" semantics: a group's
+ * area is its full volume). Leaf values sum exactly to their group value.
  * `hidden` only flags nodes (for dimming); it never changes values.
  */
-export function buildTreemapTree(t: TradersData, hidden?: ReadonlySet<TraderCategory>): TreemapRoot {
-  const names = categoryNames(t.thresholds);
+export function buildTreemapTree(t: TradersData, g: Grouping, hidden?: ReadonlySet<string>): TreemapRoot {
   let total = 0;
   for (const tr of t.traders) total += tr.position;
   const share = (v: number) => (total > 0 ? (v / total) * 100 : 0);
 
   const children: TreemapCategory[] = [];
-  for (const cat of CATEGORY_ORDER) {
+  for (const group of g.groups) {
+    const cat = group.id;
     const members: number[] = [];
-    t.traders.forEach((tr, i) => {
-      if (tr.category === cat) members.push(i);
+    t.traders.forEach((_, i) => {
+      if (groupOf(g, i).id === cat) members.push(i);
     });
     let catVol = 0;
     for (const i of members) catVol += t.traders[i].position;
@@ -262,9 +333,9 @@ export function buildTreemapTree(t: TradersData, hidden?: ReadonlySet<TraderCate
       kind: "category",
       key: `cat:${cat}`,
       category: cat,
-      name: names[cat].label,
-      short: names[cat].short,
-      label: `${names[cat].label} (${pct1(share(catVol))})`,
+      name: group.label,
+      short: group.short,
+      label: `${group.label} (${pct1(share(catVol))})`,
       value: catVol,
       count: members.length,
       pctOfTotal: share(catVol),
@@ -284,8 +355,8 @@ export function buildTreemapTree(t: TradersData, hidden?: ReadonlySet<TraderCate
 }
 
 /** Row indices folded into each category's remainder tile. */
-export function restRowsByCategory(tree: TreemapRoot): Map<TraderCategory, Set<number>> {
-  const out = new Map<TraderCategory, Set<number>>();
+export function restRowsByCategory(tree: TreemapRoot): Map<string, Set<number>> {
+  const out = new Map<string, Set<number>>();
   for (const c of tree.children) {
     for (const leaf of c.children) if (leaf.kind === "rest") out.set(c.category, new Set(leaf.rows));
   }
@@ -314,14 +385,43 @@ export function markerDiameter(position: number, maxPosition: number, spread = 4
 /** Guide-ring radius (data units) for a risk score: base_radius = 110 − risk_score. */
 export const ringRadius = (risk: number) => 110 - risk;
 
+/** A constellation callout: arrow head in data units, a title and a sub-line, the arrow's colour. */
+export interface RingCallout {
+  head: [number, number];
+  title: string;
+  sub: string;
+  color: string;
+}
+
+/** What the constellation's rings and callouts say (cutoffGuide here, spectrumGuide in spectrum.ts). */
+export interface RingGuide {
+  /** Ring scores (radius 110 − score); the lowest score is the outer, dashed ring. */
+  rings: number[];
+  /** Labels on one shared bearing, each at its score's radius. */
+  labels: { score: number; text: string }[];
+  /** Callout at the core (the top tier) and on the outer orbit (the lowest tier). */
+  core: RingCallout;
+  orbit: RingCallout;
+}
+
+/** Today's rings (risk 0, 25, 50, 75, 100) and the Dash figure's two callouts. */
+export function cutoffGuide(): RingGuide {
+  return {
+    rings: [0, 25, 50, 75, 100],
+    labels: [0, 25, 50, 75].map((risk) => ({ score: risk, text: risk === 0 ? "Risk 0" : String(risk) })),
+    core: { head: [15, 15], title: "Core threat cluster", sub: "High concentration, zero history", color: CATEGORY_COLOR.critical },
+    orbit: { head: [-80, -80], title: "Normal orbit", sub: "Established traders", color: CATEGORY_COLOR.normal },
+  };
+}
+
 /* ── Linked-view state (shared by both charts) ─────────────────────── */
 
-export type FocusSource = "constellation" | "treemap" | "legend";
+export type FocusSource = "constellation" | "treemap" | "legend" | "spectrum";
 
 export type Focus =
   | { kind: "wallet"; row: number; source: FocusSource }
-  | { kind: "category"; category: TraderCategory; source: FocusSource }
-  | { kind: "rest"; category: TraderCategory; source: FocusSource }
+  | { kind: "category"; category: string; source: FocusSource }
+  | { kind: "rest"; category: string; source: FocusSource }
   | null;
 
 export interface Pin {

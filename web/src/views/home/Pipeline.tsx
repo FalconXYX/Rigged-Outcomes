@@ -3,6 +3,8 @@ import * as d3 from "d3";
 import type { MarketIndexEntry } from "../../types";
 import { fmtInt, fmtUSDCompact, toDate } from "../../lib/format";
 import { prefersReducedMotion } from "../../lib/useSize";
+import { marketFlags } from "./ranking";
+import { orList } from "../traders/spectrum";
 import "./pipeline.css";
 
 /*
@@ -51,12 +53,25 @@ function figures(markets?: MarketIndexEntry[]): Record<StepKey, Figure> {
   }
   const volume = markets.reduce((s, m) => s + m.totalVolume, 0);
   const positions = markets.reduce((s, m) => s + m.positions, 0);
-  const flagged = markets.reduce((s, m) => s + (m.flaggedAccounts ?? 0), 0);
+  const flagged = markets.reduce((s, m) => s + (marketFlags(m).accounts ?? 0), 0);
   return {
     fetch: { value: fmtUSDCompact(volume), unit: "traded" },
     clean: { value: fmtInt(positions), unit: "positions" },
     identify: { value: fmtInt(flagged), unit: "flagged accounts" },
     visualize: { value: String(markets.length), unit: "markets" },
+  };
+}
+
+/** Step text read from the data: once markets carry the insider score, "Identify" says how they are rated. */
+function stepTexts(markets?: MarketIndexEntry[]): Partial<Record<StepKey, string>> {
+  const s = markets?.find((m) => m.spectrum && m.spectrum.bands.length > 0)?.spectrum;
+  if (!s) return {};
+  const [lo, hi] = [s.bands[0], s.bands[s.bands.length - 1]];
+  const flagged = s.bands.filter((b) => b.flagged).map((b) => b.label);
+  return {
+    identify: `Rate every whale on the ${s.name}, ${lo.label} to ${hi.label}; flag ${orList(
+      flagged.length ? flagged : [hi.label],
+    )}.`,
   };
 }
 
@@ -277,6 +292,7 @@ export function Pipeline({ markets }: { markets?: MarketIndexEntry[] }) {
   const buttons = useRef<(HTMLButtonElement | null)[]>([]);
   const headId = useId();
   const figs = useMemo(() => figures(markets), [markets]);
+  const texts = useMemo(() => stepTexts(markets), [markets]);
   const sample = useMemo(() => markets?.find((m) => m.name === "usiran") ?? markets?.[0], [markets]);
 
   useEffect(() => {
@@ -349,7 +365,7 @@ export function Pipeline({ markets }: { markets?: MarketIndexEntry[] }) {
                     <span className="tabular">{pad(i + 1)}</span>
                     {s.verb}
                   </span>
-                  <span className="pipe-text">{s.text}</span>
+                  <span className="pipe-text">{texts[s.key] ?? s.text}</span>
                   <span className="pipe-stat">
                     <b className="tabular">{fig.value}</b>
                     <span className="label">{fig.unit}</span>

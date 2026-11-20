@@ -16,6 +16,7 @@ import {
   SORT_OPTIONS,
   filterMarkets,
   isDefaultView,
+  marketFlags,
   parseFlagged,
   parseResolved,
   parseSort,
@@ -144,6 +145,7 @@ function MarketCard({
   itemRef: (el: HTMLLIElement | null) => void;
 }) {
   const [ref, phase] = useReveal<HTMLElement>(animate);
+  const flags = marketFlags(m);
   return (
     <li ref={itemRef} className="mc-item" style={{ "--i": i } as CSSProperties}>
       <article ref={ref} className="card market-card" data-phase={phase} aria-labelledby={`mc-${m.name}-title`}>
@@ -159,14 +161,15 @@ function MarketCard({
           </a>
         </h3>
         <MiniTimeline m={m} />
-        <FlagMix mix={m.preview.flagMix} />
+        <FlagMix mix={m.preview.flagMix} spectrum={m.spectrum} />
         <dl className="mc-figs">
           <Figure label="Volume" value={fmtUSDCompact(m.totalVolume)} />
-          {/* The Traders tab's whale set: Flagged accounts and Flagged capital are computed over it. */}
-          <Figure label="Whales" value={fmtInt(m.traderWhales ?? m.whaleCount)} keyColor="var(--c-whale)" />
-          <Figure label="Flagged accounts" value={fmtInt(m.flaggedAccounts)} keyColor="var(--c-critical)" />
-          {/* Same metric, label and key as the Traders tab's "Flagged capital" (export: flaggedWhaleCapitalPct). */}
-          <Figure label="Flagged capital" value={fmtPct(m.pctSuspicious)} keyColor="var(--c-critical)" />
+          {/* The Traders tab's whale set: Flagged accounts and Flagged capital are computed over it
+              (the insider score's flagged bands when the market is scored, else today's cut-offs). */}
+          <Figure label="Whales" value={fmtInt(flags.whales ?? m.whaleCount)} keyColor="var(--c-whale)" />
+          <Figure label="Flagged accounts" value={fmtInt(flags.accounts)} keyColor="var(--c-critical)" />
+          {/* Same metric, label and key as the Traders tab's "Flagged capital". */}
+          <Figure label="Flagged capital" value={fmtPct(flags.capitalPct)} keyColor="var(--c-critical)" />
         </dl>
         <div className="mc-foot">
           <span className="mc-act" aria-hidden>

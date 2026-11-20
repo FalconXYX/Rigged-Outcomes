@@ -279,12 +279,13 @@ def score(entry, clean, totals_for):
     return scrape_insiders.insiders_frame(results, title)
 
 
-def build(entry, clean_csv, insiders_csv, max_page_bytes=MAX_PAGE_BYTES, max_data_bytes=MAX_DATA_BYTES):
+def build(entry, clean_csv, insiders_csv, max_page_bytes=MAX_PAGE_BYTES, max_data_bytes=MAX_DATA_BYTES, spectrum=None):
     """(index entry, page, data) from the clean and insiders CSVs' text: export.export_one's entry and page, and
-    the data record ({"<Output>_clean.csv": text, "<Output>_insiders.csv": text}). Raises AddError over a cap,
-    ValueError for a page the site could not read (NaN)."""
+    the data record ({"<Output>_clean.csv": text, "<Output>_insiders.csv": text}). spectrum: the wallet rubric's
+    page part (backend/rubric/pipeline.page_part), carried by the page and the entry when given. Raises AddError
+    over a cap, ValueError for a page the site could not read (NaN)."""
     import export
-    index, page = export.export_one(entry, clean=frame(clean_csv), insiders=frame(insiders_csv))
+    index, page = export.export_one(entry, clean=frame(clean_csv), insiders=frame(insiders_csv), spectrum=spectrum)
     size = len(export.page_bytes(page))
     if size > max_page_bytes:
         raise AddError(f"its page is {size / 1e6:.0f} MB, over the {max_page_bytes / 1e6:.0f} MB an automatic add "

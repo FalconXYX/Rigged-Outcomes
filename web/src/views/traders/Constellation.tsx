@@ -1,22 +1,23 @@
 import * as d3 from "d3";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent } from "react";
-import type { Trader, TraderCategory, TradersData } from "../../types";
+import type { RubricDisplay, Trader, TradersData } from "../../types";
 import { Tooltip } from "../../components/ui";
 import { prefersReducedMotion, useSize } from "../../lib/useSize";
-import { CATEGORY_ORDER, markerDiameter, ringRadius, type CategoryName, type Focus, type Pin } from "./model";
-import { CAT_COLOR, font, textWidth, useFontVersion } from "./paint";
+import { groupOf, markerDiameter, ringRadius, type Focus, type Group, type Grouping, type Pin, type RingGuide } from "./model";
+import { font, textWidth, useFontVersion } from "./paint";
 import { PinCard, WalletTipBody } from "./TraderCard";
 
 /** Data domain on both axes, like the Dash figure's range=[-130, 130]. */
 const MAX_SIDE = 640;
 const HIT = 24;
 const MAX_ZOOM = 8;
-const RINGS = [0, 25, 50, 75, 100];
 
 interface Dot {
   /** Row index into data.traders (the identity — one wallet can have several rows). */
   row: number;
   tr: Trader;
+  /** The row's group (category or band). */
+  g: Group;
   /** Base (unzoomed) screen position. */
   bx: number;
   by: number;
@@ -26,14 +27,18 @@ interface Dot {
 
 interface Props {
   data: TradersData;
-  names: Record<TraderCategory, CategoryName>;
-  hidden: ReadonlySet<TraderCategory>;
+  grouping: Grouping;
+  /** Rings, ring labels and callouts for this view. */
+  guide: RingGuide;
+  /** Present in the insider-score view (tooltip and card read the answers). */
+  rubric?: RubricDisplay;
+  hidden: ReadonlySet<string>;
   focus: Focus;
   onFocus: (f: Focus) => void;
   onLeave: () => void;
   pin: Pin | null;
   onPin: (p: Pin | null) => void;
-  restRows: Map<TraderCategory, Set<number>>;
+  restRows: Map<string, Set<number>>;
   /** Rows per wallet address, for the "other positions" note. */
   walletRows: Map<string, number[]>;
   totalVolume: number;
@@ -50,7 +55,7 @@ function hexPath(r: number) {
 }
 
 interface Annotation {
-  key: string;
+  key: "core" | "orbit";
   head: [number, number];
   /**
    * Tail offsets from the head in screen px (Plotly ax / ay). The first is the
@@ -63,10 +68,10 @@ interface Annotation {
   width: number;
 }
 
-const ANNOTATIONS: Annotation[] = [
+/** Tail offsets per callout; the text, head and colour come from the view's guide. */
+const ANNOTATION_OFFS: Pick<Annotation, "key" | "offs" | "width">[] = [
   {
     key: "core",
-    head: [15, 15],
     offs: [
       [40, 40],
       [64, 14],
@@ -74,14 +79,10 @@ const ANNOTATIONS: Annotation[] = [
       [22, 64],
       [76, 52],
     ],
-    title: "Core threat cluster",
-    sub: "High concentration, zero history",
-    color: "var(--c-critical)",
     width: 2,
   },
   {
     key: "orbit",
-    head: [-80, -80],
     offs: [
       [-40, -40],
       [-60, -10],
@@ -89,9 +90,6 @@ const ANNOTATIONS: Annotation[] = [
       [-62, 22],
       [34, 40],
     ],
-    title: "Normal orbit",
-    sub: "Established traders",
-    color: "var(--c-normal)",
     width: 1.5,
   },
 ];
@@ -212,7 +210,9 @@ const marketBox = (x: number, y: number, hexR: number, labelW: number): Box => (
 
 export function Constellation({
   data,
-  names,
+  grouping,
+  guide,
+  rubric,
   hidden,
   focus,
   onFocus,
@@ -246,38 +246,51 @@ export function Constellation({
   const hexR = narrow ? 14 : 17.5;
 
   const maxPos = useMemo(() => d3.max(data.traders, (d) => d.position) ?? 1, [data]);
+  const ANNOTATIONS: Annotation[] = useMemo(
+    () => ANNOTATION_OFFS.map((a) => ({ ...a, ...guide[a.key] })),
+    [guide],
+  );
+  /** The outer (dashed) ring: the lowest score the guide draws. */
+  const outer = useMemo(() => ringRadius(Math.min(...guide.rings)), [guide]);
 
   // Pixels per data unit: the largest scale that keeps the risk-0 ring and every
   // dot (centre plus marker radius and stroke) inside the square, so the
   // constellation fills the box instead of a fixed ±130 domain.
   const ppu = useMemo(() => {
     const room = side / 2 - margin;
-    let k = room / ringRadius(0);
+    let k = room / outer;
     for (const tr of data.traders) {
       const dist = Math.hypot(tr.x, tr.y);
       if (dist > 0) k = Math.min(k, (room - markerDiameter(tr.position, maxPos, spread) / 2 - 1) / dist);
     }
     return Math.max(0, k);
-  }, [data, side, margin, maxPos, spread]);
+  }, [data, side, margin, maxPos, spread, outer]);
 
-  /** All dots, in Dash draw order (normal → new → concentration → critical); big under small within a category. */
+  /** All dots, in the grouping's draw order (lowest tier first, Dash's normal → critical); big under small within a group. */
   const dots: Dot[] = useMemo(() => {
-    const rank = new Map(CATEGORY_ORDER.map((c, i) => [c, i]));
+    const rank = new Map(grouping.groups.map((g, i) => [g.id, i]));
     return data.traders
-      .map((tr, row) => ({ row, tr, bx: cx + tr.x * ppu, by: cy - tr.y * ppu, r0: markerDiameter(tr.position, maxPos, spread) / 2 }))
-      .sort((a, b) => rank.get(a.tr.category)! - rank.get(b.tr.category)! || b.tr.position - a.tr.position);
-  }, [data, cx, cy, ppu, maxPos, spread]);
+      .map((tr, row) => ({
+        row,
+        tr,
+        g: groupOf(grouping, row),
+        bx: cx + tr.x * ppu,
+        by: cy - tr.y * ppu,
+        r0: markerDiameter(tr.position, maxPos, spread) / 2,
+      }))
+      .sort((a, b) => rank.get(a.g.id)! - rank.get(b.g.id)! || b.tr.position - a.tr.position);
+  }, [data, grouping, cx, cy, ppu, maxPos, spread]);
 
   const byCat = useMemo(() => {
-    const m = new Map<TraderCategory, Dot[]>();
-    for (const c of CATEGORY_ORDER) m.set(c, []);
-    for (const d of dots) m.get(d.tr.category)!.push(d);
+    const m = new Map<string, Dot[]>();
+    for (const g of grouping.groups) m.set(g.id, []);
+    for (const d of dots) m.get(d.g.id)!.push(d);
     return m;
-  }, [dots]);
+  }, [dots, grouping]);
 
   const byRow = useMemo(() => new Map(dots.map((d) => [d.row, d])), [dots]);
 
-  const visible = useMemo(() => dots.filter((d) => !hidden.has(d.tr.category)), [dots, hidden]);
+  const visible = useMemo(() => dots.filter((d) => !hidden.has(d.g.id)), [dots, hidden]);
   /** Keyboard order: largest positions first. */
   const kbOrder = useMemo(() => [...visible].sort((a, b) => b.tr.position - a.tr.position), [visible]);
 
@@ -416,14 +429,14 @@ export function Constellation({
       return (d) => d.row === row;
     }
     const cat = focus.category;
-    if (focus.kind === "category") return (d) => d.tr.category === cat;
+    if (focus.kind === "category") return (d) => d.g.id === cat;
     const rows = restRows.get(cat);
-    return (d) => d.tr.category === cat && !!rows?.has(d.row);
+    return (d) => d.g.id === cat && !!rows?.has(d.row);
   }, [focus, restRows]);
 
   const focusDot = focus?.kind === "wallet" ? byRow.get(focus.row) : undefined;
   const pinDot = pin ? byRow.get(pin.row) : undefined;
-  const showTip = !!focusDot && focus?.source === "constellation" && !dragging && !hidden.has(focusDot.tr.category);
+  const showTip = !!focusDot && focus?.source === "constellation" && !dragging && !hidden.has(focusDot.g.id);
 
   /* ── Static layers in base coordinates (zoomed with one transform) ─ */
 
@@ -432,20 +445,22 @@ export function Constellation({
   // lights exactly the spokes of the dots it lights.
   const spokes = useMemo(
     () =>
-      CATEGORY_ORDER.map((c) => {
+      grouping.groups.map((g) => {
+        const c = g.id;
         const rest = restRows.get(c);
         const line = (d: Dot) => <line key={d.row} x1={cx} y1={cy} x2={d.bx} y2={d.by} />;
-        const all = byCat.get(c)!;
+        const all = byCat.get(c) ?? [];
         return {
           c,
+          color: g.color,
           top: all.filter((d) => !rest?.has(d.row)).map(line),
           rest: rest ? all.filter((d) => rest.has(d.row)).map(line) : [],
         };
       }),
-    [byCat, restRows, cx, cy],
+    [grouping, byCat, restRows, cx, cy],
   );
 
-  const spokeClass = (c: TraderCategory, part: "top" | "rest") => {
+  const spokeClass = (c: string, part: "top" | "rest") => {
     if (hidden.has(c)) return "off";
     if (!focus) return "";
     if (focus.kind === "wallet") return "dim";
@@ -475,7 +490,7 @@ export function Constellation({
       (a) => Math.ceil(Math.max(textWidth(a.title, font(700, fs1)), compact ? 0 : textWidth(a.sub, font(500, fs2)))) + padX * 2 + 2,
     );
     return { compact, fs1, fs2, padX, padY, lh1, h, w };
-  }, [W, narrow, fontVersion]);
+  }, [W, narrow, fontVersion, ANNOTATIONS]);
 
   /** "THE MARKET" sits under the hexagon: above it, the core-cluster arrowhead (15, 15) lands on the text. */
   const marketLabelW = useMemo(() => {
@@ -513,9 +528,9 @@ export function Constellation({
       placed.push(annotBox(hx, hy, a.offs[best], annotSize.w[ai], annotSize.h, W, H));
     });
     // One angle for all ring labels, clear of dots and callouts where possible.
-    const labels = RINGS.slice(0, 4).map((risk) => ({
-      R: ringRadius(risk) * ppu,
-      w: textWidth(risk === 0 ? "Risk 0" : String(risk), font(600, RING_FS)) + 8,
+    const labels = guide.labels.map((l) => ({
+      R: ringRadius(l.score) * ppu,
+      w: textWidth(l.text, font(600, RING_FS)) + 8,
     }));
     let angle = 0;
     let bestScore = Infinity;
@@ -536,7 +551,7 @@ export function Constellation({
       }
     }
     return { offIdx, angle };
-  }, [W, H, cx, cy, ppu, hexR, visible, annotSize, marketLabelW]);
+  }, [W, H, cx, cy, ppu, hexR, visible, annotSize, marketLabelW, ANNOTATIONS, guide]);
 
   /* ── Annotations (screen space, clamped inside the chart) ───────── */
 
@@ -550,7 +565,7 @@ export function Constellation({
       const b = annotBox(hx, hy, a.offs[placement.offIdx[ai]], w, annotSize.h, W, H);
       return [{ ...a, ...annotSize, left: b.x0, top: b.y0, w, arrow: annotArrow(b, hx, hy, a.width) }];
     });
-  }, [W, H, t, cx, cy, ppu, placement, annotSize]);
+  }, [W, H, t, cx, cy, ppu, placement, annotSize, ANNOTATIONS]);
 
   /* ── Render ─────────────────────────────────────────────────────── */
 
@@ -566,20 +581,20 @@ export function Constellation({
     return (
       <g key={d.row} className={cls}>
         <circle className="dot" cx={x} cy={y} r={r} />
-        {d.tr.category === "critical" && <circle className="dot-core" cx={x} cy={y} r={Math.max(1.5, r * 0.32)} />}
+        {d.g.core && <circle className="dot-core" cx={x} cy={y} r={Math.max(1.5, r * 0.32)} />}
       </g>
     );
   };
 
   const ringAngle = placement?.angle ?? 0;
-  const ringLabels = RINGS.slice(0, 4).map((risk) => {
-    const R = ringRadius(risk) * ppu * t.k;
+  const ringLabels = guide.labels.map((l) => {
+    const R = ringRadius(l.score) * ppu * t.k;
     const x = csx + R * Math.sin(ringAngle);
     const y = csy - R * Math.cos(ringAngle);
     if (y < 8 || y > H - 8 || x < 20 || x > W - 20) return null;
     return (
-      <text key={risk} className="ring-label" x={x} y={y} dy="0.35em" textAnchor="middle">
-        {risk === 0 ? "Risk 0" : risk}
+      <text key={`${l.score}:${l.text}`} className="ring-label" x={x} y={y} dy="0.35em" textAnchor="middle">
+        {l.text}
       </text>
     );
   });
@@ -595,7 +610,7 @@ export function Constellation({
               height={H}
               className="tr-svg"
               role="img"
-              aria-label={`Threat constellation of ${data.traders.length} whale wallets. Arrow keys step through wallets, Enter pins one, plus and minus zoom.`}
+              aria-label={`Threat constellation of ${data.traders.length} whale wallets${rubric ? `, by ${rubric.name}` : ""}. Arrow keys step through wallets, Enter pins one, plus and minus zoom.`}
               tabIndex={0}
               style={{ cursor, touchAction: "pan-y" }}
               onPointerMove={onPointerMove}
@@ -612,13 +627,13 @@ export function Constellation({
 
               <g transform={gT}>
                 <g className="rings">
-                  {RINGS.map((risk) => (
-                    <circle key={risk} cx={cx} cy={cy} r={ringRadius(risk) * ppu} />
+                  {guide.rings.map((score) => (
+                    <circle key={score} cx={cx} cy={cy} r={ringRadius(score) * ppu} />
                   ))}
                 </g>
                 <g className={`spoke-layer${focus ? " has-focus" : ""}`}>
-                  {spokes.map(({ c, top, rest }) => (
-                    <g key={c} data-cat={c} className="spokes" style={{ stroke: CAT_COLOR[c] }}>
+                  {spokes.map(({ c, color, top, rest }) => (
+                    <g key={c} data-cat={c} className="spokes" style={{ stroke: color }}>
                       <g className={`spoke-cat ${spokeClass(c, "top")}`}>{top}</g>
                       {rest.length > 0 && <g className={`spoke-cat ${spokeClass(c, "rest")}`}>{rest}</g>}
                     </g>
@@ -630,7 +645,7 @@ export function Constellation({
               {[focusDot, pinDot !== focusDot ? pinDot : undefined].map(
                 (d) =>
                   d &&
-                  !hidden.has(d.tr.category) && (
+                  !hidden.has(d.g.id) && (
                     <line
                       key={`hl-${d.row}`}
                       className="spoke-hl"
@@ -638,15 +653,15 @@ export function Constellation({
                       y1={csy}
                       x2={sx(d)}
                       y2={sy(d)}
-                      style={{ stroke: CAT_COLOR[d.tr.category] }}
+                      style={{ stroke: d.g.color }}
                     />
                   ),
               )}
 
               <g className="dots-layer">
-                {CATEGORY_ORDER.map((c) => (
-                  <g key={c} className={`dot-cat${hidden.has(c) ? " off" : ""}`} style={{ fill: CAT_COLOR[c] }}>
-                    {byCat.get(c)!.map((d) => dotEl(d, isOn && !isOn(d) ? "dim" : ""))}
+                {grouping.groups.map((g) => (
+                  <g key={g.id} className={`dot-cat${hidden.has(g.id) ? " off" : ""}`} style={{ fill: g.color }}>
+                    {(byCat.get(g.id) ?? []).map((d) => dotEl(d, isOn && !isOn(d) ? "dim" : ""))}
                   </g>
                 ))}
               </g>
@@ -698,17 +713,17 @@ export function Constellation({
 
               {/* Hover + pin overlays (on top) */}
               {[pinDot, focusDot !== pinDot ? focusDot : undefined].map((d) => {
-                if (!d || hidden.has(d.tr.category)) return null;
+                if (!d || hidden.has(d.g.id)) return null;
                 const r = d.r0 * rScale;
                 const big = r * 1.18 + 2;
                 const x = sx(d);
                 const y = sy(d);
                 const pinned = d === pinDot;
                 return (
-                  <g key={`ov-${d.row}`} className="dot-overlay" style={{ fill: CAT_COLOR[d.tr.category] }}>
+                  <g key={`ov-${d.row}`} className="dot-overlay" style={{ fill: d.g.color }}>
                     <circle className={`focus-ring${pinned ? " pinned" : ""}`} cx={x} cy={y} r={big + 3.5} />
                     <circle className="dot" cx={x} cy={y} r={big} />
-                    {d.tr.category === "critical" && <circle className="dot-core" cx={x} cy={y} r={Math.max(1.8, big * 0.32)} />}
+                    {d.g.core && <circle className="dot-core" cx={x} cy={y} r={Math.max(1.8, big * 0.32)} />}
                   </g>
                 );
               })}
@@ -727,17 +742,19 @@ export function Constellation({
               <Tooltip x={sx(focusDot)} y={sy(focusDot)} visible containerWidth={W} containerHeight={H}>
                 <WalletTipBody
                   trader={focusDot.tr}
-                  names={names}
+                  group={focusDot.g}
+                  rubric={rubric}
                   siblings={(walletRows.get(focusDot.tr.id)?.length ?? 1) - 1}
                   footer={pin?.row === focusDot.row ? "Pinned · click again to unpin" : svgFocused ? "Enter to pin details" : "Click to pin details"}
                 />
               </Tooltip>
             )}
 
-            {pinTrader && pin?.source === "constellation" && !docked && !hidden.has(pinTrader.category) && (
+            {pinTrader && pinDot && pin?.source === "constellation" && !docked && !hidden.has(pinDot.g.id) && (
               <PinCard
                 trader={pinTrader}
-                names={names}
+                group={pinDot.g}
+                rubric={rubric}
                 totalVolume={totalVolume}
                 anchor={{ x: sx(pinDot!), y: sy(pinDot!) }}
                 container={{ width: W, height: H }}
@@ -747,10 +764,11 @@ export function Constellation({
           </>
         )}
       </div>
-      {pinTrader && pin?.source === "constellation" && docked && (
+      {pinTrader && pinDot && pin?.source === "constellation" && docked && (
         <PinCard
           trader={pinTrader}
-          names={names}
+          group={pinDot.g}
+          rubric={rubric}
           totalVolume={totalVolume}
           docked
           onClose={() => onPin(null)}

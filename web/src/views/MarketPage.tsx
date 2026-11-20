@@ -13,6 +13,8 @@ import { href, useQuery, type Query } from "../lib/router";
 import { ErrorNote, Loading } from "../components/ui";
 import { TimelineView } from "./timeline/TimelineView";
 import { TradersView } from "./traders/TradersView";
+import { flaggedCount } from "./traders/spectrum";
+import { marketFlags } from "./home/ranking";
 import { NotFound } from "./NotFound";
 import { ResolvedChip, fmtSpan, shortTitle, spanTitle } from "./Home";
 import "../components/shell.css";
@@ -60,7 +62,7 @@ const fromEntry = (e: MarketIndexEntry): HeaderInfo => ({
   start: e.start,
   end: e.end,
   positions: e.positions,
-  flagged: e.flaggedAccounts,
+  flagged: marketFlags(e).accounts,
 });
 
 const fromData = (d: MarketData): HeaderInfo => ({
@@ -71,7 +73,7 @@ const fromData = (d: MarketData): HeaderInfo => ({
   start: d.timeline.span.start,
   end: d.timeline.span.end,
   positions: d.timeline.positions,
-  flagged: d.traders?.flaggedAccounts ?? null,
+  flagged: flaggedCount(d.traders) ?? d.traders?.flaggedAccounts ?? null,
 });
 
 /** The flagged count's key: critical red, as a dot beside the (ink) number. */

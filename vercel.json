@@ -4,7 +4,7 @@
   "functions": {
     "api/step.py": {
       "maxDuration": 300,
-      "includeFiles": "{backend/**,watchlist/**,markets.json,add_market.py,cleandata.py,export.py,polymarket_api.py,polymarket_trades.py,scrape_insiders.py}"
+      "includeFiles": "{backend/**,watchlist/**,rubric/**,markets.json,add_market.py,cleandata.py,export.py,polymarket_api.py,polymarket_trades.py,scrape_insiders.py}"
     }
   },
   "routes": [

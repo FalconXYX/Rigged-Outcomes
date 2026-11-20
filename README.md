@@ -106,6 +106,8 @@ Whales are BUY positions on the winning outcome worth at least 0.1% of the marke
 
 Either sets `is_suspicious`; both at once is *critical* on the site. The "Leadup" period on the timeline shows who only appeared in the final hours.
 
+**Insider score** ([`docs/WALLET_RUBRIC.md`](docs/WALLET_RUBRIC.md)): every whale also gets a 0–100 score and a band from Gemini's Decisions API. It reads 12 factors (timing before the reveal, entry odds, size, concentration, account age and history, clustering with other fresh wallets) and answers the questions in [`rubric/wallet_rubric.toml`](rubric/wallet_rubric.toml). To change the rubric, edit that file: `python3 -m backend.rubric check`, then `score --all`.
+
 ---
 
 ## Web Dashboard

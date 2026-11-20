@@ -9,7 +9,7 @@ node tests/end-to-end/scenarios/smoke.mjs                       # "+ Add to main
 node tests/end-to-end/scenarios/add.mjs --only main             # every way an add can go: main, botfail, faults, daily (one process per group runs them side by side)
 node tests/end-to-end/scenarios/watch.mjs                       # "Watch this market", and the daily run adding a watched market
 node tests/end-to-end/scenarios/markers.mjs                     # timeline markers (again with --bot-fail --port-base 9660)
-node tests/end-to-end/scenarios/lists.mjs                       # 3 a day, a released game dropped from Open now, Toronto time with no UTC
+node tests/end-to-end/scenarios/lists.mjs                       # 3 a day, Toronto time with no UTC
 node tests/end-to-end/scenarios/schedule.mjs                    # 04:00 Toronto across daylight saving, a missed day, the catch-up, the budget ledger
 node tests/end-to-end/stack.mjs --port-base 9700                # a stack to click around in by hand (Ctrl-C stops it)
 ```

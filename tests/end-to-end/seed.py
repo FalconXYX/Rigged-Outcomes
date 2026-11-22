@@ -14,7 +14,8 @@ saves what it wrote to the stack's database the way the job does: `python3 -m wa
                in the workspace's store (store.save_closed_check, as the check does), so the state the stack
                saves holds what a real one holds (a pull refuses an empty state)
   open.json    --cards open Polymarket events the shared vocabulary files under a kind (kinds.file_event), each
-               an "Open now" card with its Google News headlines
+               an "Open now" card with its Google News headlines; with --open-days-ago N, on the list of N days
+               ago, also saved in the store (store.save_open_day), as an earlier daily run left it
 
 Writes both into --out (the workspace's web/public/data) and prints one JSON line last: {"picks": [...],
 "cards": [...]}. Gemini is never called (the cards and verdicts are canned); E2E_STUB=1 stubs it anyway.
@@ -43,8 +44,13 @@ def main(argv=None):
                                                         "takes a while: whale batches)")
     ap.add_argument("--crowd", type=int, default=0, help="that many picks on one day, all published (a day an "
                                                           "older count listed with more than 3)")
+    ap.add_argument("--open-days-ago", type=int, default=0, help="the Open now list that many days ago, also saved "
+                                                                  "in the store, as an earlier daily run left it "
+                                                                  "(default 0: today's, in open.json only)")
     ap.add_argument("--no-news", action="store_true", help="no Google News headlines")
     args = ap.parse_args(argv)
+    if args.open_days_ago < 0:
+        ap.error("--open-days-ago must be 0 or more")
 
     sys.path.insert(0, args.root)
     os.chdir(args.root)
@@ -149,6 +155,7 @@ def main(argv=None):
     upsets._write(doc, os.path.join(args.out, "closed.json"))
 
     # ── open cards ──
+    open_day, run_at = day_shift(today, -args.open_days_ago), local_iso(now - args.open_days_ago * DAY)
     cards = []
     if args.cards:
         events = net.walk_open_events(min_volume=250_000)
@@ -171,7 +178,7 @@ def main(argv=None):
             cards.append({
                 "id": opennow.story_key(e.get("title")),
                 "label": "new",
-                "listed_since": today,
+                "listed_since": open_day,
                 "place": "new step",
                 "kind": filing.kind,
                 "group": filing.group,
@@ -185,19 +192,24 @@ def main(argv=None):
                 "polymarket": {"question": m.get("question"), "other_dates": [],
                                "url": f"https://polymarket.com/event/{e.get('slug')}"},
                 "headlines": heads,
-                "checked_at": local_iso(now),
+                "checked_at": run_at,
                 "event_ids": [str(e.get("id"))],
                 "slugs": [s for s in (e.get("slug"), m.get("slug")) if s],
             })
-    run_at = local_iso(now)
+    # that day's list in the store too, as its run saved it ("entered", the day a card entered with a new step, is
+    # kept in the store only, not in open.json)
+    if args.open_days_ago and cards:
+        store.save_open_day(store.default_conn(), open_day, "updated", run_at,
+                            [dict(c, entered=open_day) for c in cards], version=opennow.PROMPT_VERSION,
+                            info={"new_today": len(cards), "held_back": 0})
     doc = {
-        "generated_at": run_at,
+        "generated_at": local_iso(now),
         "rules": {"min_volume": kinds.MIN_VOLUME, "per_day": kinds.PER_DAY, "at_least": kinds.AT_LEAST,
                   "live_days": kinds.LIVE_DAYS, "fresh_days": kinds.FRESH_DAYS, "stay_days": kinds.STAY_DAYS,
                   "dated_days": kinds.DATED_DAYS, "held_back_days": kinds.HELD_BACK_DAYS,
                   "prompt_version": f"{opennow.PROMPT_VERSION} / {opennow.OUT_VERSION}",
                   "model": f"{kinds.STEP_MODEL} / {kinds.OPEN_MODEL}"},
-        "days": [{"day": today, "status": "updated",
+        "days": [{"day": open_day, "status": "updated",
                   "run_at": run_at, "cards": cards, "new_today": len(cards), "held_back": 0}]
         if cards else [],
     }

@@ -27,7 +27,7 @@ import json
 import os
 import threading
 import time
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -42,7 +42,15 @@ BUCKET_S = 15 * 60          # the probability line's resolution
 CLUSTER_S = 6 * 3600        # two first buys this close are "the same window"
 FRESH_TRADES = 10           # a fresh wallet: at most this many prior trades ...
 FRESH_DAYS = 14             # ... or at most this many days old at its first buy
+BIG_MOVE = 0.30             # a "big move": the winning side's probability this far above its level before a buy
+RISE_S = 2 * 86400          # max_rise_48h's window after the first buy
 DAY = 86400
+# The numbers above that define a factor, by the name a rubric factor's description may cite as {name}
+# (spec.factor_description fills them in), so the text the model reads cannot drift from the computation.
+# Changing one changes the facts: rebuild them (fact_sources.py), which re-asks every whale's questions.
+DEFINITIONS = {"big_move_points": round(BIG_MOVE * 100), "reveal_points": round(REVEAL_PROB * 100),
+               "rise_hours": RISE_S // 3600, "fresh_trades": FRESH_TRADES, "fresh_days": FRESH_DAYS,
+               "cluster_hours": CLUSTER_S // 3600}
 
 
 # ── registry ─────────────────────────────────────────────────────────────────
@@ -321,6 +329,35 @@ def _(w):
     a = prob_before(w.m, w.row["first_buy_ts"])
     b = prob_before(w.m, w.row["first_buy_ts"] + DAY)
     return None if a is None or b is None else round(b - a, 4)
+
+
+@factor("max_rise_48h", "price", "probability",
+        "Largest rise of the winning side's probability within 48 hours after the first buy, over its level "
+        "just before it")
+def _(w):
+    t = w.row["first_buy_ts"]
+    a = prob_before(w.m, t)
+    if a is None:
+        return None
+    after = w.m.line_p[bisect_left(w.m.line_t, int(t)):bisect_right(w.m.line_t, int(t) + RISE_S)]
+    return round(max(0.0, max(after, default=a) - a), 4)
+
+
+@factor("hours_to_big_move", "timing", "hours",
+        "Hours from the first buy until the winning side's probability first stood 30 points above its level "
+        "just before the buy (or at the reveal level, if that is lower); negative only for a buy after the reveal")
+def _(w):
+    t = int(w.row["first_buy_ts"])
+    a = prob_before(w.m, t)
+    if a is None:
+        return None
+    target = min(a + BIG_MOVE, REVEAL_PROB)
+    if a >= target:                                   # already at the reveal level: the move was the reveal
+        return _hours(w.m.reveal_ts, t)
+    for bt, p in zip(w.m.line_t[bisect_left(w.m.line_t, t):], w.m.line_p[bisect_left(w.m.line_t, t):]):
+        if p >= target:
+            return _hours(bt, t)
+    return None
 
 
 # ── factors: size ────────────────────────────────────────────────────────────

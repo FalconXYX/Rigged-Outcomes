@@ -64,6 +64,7 @@ Why Rigged Outcomes is built the way it is: one row per decision that still hold
 | Each add is its own run | A second click is never lost |
 | Steps are deadline-driven and checkpoint each item | A step never runs into Vercel's 300 s limit, and loses at most one item |
 | One live step per lane, one heavy step at a time; only the main lane saves the state | Saves never race, and several calls can share one 2 GB instance |
+| `wallets.score` runs in the background: it waits for any job of another kind ready for its lane or the heavy slot and gives way at its next checkpoint | An add lands in its usual 15–50 s whatever is being scored (600 whales take about 53 minutes) |
 | Wake-ups are signed, and a firewall rule denies the rest | Junk traffic never invokes the function |
 | A 30-day ledger slows, then stops, work at 50%, 65% and 80% of the allowance | Going over pauses the Vercel project for 30 days |
 | `scripts/watchlist-mac.sh` runs the daily lists on a Mac | For days Google News or Polymarket refuse Vercel |

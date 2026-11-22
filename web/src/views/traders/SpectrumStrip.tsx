@@ -4,10 +4,10 @@ import type { RubricDisplay, TradersData } from "../../types";
 import { Tooltip } from "../../components/ui";
 import { fmtInt, fmtUSDCompact } from "../../lib/format";
 import { useSize } from "../../lib/useSize";
-import { groupOf, type Focus, type Grouping, type Pin } from "./model";
+import { groupOf, type Focus, type Grouping, type Pin } from "./groups";
 import { font, textWidth, useFontVersion } from "./paint";
 import { bandColor, layoutSpectrum, scoreX } from "./spectrum";
-import { WalletTipBody } from "./TraderCard";
+import { WalletTipBody } from "./ScoreCard";
 
 /**
  * The insider-score spectrum: every scored whale on one 0–100 axis (a

@@ -334,19 +334,19 @@ class InteractionsScorer:
     level / option for each wallet, read back into the Decisions API's shape."""
     name = "interactions"
 
-    def __init__(self, cfg, client=None, ledger=None):
+    def __init__(self, cfg, client=None, ledger=None, sleep=None):
         self.models = tuple(cfg.get("models") or ())
         self.batch = int(cfg.get("wallets_per_request", 8))
         self.temperature = float(cfg.get("temperature", 0.0))
         self.cap = int(cfg.get("daily_cap", 300))
         self.ledger = ledger
         self.sent = 0
-        self._client = client
+        self._client, self._sleep = client, sleep
 
     def client(self):
         if self._client is None:
             from watchlist import ai
-            kw = {"temperature": self.temperature}
+            kw = {"temperature": self.temperature, **({"sleep": self._sleep} if self._sleep else {})}
             self._client = ai.Client(models=self.models, **kw) if self.models else ai.Client(**kw)
         return self._client
 
@@ -381,10 +381,14 @@ class InteractionsScorer:
         self.sent += 1
         if self.ledger:
             self.ledger.add(self.name)
+        client = self.client()
         try:
-            text, _model, _payload = self.client().generate(self.prompt(items, questions), schema=self.schema(questions))
+            text, _model, _payload = client.generate(self.prompt(items, questions), schema=self.schema(questions))
         except ai.GeminiError as e:
-            if e.config or e.status in (401, 403) or "no model left" in str(e):
+            # every model of the chain skipped (gone, or today's quota spent): none can answer today
+            chain = tuple(getattr(client, "models", ()) or ())
+            spent = bool(chain) and set(chain) <= set(getattr(client, "skip", ()) or ())
+            if e.config or e.status in (401, 403) or "no model left" in str(e) or spent:
                 raise ScorerUnavailable(f"interactions: {e}")
             if e.refused:
                 raise ScorerRefused(f"interactions: {e}")
@@ -441,7 +445,8 @@ class InteractionsScorer:
 
 def get_scorer(rubric, name=None, **kw):
     """The scorer `name` (default: the rubric's scorer.use), configured from [scorer.<name>]. kw: key, url, session,
-    sleep, clock (decisions); client (interactions); ledger (both). Unknown kw for the other scorer are ignored."""
+    clock (decisions); client (interactions); sleep (every wait: back-off and spacing), ledger (both). Unknown kw
+    for the other scorer are ignored."""
     sc = rubric.get("scorer") or {}
     name = name or sc.get("use", "decisions")
     cfg = sc.get(name) or {}
@@ -449,5 +454,5 @@ def get_scorer(rubric, name=None, **kw):
         return DecisionsScorer(cfg, **{k: v for k, v in kw.items() if k in ("key", "url", "session", "sleep", "clock",
                                                                            "ledger")})
     if name == "interactions":
-        return InteractionsScorer(cfg, **{k: v for k, v in kw.items() if k in ("client", "ledger")})
+        return InteractionsScorer(cfg, **{k: v for k, v in kw.items() if k in ("client", "ledger", "sleep")})
     raise ValueError(f"unknown scorer {name!r}")

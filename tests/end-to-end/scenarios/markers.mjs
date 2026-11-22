@@ -20,12 +20,14 @@
 //                                               [--headed] [--wait-open SECONDS] [--verbose] [--keep]
 //
 // Screenshots of failures go to --shots (default <scratchpad>/e2e-shots/markers). The stack's state folder is
-// removed when every scenario passed (--keep keeps the stack running and its folder). Exit 0 passed, 1 failed.
+// removed when every scenario passed (--keep keeps the stack running and its folder). The table is written there
+// as JSON too (results-all.json; results-botfail.json with --bot-fail). Exit 0 passed, 1 failed.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { launch } from "../lib/browser.mjs";
 import { secs, sleep } from "../lib/proc.mjs";
+import { Report } from "../lib/scenario.mjs";
 import { parseArgs, stackOptions, startStack } from "../stack.mjs";
 
 const args = parseArgs(process.argv.slice(2));
@@ -40,7 +42,7 @@ mkdirSync(SHOTS, { recursive: true });
 /** Words that hedge or say something doesn't work; none of them may show on the market page. */
 const HEDGE = /paused|not available|unavailable|offline|not (yet )?(saved|sent|updated)|only (in|on) this (browser|device)|kept (here|locally|in this browser)|\bbeta\b|\btrial\b|try again later|couldn't send/i;
 
-const results = [];
+const report = new Report(opts.botFail ? "markers-botfail" : "markers", SHOTS, opts.botFail ? "botfail" : "all");
 const t0 = Date.now();
 let stack;
 let browser;
@@ -174,7 +176,8 @@ async function scenario(key, name, expected, fn) {
     return ok;
   };
   const at = Date.now();
-  console.log(`\n[${key}] ${name}`);
+  console.log("");
+  report.say(`[${key}] ${name}`);
   try {
     await fn(note, check);
   } catch (e) {
@@ -184,7 +187,8 @@ async function scenario(key, name, expected, fn) {
   if (!pass) await shoot(key);
   for (const n of notes) console.log(`  ${n}`);
   console.log(`  -> ${pass ? "PASS" : "FAIL"} (${secs(at)} s)`);
-  results.push({ key, name, expected, notes, pass, secs: secs(at) });
+  // the table's row (its lines are printed above)
+  report.rows.push({ scenario: name, expected, happened: notes.join("; "), pass, key, notes, secs: secs(at) });
 }
 
 // ---------- what the API counted ----------
@@ -203,10 +207,10 @@ async function countedToday() {
 
 // ---------- the run ----------
 
-console.log(`markers: starting a stack on ports ${opts.portBase}-${opts.portBase + 3}${opts.botFail ? " (Turnstile always fails)" : ""}`);
+report.say(`starting a stack on ports ${opts.portBase}-${opts.portBase + 3}${opts.botFail ? " (Turnstile always fails)" : ""}`);
 try {
   stack = await startStack(opts);
-  console.log(`markers: stack ready in ${secs(t0)} s (state ${stack.state}); market ${MARKET}`);
+  report.say(`stack ready in ${secs(t0)} s (state ${stack.state}); market ${MARKET}`);
   const listed = await fetch(`${stack.urls.api}/api/markers?market=${MARKET}`).then((r) => r.json());
   if (!listed.listed) throw new Error(`the API doesn't list ${MARKET} in its catalog`);
   browser = await launch({ headed: !!args.headed });
@@ -377,21 +381,17 @@ try {
     });
   }
 } catch (e) {
-  console.log(`FAIL ${e.message}`);
-  results.push({ key: "setup", name: "the stack", expected: "starts", notes: [String(e.message)], pass: false });
+  report.row("the stack", "starts", String(e.message), false, { key: "setup" });
   await shoot("setup");
 } finally {
   if (consoleErrors.length) console.log(`\npage errors: ${consoleErrors.slice(0, 5).join(" | ")}`);
   await browser?.close();
-  writeFileSync(join(SHOTS, `results${opts.botFail ? "-botfail" : ""}.json`), JSON.stringify({ results, consoleErrors }, null, 2));
-  console.log("\nscenario | result | seconds");
-  for (const r of results) console.log(`  ${r.pass ? "PASS" : "FAIL"}  ${r.name} (${r.secs ?? "-"} s)`);
   if (args.keep && stack) {
+    report.uncap();
+    report.table();
     console.log(`\nmarkers: the stack keeps running (site ${stack.urls.site}); Ctrl-C stops it`);
   } else {
-    const failed = results.filter((r) => !r.pass).length;
-    await stack?.stop({ keepState: failed > 0 });
-    console.log(`\nmarkers: ${failed ? `FAILED (${failed})` : "passed"} in ${secs(t0)} s`);
-    process.exit(failed ? 1 : 0);
+    await stack?.stop({ keepState: report.rows.some((r) => !r.pass) });
+    report.finish();
   }
 }

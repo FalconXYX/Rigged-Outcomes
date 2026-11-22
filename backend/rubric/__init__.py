@@ -15,7 +15,7 @@ Guide: docs/WALLET_RUBRIC.md. Modules, in the order data flows:
   prompt.py        render_input(rubric, market, facts) -> the text read
   scorers.py       "decisions" (Decisions API) and "interactions" (regular
                    Gemini), one interface; get_scorer(rubric)
-  combine.py       spectrum(rubric, answers) -> (score 0-100, band id)
+  combine.py       spectrum(rubric, answers, facts, flags) -> (score 0-100, band id); detail() adds the tier
   cache.py         answers keyed by (wallet, question hash, input hash);
                    the day's request ledger
   pipeline.py      score_market(); trader_fields() / page_part(): what a

@@ -33,6 +33,7 @@ def ts_contract():
 
 def test_the_two_contracts_are_the_same():
     assert ts_contract() == contract.CONTRACT
+    assert contract.BACKGROUND_KINDS and contract.BACKGROUND_KINDS <= set(contract.JOB_KINDS)
     assert wake.LANES == tuple(contract.CONTRACT["lanes"])
     assert wake.MAX_SKEW_S == contract.WAKE["max_skew_s"] and wake.SCHEME == contract.WAKE["scheme"]
     for kind, spec in contract.JOB_KINDS.items():

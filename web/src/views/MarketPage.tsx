@@ -9,18 +9,18 @@ import {
 import type { MarketData, MarketIndex, MarketIndexEntry } from "../types";
 import { loadIndex, loadMarket, useAsync, type Async } from "../lib/data";
 import { fmtInt, polymarketMarket, smartQuotes } from "../lib/format";
-import { href, useQuery, type Query } from "../lib/router";
+import { href, replaceHash, useQuery, type MarketView, type Query } from "../lib/router";
 import { ErrorNote, Loading } from "../components/ui";
 import { TimelineView } from "./timeline/TimelineView";
 import { TradersView } from "./traders/TradersView";
-import { flaggedCount } from "./traders/spectrum";
-import { marketFlags } from "./home/ranking";
+import { ScoreView } from "./traders/ScoreView";
+import { flaggedCount, hasSpectrum, indexFlaggedCount } from "./traders/spectrum";
 import { NotFound } from "./NotFound";
 import { ResolvedChip, fmtSpan, shortTitle, spanTitle } from "./Home";
 import "../components/shell.css";
 import "./market.css";
 
-type View = "timeline" | "traders";
+type View = MarketView;
 
 class MarketNotFound extends Error {}
 
@@ -52,6 +52,8 @@ interface HeaderInfo {
   end: number;
   positions: number;
   flagged: number | null;
+  /** The Insider score tab: present when the market's page carries the rubric. */
+  score: { label: string; flagged: number | null } | null;
 }
 
 const fromEntry = (e: MarketIndexEntry): HeaderInfo => ({
@@ -62,7 +64,8 @@ const fromEntry = (e: MarketIndexEntry): HeaderInfo => ({
   start: e.start,
   end: e.end,
   positions: e.positions,
-  flagged: marketFlags(e).accounts,
+  flagged: e.flaggedAccounts,
+  score: e.spectrum && e.spectrum.bands.length > 0 ? { label: e.spectrum.name, flagged: indexFlaggedCount(e.spectrum) } : null,
 });
 
 const fromData = (d: MarketData): HeaderInfo => ({
@@ -73,7 +76,8 @@ const fromData = (d: MarketData): HeaderInfo => ({
   start: d.timeline.span.start,
   end: d.timeline.span.end,
   positions: d.timeline.positions,
-  flagged: flaggedCount(d.traders) ?? d.traders?.flaggedAccounts ?? null,
+  flagged: d.traders?.flaggedAccounts ?? null,
+  score: hasSpectrum(d.traders) ? { label: d.traders.rubric.name, flagged: flaggedCount(d.traders) } : null,
 });
 
 /** The flagged count's key: critical red, as a dot beside the (ink) number. */
@@ -85,11 +89,13 @@ function ViewTabs({
   name,
   view,
   flagged,
+  score,
   timelineQuery,
 }: {
   name: string;
   view: View;
   flagged: number | null | undefined;
+  score: HeaderInfo["score"] | undefined;
   /** The timeline's last URL state, so the Timeline tab brings back its zoom, pin and paused replay. */
   timelineQuery: Query | undefined;
 }) {
@@ -111,12 +117,13 @@ function ViewTabs({
     nav.querySelectorAll("a").forEach((a) => ro.observe(a));
     document.fonts?.ready.then(measure).catch(() => {});
     return () => ro.disconnect();
-  }, [view, flagged]);
+  }, [view, flagged, score?.label, score?.flagged]);
 
   const tabs: { key: View; label: string; count?: number | null }[] = [
     { key: "timeline", label: "Timeline" },
     { key: "traders", label: "Flagged traders", count: flagged },
   ];
+  if (score) tabs.push({ key: "score", label: score.label, count: score.flagged });
 
   return (
     <nav
@@ -227,6 +234,7 @@ function MarketHeader({
             name={name}
             view={view}
             flagged={info?.flagged}
+            score={info?.score}
             timelineQuery={timelineQuery}
           />
         </div>
@@ -247,7 +255,10 @@ export function MarketPage({
   index: Async<MarketIndex>;
 }) {
   const entry = index.data?.markets.find((m) => m.name === name);
-  const market = useAsync(() => fetchMarket(name), name);
+  // A newer version of the page (the index, read again while the page is open, names it: the scores published)
+  // loads in the old one's place; the old one stays on screen meanwhile.
+  const version = (entry as { v?: string } | undefined)?.v ?? "";
+  const market = useAsync(() => fetchMarket(name), `${name}@${version}`);
   if (market.status === "ready") resolved.set(name, market.data);
   const data = resolved.get(name);
 
@@ -256,6 +267,13 @@ export function MarketPage({
   if (data && data !== shown) setShown(data);
   const display = data ?? shown;
   const stale = !data && display != null;
+
+  // The Insider score tab exists only for a page that carries the rubric: an
+  // old link to it on any other market opens Flagged traders instead.
+  const noScore = view === "score" && !!data && !hasSpectrum(data.traders);
+  useEffect(() => {
+    if (noScore) replaceHash(href.market(name, "traders"));
+  }, [noScore, name]);
 
   const unknown =
     (index.status === "ready" && !entry) ||
@@ -269,7 +287,9 @@ export function MarketPage({
     );
   }
 
-  const info = entry ? fromEntry(entry) : data ? fromData(data) : null;
+  // The tabs follow the loaded page once it is here (it decides whether the Insider score tab shows).
+  const base = entry ? fromEntry(entry) : data ? fromData(data) : null;
+  const info = base && entry && data ? { ...base, score: fromData(data).score } : base;
   const loadingLabel = `Loading ${info ? shortTitle(info) : "market"}…`;
 
   let body: ReactNode;
@@ -282,7 +302,9 @@ export function MarketPage({
         aria-busy={stale || undefined}
         inert={stale || undefined}
       >
-        {view === "traders" ? (
+        {view === "score" && hasSpectrum(display.traders) ? (
+          <ScoreView key={display.name} market={display} />
+        ) : view === "traders" || view === "score" ? (
           <TradersView key={display.name} market={display} />
         ) : (
           <TimelineView key={display.name} market={display} />

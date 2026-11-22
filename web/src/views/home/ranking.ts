@@ -50,54 +50,7 @@ export const parseResolved = (s: string | undefined): ResolvedFilter => (s === "
 
 export const parseFlagged = (s: string | undefined): boolean => s === "1";
 
-/* ── Flag figures ────────────────────────────────────────────────────────── */
-
-export interface MarketFlags {
-  /** Whales the figures are over (the Traders tab's set). */
-  whales: number | null;
-  /** Flagged accounts. */
-  accounts: number | null;
-  /** Flagged capital: their share (%) of whale capital. */
-  capitalPct: number | null;
-  /** Σ net profit of flagged wallets' timeline whales. */
-  winnings: number | null;
-}
-
-/**
- * What a market card, the ranking, the filter and the tab count call
- * "flagged": the insider score's flagged bands when the market is scored
- * (index entry `spectrum`), else today's cut-off flags.
- */
-export function marketFlags(m: MarketIndexEntry): MarketFlags {
-  const s = m.spectrum;
-  if (s && s.bands.length > 0) {
-    const any = s.bands.some((b) => b.flagged);
-    const top = s.bands[s.bands.length - 1].id;
-    let whales = 0;
-    let accounts = 0;
-    let stake = 0;
-    let flaggedStake = 0;
-    for (const b of s.bands) {
-      whales += b.count;
-      stake += b.stake;
-      if (any ? b.flagged : b.id === top) {
-        accounts += b.count;
-        flaggedStake += b.stake;
-      }
-    }
-    if (whales > 0) {
-      return {
-        whales,
-        accounts,
-        capitalPct: stake > 0 ? (flaggedStake / stake) * 100 : 0,
-        winnings: s.flaggedWinnings ?? m.flaggedWinnings,
-      };
-    }
-  }
-  return { whales: m.traderWhales, accounts: m.flaggedAccounts, capitalPct: m.pctSuspicious, winnings: m.flaggedWinnings };
-}
-
-const hasFlagged = (m: MarketIndexEntry) => (marketFlags(m).accounts ?? 0) > 0;
+const hasFlagged = (m: MarketIndexEntry) => (m.flaggedAccounts ?? 0) > 0;
 
 export function filterMarkets(markets: MarketIndexEntry[], f: MarketFilters): MarketIndexEntry[] {
   return markets.filter((m) => {
@@ -113,7 +66,7 @@ export const isDefaultView = (sort: SortKey, f: MarketFilters) => sort === DEFAU
 /* ── Sort ────────────────────────────────────────────────────────────────── */
 
 /** "How suspicious": the Flagged capital figure the cards show (flagged accounts' share of whale capital). */
-const suspicion = (m: MarketIndexEntry): number | null => marketFlags(m).capitalPct;
+const suspicion = (m: MarketIndexEntry): number | null => m.pctSuspicious;
 
 /** The number a market is ranked by under `key`; null sorts last (and never under the default). */
 function sortValue(m: MarketIndexEntry, key: SortKey): number | null {
@@ -123,9 +76,9 @@ function sortValue(m: MarketIndexEntry, key: SortKey): number | null {
     case "suspicious":
       return suspicion(m);
     case "winnings":
-      return marketFlags(m).winnings;
+      return m.flaggedWinnings;
     case "accounts":
-      return marketFlags(m).accounts;
+      return m.flaggedAccounts;
     case "volume":
       return m.totalVolume;
     case "newest":

@@ -3,10 +3,12 @@ python3 -m backend.rubric check [--rubric FILE]
     Validate the rubric file: every problem on its own line, exit 1 when there is one.
 
 python3 -m backend.rubric score (--market NAME ... | --all) [--dry-run] [--scorer decisions|interactions]
-                                [--max-requests N] [--refresh] [--rubric FILE] [--facts DIR] [--cache DIR] [--out DIR]
+                                [--max-requests N] [--refresh] [--wallets FILE] [--rubric FILE] [--facts DIR]
+                                [--cache DIR] [--out DIR]
     Score whales from their facts files (DIR/<name>.json, written by backend.rubric.fact_sources). Answers cached
     for the same question and input are reused; --dry-run sends nothing and prints how many requests a real run
-    would make. Writes OUT/<name>.json (pipeline.score_market's result) and prints one line per market.
+    would make. --wallets FILE asks only the wallets it lists (one address per line, # comments); the others
+    keep what is cached. Writes OUT/<name>.json (pipeline.score_market's result) and prints one line per market.
 
 python3 -m backend.rubric show [--market NAME] [--wallet ADDR] [--top N] [--out DIR]
     No market: the rubric in one table (questions, weights, bands). A market: its whales by score, beside
@@ -80,6 +82,10 @@ def cmd_score(rubric, a):
     if not names:
         print(f"no facts files in {a.facts}", file=sys.stderr)
         return 1
+    only = None
+    if a.wallets:
+        with open(a.wallets, encoding="utf-8") as f:
+            only = {ln.split("#")[0].strip().lower() for ln in f} - {""}
     ledger = cache_mod.Ledger(os.path.join(a.cache, "usage.json"))
     make = lambda name: get_scorer(rubric, name, ledger=ledger)            # noqa: E731
     total = 0
@@ -92,10 +98,11 @@ def cmd_score(rubric, a):
             continue
         res = pipeline.score_market(rubric, facts, store, scorer=make(a.scorer or rubric["scorer"]["use"]),
                                     make_scorer=make, dry_run=a.dry_run, max_requests=left, refresh=a.refresh,
-                                    log=lambda m: print(f"  {m}", file=sys.stderr))
+                                    log=lambda m: print(f"  {m}", file=sys.stderr), only=only)
         st = res["stats"]
         if a.dry_run:
-            print(f"{name}: {st['whales']} whales, {st['cached']} cached, {st['would_ask']} requests to send")
+            print(f"{name}: {st['whales']} whales, {st['cached']} cached, {st['would_ask']} requests to send"
+                  + (f", {st['skipped']} not listed" if only is not None else ""))
             total += st["would_ask"]
             continue
         total += st["requests"]
@@ -104,7 +111,8 @@ def cmd_score(rubric, a):
         for w in res["whales"]:
             bands[w["band"]] = bands.get(w["band"], 0) + 1
         print(f"{name}: {st['whales']} whales, {st['requests']} requests ({res['scorer']}, {st['tokens']:,} tokens), "
-              f"{st['unscored']} unscored, bands {bands}" + (f"; stopped: {st['stopped']}" if st["stopped"] else ""))
+              f"{st['unscored']} unscored" + (f" ({st['skipped']} not listed)" if only is not None else "")
+              + f", bands {bands}" + (f"; stopped: {st['stopped']}" if st["stopped"] else ""))
         if st["stop"] in ("busy", "unavailable"):
             return 1
     print(f"{'would send' if a.dry_run else 'sent'} {total} requests in all")
@@ -181,6 +189,11 @@ def cmd_compare(rubric, a):
     for b in reversed(order):
         row = [sum(1 for w in every if w["band"] == b and w["flags"].get("category") == c) for c in cats]
         print(f"{b:<18}" + "".join(f"{n:>14}" for n in row) + f"{sum(row):>8}")
+    tiers = {}
+    for w in every:
+        tiers[w.get("tier") or "none"] = tiers.get(w.get("tier") or "none", 0) + 1
+    if any(k != "none" for k in tiers):
+        print("\nby tier: " + ", ".join(f"{k} {n}" for k, n in tiers.items()))
     old = [w for w in every if w["flags"].get("is_suspicious")]
     new = [w for w in every if w["band"] in flagged]
     both = [w for w in new if w["flags"].get("is_suspicious")]
@@ -280,6 +293,7 @@ def main(argv=None):
     s.add_argument("--scorer", choices=spec.SCORERS)
     s.add_argument("--max-requests", type=int)
     s.add_argument("--refresh", action="store_true", help="ask again even what is cached")
+    s.add_argument("--wallets", help="a file of wallet addresses: ask only these")
     s = sub.add_parser("show")
     common(s)
     s.add_argument("--wallet")

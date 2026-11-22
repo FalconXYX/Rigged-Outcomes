@@ -14,7 +14,7 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
-from backend.rubric.spec import factor_format
+from backend.rubric.spec import factor_description, factor_format
 
 _ISO = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d")
 
@@ -85,7 +85,7 @@ def render_input(rubric, market, facts, reg=None, side="BUY"):
             continue
         v = facts.get(f["id"])
         value = unknown if v is None else fmt(v, factor_format(f, reg))
-        lines.append(inp["fact_line"].format(label=f["label"], value=value, description=f["description"]))
+        lines.append(inp["fact_line"].format(label=f["label"], value=value, description=factor_description(f)))
     fields = {k: ("" if v is None else when(v)) for k, v in market.items()}
     for k in ("volume_usd", "whale_threshold_usd"):
         if isinstance(fields.get(k), (int, float)):

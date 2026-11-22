@@ -3,13 +3,13 @@ import { useSyncExternalStore } from "react";
 // Hash routing: GitHub Pages has no SPA fallback, so routes live after `#`.
 //   #/                     home
 //   #/m/:name              market (timeline view)
-//   #/m/:name/:view        market, view = "timeline" | "traders"
+//   #/m/:name/:view        market, view = "timeline" | "traders" | "score"
 //   #/watchlist            open markets to watch, and closed ones that look
 //                          like someone knew (#/closed, its old name, redirects here)
 // Every route may carry a query string (`#/m/usiran?range=Leadup&pin=0x…`)
 // that views use for shareable state; see useQuery / setQuery.
 
-export type MarketView = "timeline" | "traders";
+export type MarketView = "timeline" | "traders" | "score";
 export type Query = Record<string, string>;
 
 export type Route =
@@ -48,7 +48,7 @@ export function parseRoute(path: string): Route {
   if ((parts[0] === "watchlist" || parts[0] === "closed") && parts.length === 1) return { page: "watchlist", query };
   if (parts[0] === "m" && parts[1]) {
     const view = parts[2] ?? "timeline";
-    if ((view === "timeline" || view === "traders") && parts.length <= 3) {
+    if ((view === "timeline" || view === "traders" || view === "score") && parts.length <= 3) {
       return { page: "market", name: parts[1], view, query };
     }
   }
@@ -158,6 +158,12 @@ export const href = {
   market: (name: string, view: MarketView = "timeline", query?: Query) =>
     `#/m/${encodeURIComponent(name)}${view === "timeline" ? "" : `/${view}`}${query ? buildQuery(query) : ""}`,
 };
+
+/** Swap the current hash in place (no new history entry). */
+export function replaceHash(hash: string) {
+  window.history.replaceState(window.history.state, "", hash.startsWith("#") ? hash : `#${hash}`);
+  window.dispatchEvent(new Event(ROUTE_EVENT));
+}
 
 export function navigate(hash: string) {
   window.location.hash = hash.replace(/^#/, "");

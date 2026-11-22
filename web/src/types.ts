@@ -195,6 +195,8 @@ export interface RubricDisplay {
   bands: RubricBand[];
   questions: RubricQuestion[];
   factors: RubricFactor[];
+  /** The paragraph at the foot of the Insider score tab: the rubric file's [about], its {names} filled in. */
+  about?: { heading: string; text: string };
 }
 
 export type SpectrumAnswer =

@@ -85,6 +85,9 @@ def test_market_facts():
     assert fresh["wallet_age_days"] == round(1 / 24, 3)
     assert fresh["sold_before_close_pct"] == 25 and fresh["sold_before_reveal_pct"] == 25
     assert fresh["market_prob_at_entry"] == 0.2 and fresh["payout_multiple"] == 5
+    # the line: 0.2 until its own sale at 0.5 (hour 45), 0.97 from the reveal (hour 48)
+    assert fresh["hours_to_big_move"] == 5 and fresh["max_rise_48h"] == 0.77
+    assert old["hours_to_big_move"] == 4 and old["max_rise_48h"] == 0.77
     assert fresh["whales_same_window"] == 1 and fresh["fresh_whales_same_window"] == 0
     assert old["prior_trades"] == 300 and old["prior_win_rate_pct"] == 50 and old["prior_pnl_usd"] == 40
     assert old["fresh_whales_same_window"] == 1 and old["wallet_age_days"] > 300

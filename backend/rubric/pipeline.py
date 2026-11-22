@@ -9,15 +9,19 @@ whale.
                       rubric's fallback (make_scorer(name) builds it) and goes on
         dry_run       nothing is sent: result.stats.would_ask counts the requests it would make
         max_requests  stop after this many requests (stats.stopped = "max_requests")
+        stop_when     stop_when() before each request; True stops the run (stats.stopped = "another job is
+                      waiting", stats.stop = "give_way": a step's ctx.give_way)
         on_answers    on_answers({cache key: answer}) after each request (a step checkpoints them)
         refresh       ask again even what is cached (a new model, a suspicion about old answers)
+        only          ask only the whales whose wallet or user id is in this set (stats.skipped counts the others
+                      left unanswered); None: every whale
 
     result = {
       "market": name, "version": the rubric's, "rubric": spec.display(rubric), "scorer": "decisions",
-      "stats": {"whales", "cached", "asked", "requests", "would_ask", "unscored", "refused", "tokens",
-                "stopped": None | why, "stop": None | "busy" | "unavailable" | "max_requests"},
+      "stats": {"whales", "cached", "asked", "requests", "would_ask", "unscored", "refused", "skipped", "tokens",
+                "stopped": None | why, "stop": None | "busy" | "unavailable" | "max_requests" | "give_way"},
       "whales": [{"key", "item", "wallet", "user_id", "first_buy", "side", "current_rules", "score", "band",
-                  "answers", "facts", "flags"}],
+                  "tier", "base", "evidence" (combine.detail), "answers", "facts", "flags"}],
     }
 
     trader_fields(whale, rubric) -> what a market page's traders[i] carries:
@@ -52,7 +56,7 @@ def page_key(user_id, first_trade):
 
 
 def score_market(rubric, facts_doc, cache, scorer=None, dry_run=False, on_answers=None, make_scorer=None,
-                 max_requests=None, refresh=False, log=None):
+                 max_requests=None, refresh=False, log=None, only=None, stop_when=None):
     reg = spec.registry()
     sc_cfg = rubric.get("scorer") or {}
     make = make_scorer or (lambda name: get_scorer(rubric, name))
@@ -62,7 +66,7 @@ def score_market(rubric, facts_doc, cache, scorer=None, dry_run=False, on_answer
     hashes = {(n, q["id"]): spec.question_hash(q, sc_cfg.get(n), n) for n in names for q in rubric["questions"]}
     questions = rubric["questions"]
     stats = {"whales": 0, "cached": 0, "asked": 0, "requests": 0, "would_ask": 0, "unscored": 0, "refused": 0,
-             "tokens": 0, "stopped": None, "stop": None}
+             "skipped": 0, "tokens": 0, "stopped": None, "stop": None}
 
     rows = []
     for w in facts_doc["whales"]:
@@ -84,11 +88,18 @@ def score_market(rubric, facts_doc, cache, scorer=None, dry_run=False, on_answer
 
     todo = [r for r in rows if missing(r)]
     stats["cached"] = len(rows) - len(todo)
+    if only is not None:                         # ask only these wallets; the rest keep what is cached
+        only = {str(x).lower() for x in only}
+        kept = [r for r in todo if r["whale"]["user_id"].lower() in only or r["whale"]["wallet"].lower() in only]
+        stats["skipped"], todo = len(todo) - len(kept), kept
     refused = set()
     i = 0
     while i < len(todo) and not dry_run:
         if max_requests is not None and stats["requests"] >= max_requests:
             stats["stopped"], stats["stop"] = f"stopped after {max_requests} requests", "max_requests"
+            break
+        if stop_when is not None and stop_when():
+            stats["stopped"], stats["stop"] = "another job is waiting", "give_way"
             break
         batch = todo[i:i + scorer.batch]
         need = {q["id"] for r in batch for q in missing(r)}
@@ -142,13 +153,15 @@ def score_market(rubric, facts_doc, cache, scorer=None, dry_run=False, on_answer
     whales = []
     for r in rows:
         answers = {q["id"]: a for q in questions if (a := cached(r, q)) is not None}
-        score, band = combine.spectrum(rubric, answers)
+        w = r["whale"]
+        how = combine.detail(rubric, answers, w["facts"], w.get("flags"))
+        score, band = how["score"], how["band"]
         if score is None:
             stats["unscored"] += 1
-        w = r["whale"]
         whales.append({"key": page_key(w["user_id"], w["first_buy"]), "item": r["item"], "wallet": w["wallet"],
                        "user_id": w["user_id"], "first_buy": w["first_buy"], "side": w.get("position_side", "BUY"),
-                       "current_rules": w.get("current_rules"), "score": score, "band": band, "answers": answers,
+                       "current_rules": w.get("current_rules"), "score": score, "band": band, "tier": how["tier"],
+                       "base": how["base"], "evidence": how["evidence"], "answers": answers,
                        "facts": w["facts"], "flags": w.get("flags") or {}})
     stats["whales"] = len(whales)
     return {"market": facts_doc["market"]["name"], "version": rubric["version"], "rubric": spec.display(rubric, reg),

@@ -1,8 +1,11 @@
 // The Watchlist's two lists after a real daily run, through the whole stack (tests/end-to-end/stack.mjs): the Worker's
-// cron makes today's daily run, the local Vercel runs its steps (live Polymarket and Google News; Gemini is the
-// harness's stand-in, which answers no model request), and the site reads what it publishes from the Worker.
+// cron makes today's daily run (at any hour: before 04:00 Toronto the Worker's clock is moved to 04:00 first), the
+// local Vercel runs its steps (live Polymarket and Google News; Gemini is the harness's stand-in, which answers no
+// model request), and the site reads what it publishes from the Worker.
 //
-// Before the run the stack holds a closed day an older count published with 5 picks (seed.py --crowd). Then:
+// Before the run the stack holds a closed day an older count published with 5 picks (seed.py --crowd), and
+// yesterday's Open now list with its cards (seed.py --open-days-ago 1), as the site always has an earlier list, so
+// today's list shows its "Updated" time even with no card. Then:
 //
 //   three       Recently closed: every day the run published has at most 3 picks, the crowded day exactly 3, and
 //               the page shows exactly 3 cards for it
@@ -25,9 +28,9 @@ import { toronto } from "../lib/toronto.mjs";
 import { parseArgs, stackOptions, startStack } from "../stack.mjs";
 
 const args = parseArgs(process.argv.slice(2));
-const opts = stackOptions({ "port-base": 9560, picks: 3, cards: 2, crowd: 5, daily: true, ...args, quiet: !args.verbose });
+const opts = stackOptions({ "port-base": 9560, picks: 3, cards: 2, crowd: 5, "open-days-ago": 1, daily: true, ...args, quiet: !args.verbose });
 opts.cron = false; // the scenario starts the cron itself, just before the daily run
-const WAIT_MS = Number(args.wait ?? 75) * 60_000;
+const WAIT_MS = Number(args.wait ?? 30) * 60_000; // the daily run took about 6 min in watch and score on 2026-11-21
 const report = new Report("lists", args.shots ?? join(tmpdir(), "e2e-shots", "lists"));
 const say = (s) => report.say(s);
 
@@ -60,12 +63,12 @@ try {
   page.errors = [];
   page.on("pageerror", (e) => page.errors.push(String(e)));
 
-  // the daily run: the cron from now on, as Cloudflare fires it
+  // the daily run: the Worker's clock at 04:00 Toronto or later, then the cron from now on, as Cloudflare fires it
+  const { id: daily, day, skew } = await stack.dailyRun();
   const runAt = Date.now();
   stack.cron.start();
   await stack.tick();
-  const daily = `daily:${stack.today}`;
-  say(`the daily run ${daily} is made; waiting for it to end (up to ${WAIT_MS / 60_000} min)`);
+  say(`the daily run ${daily} is made${skew > 60_000 ? ` (the Worker's clock moved ${Math.round(skew / 60_000)} min ahead, to 04:00 Toronto)` : ""}; waiting for it to end (up to ${WAIT_MS / 60_000} min)`);
   let last = "";
   const progress = setInterval(async () => {
     const got = await stack.run(daily).catch(() => null);
@@ -73,11 +76,12 @@ try {
     if (line !== last) say(`  ${line}`);
     last = line;
   }, 15_000);
-  const end = await stack.waitRun(daily, { ms: WAIT_MS }).catch(() => null);
+  let why = "";
+  const end = await stack.waitRun(daily, { ms: WAIT_MS }).catch((e) => ((why = e.message), null));
   clearInterval(progress);
-  const runText = await runLine(stack, daily, runAt);
+  const runText = await runLine(stack, daily, runAt + skew); // the run's times are the Worker's
   say(runText);
-  if (!end) throw new Error(`the daily run did not end within ${WAIT_MS / 60_000} min: ${runText}`);
+  if (!end) throw new Error(`the daily run did not end (${why}): ${runText}`);
 
   // three: at most 3 a day, the crowded day exactly 3, on screen too
   {
@@ -108,8 +112,12 @@ try {
     const notes = [];
     let ok = true;
     const open = await fetch(`${stack.urls.api}/api/data/open.json`).then((r) => r.json());
-    // the list's day was updated at its run_at (or, when the day is older, the last run's time): Toronto's clock
-    const stamps = [open.days?.[0]?.run_at, open.generated_at].filter(Boolean).map((x) => stampET(Date.parse(x) / 1000));
+    const days = open.days ?? [];
+    notes.push(`open.json held ${days.length} day(s)${days.length ? `: ${days.map((d) => `${d.day} ${d.status} with ${(d.cards ?? []).length} card(s)`).join(", ")}` : ""}`);
+    // the list's day was updated at its run_at (a day not updated today shows the newest updated day's, as
+    // OpenNow.tsx does; or, when the day is older, the last run's time): Toronto's clock
+    const shown = days[0]?.status === "not updated today" ? (days.find((d) => d.status === "updated") ?? days[0]) : days[0];
+    const stamps = [shown?.run_at, open.generated_at].filter(Boolean).map((x) => stampET(Date.parse(x) / 1000));
     for (const tz of ["Asia/Tokyo", "UTC"]) {
       const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 }, timezoneId: tz });
       const p = await ctx.newPage();
@@ -135,8 +143,8 @@ try {
     }
     const runDay = (await stack.run(daily))?.run;
     const torontoDay = runDay ? toronto(runDay.created_at).day : null;
-    notes.push(`the daily run's day ${stack.today}, the Toronto day it was made on ${torontoDay}`);
-    ok &&= torontoDay === stack.today;
+    notes.push(`the daily run's day ${day}, the Toronto day it was made on ${torontoDay}`);
+    ok &&= torontoDay === day;
     report.row("days and times on screen are Toronto time with no UTC", 'a browser in Tokyo or in UTC sees Toronto days and times ("ET") on every page and never "UTC"; the run\'s day is Toronto\'s', notes.join("; "), ok);
   }
   if (page.errors.length) report.row("no page errors", "none", page.errors.slice(0, 3).join(" | "), false);
@@ -144,7 +152,9 @@ try {
   report.row("lists (setup)", "the stack and the daily run", `stopped: ${e.stack ?? e.message}`.slice(0, 800), false);
 } finally {
   await browser?.close().catch(() => {});
-  if (args.keep && stack) say(`the stack keeps running (site ${stack.urls.site}); Ctrl-C stops it`);
-  else await stack?.stop({ keepState: report.rows.some((r) => !r.pass) });
+  if (args.keep && stack) {
+    report.uncap();
+    say(`the stack keeps running (site ${stack.urls.site}); Ctrl-C stops it`);
+  } else await stack?.stop({ keepState: report.rows.some((r) => !r.pass) });
 }
 if (!args.keep) report.finish();

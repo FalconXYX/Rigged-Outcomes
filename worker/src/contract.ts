@@ -1,7 +1,7 @@
-// The backend's shared constants (docs/BACKEND.md): job kinds and their lanes, run graphs, states, outcomes,
-// deadlines, caps, the time zone, the schedule and the budget thresholds. backend/contract.py holds the same
-// CONTRACT object (tests/test_backend_contract.py compares the two), so the Worker
-// and the Vercel step function always agree. Builders read this file.
+// The backend's shared constants (docs/BACKEND.md): job kinds and their lanes, the kinds that run in the
+// background, run graphs, states, outcomes, deadlines, caps, the time zone, the schedule and the budget
+// thresholds. backend/contract.py holds the same CONTRACT object (tests/test_backend_contract.py compares the
+// two), so the Worker and the Vercel step function always agree. Builders read this file.
 //
 // The block between the two markers is strict JSON (no comments, no trailing commas): the Python test parses it.
 
@@ -54,6 +54,7 @@ export const CONTRACT = {
     "add.export":     { "lane": "add",   "heavy": true,  "need_s": 60,  "final": true,  "handler": "backend.add_steps:export" },
     "wallets.score":  { "lane": "add",   "heavy": true,  "need_s": 120, "final": false, "handler": "backend.rubric.steps:score" }
   },
+  "background_kinds": ["wallets.score"],
   "run_graphs": {
     "daily": [
       { "kind": "daily.begin",    "after": [] },
@@ -222,6 +223,8 @@ export type BudgetLevel = (typeof CONTRACT.budget.levels)[number];
 
 export const JOB_KINDS = CONTRACT.job_kinds;
 export const RUN_GRAPHS = CONTRACT.run_graphs;
+/** Kinds that wait while a foreground job (one of a kind not listed here) is ready for their lane or the heavy slot, and give way at a checkpoint once one is. */
+export const BACKGROUND_KINDS: readonly JobKind[] = CONTRACT.background_kinds;
 
 export const isJobKind = (k: string): k is JobKind => Object.prototype.hasOwnProperty.call(CONTRACT.job_kinds, k);
 

@@ -4,6 +4,7 @@ Load and check the rubric file, and cut out the part the site renders.
     rubric = load_rubric()                  # rubric/wallet_rubric.toml, as a plain dict
     problems = check(rubric)                # [] when the file is usable
     page_part = display(rubric)             # goes into traders.rubric of each market page
+    names = about_names(rubric)             # what [about]'s {name} placeholders read, all from the file
 
 The rubric is a dict straight from tomllib (no classes), so a new key in
 the file is available to every module without a code change. The shape is
@@ -30,16 +31,20 @@ TOKENS_CSS = os.path.join(ROOT, "web", "src", "styles", "tokens.css")
 QUESTION_TYPES = ("score", "noul", "choice")
 FORMATS = ("usd", "percent", "probability", "count", "hours", "days", "x", "flag")   # wallet_facts units
 SCORERS = ("decisions", "interactions")
+COMBINE_METHODS = ("weighted_mean", "tiered")
+# today's yes/no flags every whale carries (wallet_facts.market_facts' "flags"); a tier may test them
+FLAGS = {"prior_bet_count", "concentration", "is_first_x", "is_percent", "is_suspicious", "category", "risk_score"}
 # the "market" part of a facts file (wallet_facts.market_facts), plus {facts} and {side}
 PLACEHOLDERS = {"name", "title", "slug", "outcome", "condition_id", "volume_usd", "positions", "whales",
                 "whale_threshold_usd", "first_trade", "close", "reveal", "reveal_method", "pre_reveal_prob", "news",
                 "news_label", "facts", "side"}
 LINE_PLACEHOLDERS = {"label", "value", "description"}
+ABOUT_FIELD = re.compile(r"{([^{}]*)}")      # every {...} in [about]: a name about_names() gives, else check() names it
 ID = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 OPTION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # every key the file may hold, by section (check() names any other)
 KNOWN = {
-    "": {"version", "name", "scale", "scorer", "input", "factors", "questions", "combine", "bands", "backend"},
+    "": {"version", "name", "scale", "scorer", "input", "factors", "questions", "combine", "bands", "backend", "about"},
     "scorer": {"use", "fallback", "decisions", "interactions"},
     "scorer.decisions": {"model", "wallets_per_request", "min_interval", "rpm", "tpm", "daily_cap", "retries"},
     "scorer.interactions": {"models", "wallets_per_request", "temperature", "daily_cap"},
@@ -49,9 +54,11 @@ KNOWN = {
                   "false_description"},
     "levels": {"label", "criterion"},
     "options": {"id", "label", "criterion", "value"},
-    "combine": {"method", "weights"},
+    "combine": {"method", "weights", "tiers"},
+    "tiers": {"id", "flags", "facts", "floor", "ceiling", "weights", "span"},
     "bands": {"id", "label", "min", "color", "flagged"},
     "backend": {"score_on_add"},
+    "about": {"heading", "text"},
 }
 
 
@@ -87,6 +94,20 @@ def registry():
     return FACTORS
 
 
+def definitions():
+    """{name: value}: the numbers that define the factors (wallet_facts.DEFINITIONS), for {name} in a
+    factor's description."""
+    from backend.rubric.wallet_facts import DEFINITIONS
+    return DEFINITIONS
+
+
+def factor_description(f, defs=None):
+    """A rubric factor's description with each {name} replaced by that fact definition's value; an unknown
+    {name} is left as written (check() names it)."""
+    defs = definitions() if defs is None else defs
+    return re.sub(r"{([a-z_]+)}", lambda m: str(defs[m[1]]) if m[1] in defs else m[0], f.get("description") or "")
+
+
 def factor_format(f, reg=None):
     """A rubric factor's display format: its own `format`, else the registered factor's unit."""
     if f.get("format"):
@@ -96,11 +117,95 @@ def factor_format(f, reg=None):
     return getattr(got, "unit", None) if got else None
 
 
-def check(rubric, reg=None, tokens=None):
+def _num(v):
+    """A number as prose shows it: 60, 62.5 (never 60.0)."""
+    return str(int(v)) if isinstance(v, float) and v.is_integer() else str(v)
+
+
+def _join(items, word):
+    """"A", "A and B", "A, B and C" (word "and" or "or"), as the site joins lists (spectrum.ts andList, orList)."""
+    items = list(items)
+    return f"{', '.join(items[:-1])} {word} {items[-1]}" if len(items) > 1 else "".join(items)
+
+
+def _weighted(questions, weights):
+    """The questions weighted above 0, heaviest first (ties keep the file's order), as the site lists them."""
+    def w(q):
+        v = weights.get(q.get("id")) if isinstance(weights, dict) else None
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+    return [q for _, _, q in sorted(((-w(q), i, q) for i, q in enumerate(questions) if w(q) > 0),
+                                    key=lambda x: x[:2])]
+
+
+def about_names(rubric):
+    """{name: text} that [about]'s heading and text may cite as {name}, every one read from the rubric, so the
+    paragraph follows the file: name, scale_min, scale_max; questions (the weighted questions' labels, heaviest
+    first); per band band_<id> (its label), band_<id>_min, band_<id>_max; flagged (the flagged bands' labels,
+    "A or B"), flagged_min (only when the flagged bands run to the top, as the site gives a range: spectrum.ts
+    flaggedBands); per tier tier_<id>_floor, tier_<id>_ceiling, tier_<id>_band (the band its floor is in),
+    tier_<id>_lead (its heaviest question), tier_<id>_<fact>_min / _max (its facts' bounds); and the fact
+    definitions (wallet_facts.DEFINITIONS)."""
+    scale = rubric.get("scale")
+    lo, hi = scale if isinstance(scale, list) and len(scale) == 2 else (0, 100)
+    qs = [q for q in rubric.get("questions") or [] if isinstance(q, dict)]
+    comb = rubric.get("combine") if isinstance(rubric.get("combine"), dict) else {}
+    weights = comb.get("weights") or {}
+    bands = [b for b in rubric.get("bands") or [] if isinstance(b, dict)]
+    label = lambda x: str(x.get("label") or x.get("id"))       # noqa: E731
+
+    names = {k: _num(v) for k, v in definitions().items()}
+    names.update(name=str(rubric.get("name") or "Insider score"), scale_min=_num(lo), scale_max=_num(hi),
+                 questions=_join([label(q) for q in _weighted(qs, weights)], "and"))
+    for i, b in enumerate(bands):
+        top = bands[i + 1].get("min") if i + 1 < len(bands) else hi
+        names.update({f"band_{b.get('id')}": label(b), f"band_{b.get('id')}_min": _num(b.get("min")),
+                      f"band_{b.get('id')}_max": _num(top)})
+    # the site's rule (spectrum.ts isFlagged): the bands marked flagged, else the top band
+    flagged = [i for i, b in enumerate(bands) if b.get("flagged")] or ([len(bands) - 1] if bands else [])
+    names["flagged"] = _join([label(bands[i]) for i in flagged], "or")
+    if flagged and flagged == list(range(flagged[0], len(bands))):
+        names["flagged_min"] = _num(bands[flagged[0]].get("min"))
+    tiers = comb.get("tiers")
+    for t in tiers if isinstance(tiers, list) else []:
+        if not isinstance(t, dict):
+            continue
+        tid, floor = t.get("id"), t.get("floor")
+        at = [b for b in bands if isinstance(floor, (int, float)) and isinstance(b.get("min"), (int, float))
+              and floor >= b["min"]]
+        lead = _weighted(qs, t.get("weights") or weights)
+        names.update({f"tier_{tid}_floor": _num(floor), f"tier_{tid}_ceiling": _num(t.get("ceiling", hi)),
+                      f"tier_{tid}_band": label(at[-1]) if at else "",
+                      f"tier_{tid}_lead": label(lead[0]) if lead else ""})
+        facts = t.get("facts") if isinstance(t.get("facts"), dict) else {}
+        for k, c in facts.items():
+            if isinstance(c, dict):
+                names.update({f"tier_{tid}_{k}_{e}": _num(c[e]) for e in ("min", "max") if e in c})
+    return names
+
+
+def about(rubric, names=None):
+    """[about] as the site shows it: {"heading", "text"} with each {name} filled in (about_names) and the line
+    breaks joined, so the text is one paragraph. None when the file has no [about] text, or when either part
+    cites a {name} about_names() does not give (check() names it), so a page never shows an unfilled one."""
+    ab = rubric.get("about")
+    if not isinstance(ab, dict) or not str(ab.get("text") or "").strip():
+        return None
+    names = about_names(rubric) if names is None else names
+    parts = {k: " ".join(str(ab.get(k) or "").split()) for k in ("heading", "text")}
+    if any(n not in names for s in parts.values() for n in ABOUT_FIELD.findall(s)):
+        return None
+    return {k: ABOUT_FIELD.sub(lambda m: names[m[1]], s) for k, s in parts.items()}
+
+
+def check(rubric, reg=None, tokens=None, display=None):
     """Every problem with the rubric, as short sentences; [] when it is usable.
     reg: the factor registry (default: wallet_facts.FACTORS); tokens: colour
-    tokens (default: tokens.css; none found: colours are not checked)."""
+    tokens (default: tokens.css; none found: colours are not checked);
+    display: also check [about], the paragraph only the site shows (default: when tokens is not given). The
+    backend's gates (add_steps.score_on_add, steps.score) pass tokens=set(), so a slip in that wording never
+    stops scoring: about() leaves the paragraph off the page, and the CLI's check names the slip."""
     reg = registry() if reg is None else reg
+    display = tokens is None if display is None else display
     tokens = site_tokens() if tokens is None else tokens
     out = _unknown("", rubric)
     if not str(rubric.get("version") or "").strip():
@@ -171,6 +276,9 @@ def check(rubric, reg=None, tokens=None):
         for k in ("label", "description"):
             if not str(f.get(k) or "").strip():
                 out.append(f"factor {fid}: {k} is missing")
+        for name in sorted(_fields(f.get("description")) - set(definitions())):
+            out.append(f"factor {fid}: description cites {{{name}}}, which is not one of "
+                       f"wallet_facts.DEFINITIONS {sorted(definitions())}")
         for k in ("send", "card"):
             if k in f and not isinstance(f[k], bool):
                 out.append(f"factor {fid}: {k} must be true or false")
@@ -236,29 +344,89 @@ def check(rubric, reg=None, tokens=None):
 
     comb = rubric.get("combine") or {}
     out += _unknown("combine", comb, "[combine]")
-    if comb.get("method", "weighted_mean") != "weighted_mean":
-        out.append("combine.method must be weighted_mean")
-    weights = comb.get("weights") or {}
+    method = comb.get("method", "weighted_mean")
+    if method not in COMBINE_METHODS:
+        out.append(f"combine.method must be one of {COMBINE_METHODS}")
     qmap = {q.get("id"): q for q in rubric.get("questions") or [] if isinstance(q, dict)}
-    for k, w in weights.items():
-        if k not in qids:
-            out.append(f"combine.weights: unknown question {k!r}")
-        elif not isinstance(w, (int, float)) or isinstance(w, bool) or w < 0:
-            out.append(f"combine.weights.{k} must be a number >= 0")
 
     def counted(k, w):
         q = qmap.get(k) or {}
-        if not isinstance(w, (int, float)) or w <= 0:
+        if not isinstance(w, (int, float)) or isinstance(w, bool) or w <= 0:
             return False
         if q.get("type") == "choice":
             return all(isinstance(o.get("value"), (int, float)) for o in q.get("options") or [] if isinstance(o, dict))
         return q.get("type") in ("score", "noul")
-    if not any(counted(k, w) for k, w in weights.items()):
-        out.append("combine.weights: at least one question needs a weight above 0")
-    for k, w in weights.items():
-        q = qmap.get(k) or {}
-        if q.get("type") == "choice" and isinstance(w, (int, float)) and w > 0 and not counted(k, w):
-            out.append(f"combine.weights.{k}: a choice question counts only when every option has a value (0-1)")
+
+    def check_weights(weights, where):
+        if not isinstance(weights, dict):
+            return [f"{where} must be a table of question = weight"]
+        got = []
+        for k, w in weights.items():
+            if k not in qids:
+                got.append(f"{where}: unknown question {k!r}")
+            elif not isinstance(w, (int, float)) or isinstance(w, bool) or w < 0:
+                got.append(f"{where}.{k} must be a number >= 0")
+        if not any(counted(k, w) for k, w in weights.items()):
+            got.append(f"{where}: at least one question needs a weight above 0")
+        for k, w in weights.items():
+            q = qmap.get(k) or {}
+            if q.get("type") == "choice" and isinstance(w, (int, float)) and w > 0 and not counted(k, w):
+                got.append(f"{where}.{k}: a choice question counts only when every option has a value (0-1)")
+        return got
+    out += check_weights(comb.get("weights") or {}, "combine.weights")
+
+    tiers = comb.get("tiers")
+    if tiers is not None and method != "tiered":
+        out.append('combine.tiers: only combine.method = "tiered" has tiers')
+    if method == "tiered" and not (isinstance(tiers, list) and tiers):
+        out.append('combine.method "tiered" needs at least one [[combine.tiers]] block')
+    tids = set()
+    for t in tiers if isinstance(tiers, list) else []:
+        tid = t.get("id", "?") if isinstance(t, dict) else "?"
+        where = f"tier {tid}"
+        out += _unknown("tiers", t, where)
+        if not isinstance(t, dict):
+            continue
+        if not ID.match(str(tid)):
+            out.append(f"tier {tid!r}: id must be lower_snake_case")
+        if tid in tids:
+            out.append(f"tier {tid}: id used twice")
+        tids.add(tid)
+        conds = 0
+        for part, known in (("flags", FLAGS), ("facts", reg)):
+            table = t.get(part, {})
+            if not isinstance(table, dict):
+                out.append(f"{where}: {part} must be a table")
+                continue
+            for k, c in table.items():
+                conds += 1
+                if k not in known:
+                    out.append(f"{where}: {part} has no {k!r}" + (" (a factor in backend/rubric/wallet_facts.py)"
+                                                                  if part == "facts" else f" (one of {sorted(FLAGS)})"))
+                if isinstance(c, dict):
+                    bad = [x for x in c if x not in ("min", "max")]
+                    if bad or not c:
+                        out.append(f"{where}: {part}.{k} must be a value or a table of min and max")
+                    elif any(not isinstance(c[x], (int, float)) or isinstance(c[x], bool) for x in c):
+                        out.append(f"{where}: {part}.{k} min and max must be numbers")
+                    elif "min" in c and "max" in c and c["min"] > c["max"]:
+                        out.append(f"{where}: {part}.{k} min is above max")
+                elif not isinstance(c, (bool, int, float, str)):
+                    out.append(f"{where}: {part}.{k} must be a value or a table of min and max")
+        if not conds:
+            out.append(f"{where}: needs at least one condition in flags or facts")
+        fl, ce = t.get("floor"), t.get("ceiling", hi)
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (fl, ce)):
+            out.append(f"{where}: floor and ceiling must be numbers")
+        elif not lo <= fl < ce <= hi:
+            out.append(f"{where}: floor and ceiling must satisfy {lo} <= floor < ceiling <= {hi}")
+        if "weights" in t:
+            out += check_weights(t["weights"], f"{where} weights")
+        span = t.get("span", [0, 1])
+        if not (isinstance(span, list) and len(span) == 2 and all(isinstance(x, (int, float)) and
+                                                                    not isinstance(x, bool) for x in span)
+                and 0 <= span[0] < span[1] <= 1):
+            out.append(f"{where}: span must be two numbers from 0 to 1, low then high")
 
     bands = rubric.get("bands") or []
     if not bands:
@@ -291,6 +459,20 @@ def check(rubric, reg=None, tokens=None):
     out += _unknown("backend", be, "[backend]")
     if "score_on_add" in be and not isinstance(be["score_on_add"], bool):
         out.append("backend.score_on_add must be true or false")
+    ab = rubric.get("about")
+    if ab is not None and display:
+        out += _unknown("about", ab, "[about]")
+        known = about_names(rubric) if isinstance(ab, dict) else {}
+        for k in ("heading", "text") if isinstance(ab, dict) else ():
+            v = ab.get(k)
+            if v is not None and not isinstance(v, str):
+                out.append(f"about.{k} must be text")
+                continue
+            if not (v or "").strip():
+                out.append(f"about.{k} is missing")
+                continue
+            for bad in sorted(set(ABOUT_FIELD.findall(v)) - set(known)):
+                out.append(f"about.{k}: unknown placeholder {{{bad}}}")
     return out
 
 
@@ -323,7 +505,8 @@ def display(rubric, reg=None):
     """What the site renders, embedded as traders.rubric in each market page:
     {version, name, scale, bands: [{id, label, min, max, color, flagged}],
      questions: [{id, type, label, weight, levels: [label] | options: [{id, label}]}],
-     factors: [{id, label, format, description}]  (card = true only)}
+     factors: [{id, label, format, description}]  (card = true only),
+     about: {heading, text}  (when the file has [about] and every {name} in it is known; see about())}
     Level / option order is the rubric's; a whale's level probabilities use the same order."""
     reg = registry() if reg is None else reg
     lo, hi = (rubric.get("scale") or [0, 100])[:2]
@@ -338,7 +521,7 @@ def display(rubric, reg=None):
         elif q["type"] == "choice":
             item["options"] = [{"id": o["id"], "label": o.get("label") or o["id"]} for o in q["options"]]
         qs.append(item)
-    return {
+    out = {
         "version": rubric["version"],
         "name": rubric.get("name") or "Insider score",
         "scale": [lo, hi],
@@ -347,6 +530,10 @@ def display(rubric, reg=None):
                    "color": b["color"], "flagged": bool(b.get("flagged"))}
                   for i, b in enumerate(bands)],
         "questions": qs,
-        "factors": [{"id": f["id"], "label": f["label"], "format": factor_format(f, reg), "description": f["description"]}
+        "factors": [{"id": f["id"], "label": f["label"], "format": factor_format(f, reg), "description": factor_description(f)}
                     for f in rubric["factors"] if f.get("card")],
     }
+    ab = about(rubric)
+    if ab:
+        out["about"] = ab
+    return out

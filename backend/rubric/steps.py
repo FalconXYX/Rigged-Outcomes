@@ -1,6 +1,7 @@
 """
 The wallets.score step (docs/BACKEND.md, docs/WALLET_RUBRIC.md): one market's whales scored by the rubric and
-its page published again with the scores, in phases a Vercel call can stop between.
+its page published again with the scores, in phases a Vercel call can stop between, giving way (partial) at the same
+stops, and in the scorers' waits, once a job of another kind waits for the add lane or the heavy slot.
 
   input   {"name": page name}; none: the add run's market (its add:fetch result). add.export spawns it right
           after it puts a market on the main page; any step may spawn one for a market already there (a
@@ -14,8 +15,10 @@ its page published again with the scores, in phases a Vercel call can stop betwe
           starts here with those (input "refresh_facts": true walks again).
   score   the rubric's questions for every whale whose answers are not cached (the rubric:<name> blob's answers),
           each request's answers checkpointed as result rubric-ans:<n>. The scorer busy after its retries: later
-          (model_busy, 5-10 minutes). Both scorers unavailable (key refused, today's quota spent): the step goes
-          on with what is cached; the unscored whales are asked at the next run.
+          (model_busy, 5-10 minutes). Both scorers out for the day (today's quota or daily_cap spent): later
+          (model_quota) until the quota resets, when that comes before the run's deadline, the add lane left
+          running; then it asks the whales still unscored. Both unavailable otherwise (the key refused, the
+          model gone): the step goes on with what is cached.
   publish the page and index entry built again from the market's record with the scores (store.publish_page),
           then rubric:<name> saved (answers, facts, page part). Nothing scored: no page.
 
@@ -25,10 +28,15 @@ import gzip
 import hashlib
 import json
 import random
+import re
+import time
 
 from backend import outcomes
 
+# a scorer out for the day (scorers.py's messages: today's quota, the rubric's daily_cap, every model skipped)
+_OUT_TODAY = re.compile(r"quota|daily|per ?day|no model left", re.I)
 SAVE_S = 30                 # seconds a fills walk keeps to save before the deadline
+ASK_S = 5                   # a stop asks the Worker whether to give way when its last answer is this old
 WHALE_NEED_S = 40           # a whale's history is started only with this many seconds left
 WHALE_THREADS = 4
 POLYMARKET_RATE = 5.0       # Polymarket requests a second (the facts CLI uses the same)
@@ -112,7 +120,7 @@ def score(ctx):
                     fills.add_page(page)
                     if fills.n > A.MAX_FILLS:
                         raise ValueError(f"{name}: over {A.MAX_FILLS:,} fills")
-                    if not walk["done"] and ctx.left() < SAVE_S:
+                    if not walk["done"] and (ctx.left() < SAVE_S or ctx.give_way(every_s=ASK_S)):
                         return ctx.partial(save_fills())
             except outcomes.OutOfTime:
                 if int(walk.get("pages") or 0) <= before:
@@ -127,7 +135,7 @@ def score(ctx):
         todo = [wh for wh in market.whales if hist_key(wh["wallet"], wh["first_buy_ts"]) not in hists]
         if todo:
             _histories(ctx, market, todo, hists, cur)
-        if ctx.left() < FACTS_NEED_S:
+        if ctx.left() < FACTS_NEED_S or ctx.give_way(every_s=ASK_S):
             return ctx.partial(cur)
         histories = [hists[hist_key(wh["wallet"], wh["first_buy_ts"])] for wh in market.whales]
 
@@ -145,13 +153,24 @@ def score(ctx):
             ctx.checkpoint(results=[(_ans_key(answers), answers)])
         ctx.units(1)
 
+    def wait(seconds):                                      # the scorers' back-off and spacing
+        if ctx.give_way(every_s=ASK_S):
+            raise outcomes.GiveWay("another job waits for the add lane or the heavy slot")
+        time.sleep(seconds)
+
     budget_left = max(0, int(ctx.left() - PUBLISH_NEED_S))
-    res = pipeline.score_market(rubric, facts_doc, cache, scorer=get_scorer(rubric), on_answers=keep,
-                                max_requests=max(1, budget_left))
+    res = pipeline.score_market(rubric, facts_doc, cache, scorer=get_scorer(rubric, sleep=wait), on_answers=keep,
+                                make_scorer=lambda n: get_scorer(rubric, n, sleep=wait),
+                                max_requests=max(1, budget_left), stop_when=lambda: ctx.give_way(every_s=ASK_S))
     st = res["stats"]
     if st["stop"] == "busy":
         raise outcomes.Later.after(random.randint(300, 600), "model_busy")
-    if st["stop"] == "max_requests" or ctx.left() < PUBLISH_NEED_S:
+    if st["stop"] == "unavailable" and st["unscored"] and _OUT_TODAY.search(str(st["stopped"] or "")):
+        from backend import contract
+        reset = contract.next_quota_reset(ctx.now())
+        if reset < int(ctx.job.get("run_deadline") or 0):
+            raise outcomes.Later(reset, "model_quota")    # the lane is not paused: other adds go on meanwhile
+    if st["stop"] in ("max_requests", "give_way") or ctx.left() < PUBLISH_NEED_S:
         return ctx.partial(dict(cur, phase="score"))
 
     # ── publish: the page first, then the blob (a step stopped between the two publishes again next time) ──
@@ -171,7 +190,8 @@ def score(ctx):
 
 def _histories(ctx, market, todo, hists, cur):
     """Each missing whale's history, WHALE_THREADS at a time, checkpointed as it finishes (into hists too).
-    Raises OutOfTime when the step's time runs out (the runtime sends partial from the last cursor)."""
+    Raises OutOfTime when the step's time runs out, and GiveWay once a job of another kind waits (whales in flight
+    finish first; the rest are not started): the runtime sends partial from the last cursor."""
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
@@ -182,6 +202,8 @@ def _histories(ctx, market, todo, hists, cur):
     lock = threading.Lock()
 
     def one(wh):
+        if ctx.give_way(every_s=ASK_S):
+            raise outcomes.GiveWay("another job waits for the add lane or the heavy slot")
         outcomes.check(WHALE_NEED_S)
         h = wf.wallet_history(source, wh["wallet"], wh["first_buy_ts"], market.condition_id)
         k = hist_key(wh["wallet"], wh["first_buy_ts"])

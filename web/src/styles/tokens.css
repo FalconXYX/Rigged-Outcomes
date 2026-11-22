@@ -61,6 +61,7 @@
   --c-odds: #cf203e;
   --c-highlight: #e8730c;
   --c-new: #7c5cd6;
+  --c-notable: #6b7a90;
   --c-normal: var(--c-whale);
   --c-concentration: var(--c-highlight);
   --c-critical: var(--c-odds);
@@ -151,6 +152,7 @@
     --c-odds: #ec4a64;
     --c-highlight: #d07f0a;
     --c-new: #8a78e6;
+    --c-notable: #94a0b2;
     --brand-a: #ec4a64;
     --brand-b: #7b86de;
     --focus: #7b86de;
@@ -181,6 +183,7 @@
   --c-odds: #ec4a64;
   --c-highlight: #d07f0a;
   --c-new: #8a78e6;
+  --c-notable: #94a0b2;
   --brand-a: #ec4a64;
   --brand-b: #7b86de;
   --focus: #7b86de;

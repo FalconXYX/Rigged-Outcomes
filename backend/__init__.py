@@ -3,7 +3,7 @@ The backend's Python side (docs/BACKEND.md): the Vercel step function's runtime 
 
   contract   the constants the Worker shares (worker/src/contract.ts holds the same)
   wake       signing and checking a wake-up (standard library only: api/step.py checks one before anything else)
-  outcomes   Later, OutOfTime, Lost and the step's deadline (standard library only)
+  outcomes   Later, OutOfTime, GiveWay, Lost and the step's deadline (standard library only)
   runtime    one Vercel call: claim, run the job's handler before the deadline, checkpoint, complete, claim again
   add_steps  add.fetch, add.whales and add.export: a market added to the main page in resumable steps
   site       what the Worker serves from D1: the lists, the added markets' pages and their index

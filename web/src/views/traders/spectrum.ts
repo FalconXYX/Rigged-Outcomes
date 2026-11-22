@@ -28,8 +28,9 @@ import type {
   Trader,
   TraderSpectrum,
   TradersData,
+  IndexSpectrum,
 } from "../../types";
-import type { Group, Grouping, RingGuide } from "./model";
+import type { Group, Grouping, RingGuide } from "./groups";
 
 /** A band's colour as CSS: the rubric names a token, the browser resolves it. */
 export const bandColor = (b: { color: string }) => (b.color.startsWith("--") ? `var(${b.color})` : b.color);
@@ -61,7 +62,7 @@ export const spectrumRadius = (rubric: RubricDisplay, score: number) => 110 - to
 /**
  * The scored whales only, each moved to radius 110 − score on the angle (and
  * with the ±4 jitter) export.py gave it, so a wallet keeps its bearing when the
- * view switches between the score and the cut-offs.
+ * visitor moves between the Flagged traders and Insider score tabs.
  */
 export function spectrumData(t: TradersData & { rubric: RubricDisplay }): TradersData {
   const traders: Trader[] = [];
@@ -90,7 +91,6 @@ export function bandGrouping(rubric: RubricDisplay, traders: readonly Trader[]):
     flagged: flagged(b),
   }));
   return {
-    mode: "spectrum",
     noun: "band",
     groups,
     byId: new Map(groups.map((g) => [g.id, g])),
@@ -146,9 +146,10 @@ export function countedQuestions(rubric: RubricDisplay): RubricQuestion[] {
 /* ── Constellation guide ───────────────────────────────────────────── */
 
 /**
- * Rings at the scale's ends and every band cut-off; each band named once, in
- * the middle of its annulus; the two callouts name the top band (at the core)
- * and the lowest band (the outer orbit), placed on their bands.
+ * Rings at the scale's ends and every band cut-off; a numeric axis labels the
+ * cut-offs ("Score 0", 20, 40, ...) up to the top band, whose ring the core
+ * callout already names; the two callouts name the top band (at the core) and
+ * the lowest band (the outer orbit) and aim at a real wallet of their band.
  */
 export function spectrumGuide(rubric: RubricDisplay): RingGuide {
   const [lo, hi] = rubric.scale;
@@ -166,10 +167,20 @@ export function spectrumGuide(rubric: RubricDisplay): RingGuide {
   };
   return {
     rings,
-    labels: rubric.bands.map((b) => ({ score: mid(b), text: b.label })),
-    core: { head: at(mid(top), 45), title: top.label, sub: rangeText(rubric, top.min, top.max), color: bandColor(top) },
+    labels: [...cuts]
+      .filter((c) => c < top.min)
+      .sort((a, b) => a - b)
+      .map((c) => ({ score: toHundred(rubric, c), text: c === lo ? `Score ${num(c)}` : num(c) })),
+    core: {
+      head: at(mid(top), 45),
+      group: top.id,
+      title: top.label,
+      sub: rangeText(rubric, top.min, top.max),
+      color: bandColor(top),
+    },
     orbit: {
       head: at(mid(bottom), 225),
+      group: bottom.id,
       title: bottom.label,
       sub: rangeText(rubric, bottom.min, bottom.max),
       color: bandColor(bottom),
@@ -348,4 +359,12 @@ export function flaggedCount(t: TradersData | null | undefined): number | null {
   let n = 0;
   for (const tr of t.traders) if (tr.spectrum && Number.isFinite(tr.spectrum.score) && flagged(bandOf(t.rubric, tr.spectrum.score))) n += 1;
   return n;
+}
+
+/** Whales in flagged bands from a market's index entry (the tab's count before the page loads). */
+export function indexFlaggedCount(s: IndexSpectrum | null | undefined): number | null {
+  if (!s || s.bands.length === 0) return null;
+  const any = s.bands.some((b) => b.flagged);
+  const top = s.bands[s.bands.length - 1].id;
+  return s.bands.reduce((n, b) => n + ((any ? b.flagged : b.id === top) ? b.count : 0), 0);
 }

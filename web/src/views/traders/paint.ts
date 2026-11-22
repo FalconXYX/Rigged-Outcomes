@@ -4,14 +4,23 @@
 // or the web font changes.
 
 import { useEffect, useMemo, useSyncExternalStore } from "react";
+import type { TraderCategory } from "../../types";
 import { FONT_SANS } from "../../components/ui";
 
 export type RGB = [number, number, number];
 
-/* ── Group tints ──────────────────────────────────────────────────── */
+/* ── Category tokens ──────────────────────────────────────────────── */
 
-/** A group's colour (any CSS colour) mixed into the surface (`mix` 0–1), as the browser paints it. */
-export const tint = (color: string, mix: number) => `color-mix(in oklab, ${color} ${Math.round(mix * 100)}%, var(--surface))`;
+export const CAT_COLOR: Record<TraderCategory, string> = {
+  normal: "var(--c-normal)",
+  newAccount: "var(--c-new)",
+  concentration: "var(--c-concentration)",
+  critical: "var(--c-critical)",
+};
+
+/** A category color mixed into the surface (`mix` 0–1), as the browser paints it. */
+export const catTint = (c: TraderCategory, mix: number) =>
+  `color-mix(in oklab, ${CAT_COLOR[c]} ${Math.round(mix * 100)}%, var(--surface))`;
 
 /** Dark surfaces take stronger tints, or the tile / band sinks into the page. */
 const isDarkSurface = (surface: RGB) => luminance(surface) < 0.2;

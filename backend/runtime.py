@@ -7,18 +7,24 @@ run each one's handler before the call's deadline, report it, and claim again wh
 
 A job is claimed with the seconds left to the deadline, and the Worker only hands out a kind whose need_s fits.
 Its handler gets a StepContext (ctx): the job, the budget, the Worker's clock, its own empty /tmp folder, the
-API, checkpoints and results. What the handler does decides the outcome sent:
+API, checkpoints and results, and for a background job (CONTRACT background_kinds) ctx.give_way(): whether
+a foreground job (of a kind not listed there) waits for its lane or the heavy slot, from the Worker's answer to
+its checkpoints. What the handler does decides the outcome sent:
 
     returns None or ctx.done(...)      done
     returns ctx.partial(cursor)        partial
     raises Later                       later
     raises OutOfTime                   partial, from the last cursor checkpointed (else the job's own)
+    raises GiveWay                     the same (an OutOfTime: a foreground job waits for this background step)
     raises Lost                        nothing: the lease is gone, the call drops the job
     Polymarket not answering           later (polymarket_down, 120 s)
     raises anything else               error, one line with every secret cut out
 
 Usage goes with every complete (cpu_ms, wall_ms, mem_mb, units), and the call's own time outside its jobs goes
 with the next claim (`spent`), the last one included, so the Worker's ledger holds every second the call used.
+A complete also says whether the call claims again (continuing: min_claim_left_s left, and after a give-way the
+longest need_s of the lane, else the Worker wakes the lane for a fresh call and this one ends) and whether the
+step gave way (gave_way: the Worker then counts no partial while a foreground job is ready).
 Nothing mutable lives at module level: several calls can share one process (Fluid compute).
 """
 import contextvars
@@ -38,7 +44,7 @@ import urllib.parse
 import requests
 
 from backend import outcomes
-from backend.contract import CONTRACT, JOB_KINDS, LIMITS, STEP, handler_path
+from backend.contract import BACKGROUND_KINDS, CONTRACT, JOB_KINDS, LIMITS, STEP, handler_path
 
 SECRET_ENV = ("GEMINI_API_KEY", "WAKE_SECRET", "WATCHLIST_JOB_TOKEN")
 USER_AGENT = "rigged-outcomes-job"
@@ -196,19 +202,21 @@ def chunks(results, news, limit):
 
 class StepContext:
     """What a handler gets (docs/BACKEND.md): ctx.job, ctx.budget, ctx.now(), ctx.deadline,
-    ctx.left(), ctx.tmp, ctx.api, ctx.checkpoint(), ctx.results(), ctx.news_get(), ctx.child(), ctx.meta(),
-    ctx.units(), ctx.done(), ctx.partial(), and scratch blobs for data over a result's 200 KB."""
+    ctx.left(), ctx.tmp, ctx.api, ctx.checkpoint(), ctx.give_way(), ctx.results(), ctx.news_get(), ctx.child(),
+    ctx.meta(), ctx.units(), ctx.done(), ctx.partial(), and scratch blobs for data over a result's 200 KB."""
 
-    def __init__(self, claim, api, deadline, tmp, mono=time.monotonic):
+    def __init__(self, claim, api, deadline, tmp, mono=time.monotonic, log=_log):
         self.job = dict(claim["job"])
         self.job.setdefault("missing", [])
         self.budget = dict(claim.get("budget") or {})
         self.api, self.deadline, self.tmp = api, deadline, tmp
-        self._mono = mono
+        self._mono, self._log = mono, log
         self._now0, self._mono0 = int(claim.get("now") or time.time()), mono()
         self._cursor = self.job.get("cursor")
         self._children, self._meta, self._units = [], {}, 0
         self._lock = threading.Lock()
+        # the claim is the Worker's first answer: it hands out no background job while a foreground one is ready
+        self._give_way, self._answered = False, self._mono0
 
     # ── the clock ──
 
@@ -243,7 +251,8 @@ class StepContext:
     def checkpoint(self, cursor=None, results=(), news=()):
         """Send results (key, value), news searches (key, headlines) and a cursor now, split under 256 KB a call;
         the cursor goes with the last part, so it never runs ahead of what was saved. cursor None keeps the last
-        one. Thread-safe. Raises Lost when the lease is gone."""
+        one. Each answer may ask a background step to give way (give_way()). Thread-safe. Raises Lost when the
+        lease is gone."""
         rs, ns = _pairs(results, _result_item), _pairs(news, _news_item)
         with self._lock:
             new = self._cursor if cursor is None else cursor
@@ -256,12 +265,36 @@ class StepContext:
             self._cursor = new
 
     def _post_checkpoint(self, body):
+        """One checkpoint call (under self._lock): 204, or 200 {"give_way": true}, which sets the flag for good."""
         try:
-            self.api.request("POST", "/api/job/checkpoint", body)
+            got = self.api.request("POST", "/api/job/checkpoint", body)
         except Exception as e:
             if getattr(e, "status", None) == 409:
                 raise outcomes.Lost(str(e))
             raise
+        self._answered = self._mono()
+        if isinstance(got, dict) and got.get("give_way") is True:
+            self._give_way = True
+
+    def give_way(self, every_s=None):
+        """Whether a foreground job waits for this background step's lane or the heavy slot: the Worker's answer to
+        its checkpoints ({"give_way": true}; once true, true for the rest of the step). every_s: when the last
+        answer or ask is every_s seconds old or more (the claim counts as one), ask first with a checkpoint of the
+        job and its lease only (a read: no cursor, no results). An ask the Worker does not answer is logged and the
+        step goes on (it asks again every_s later), so only checkpoints that carry progress can fail a step. The
+        step then stops at a safe point: ctx.partial, or raise GiveWay to go out from the last cursor. Thread-safe.
+        Raises Lost when the lease is gone."""
+        if every_s is not None and not self._give_way:
+            with self._lock:
+                if not self._give_way and self._mono() - self._answered >= every_s:
+                    try:
+                        self._post_checkpoint({"job_id": self.job["id"], "lease_token": self.job["lease_token"]})
+                    except outcomes.Lost:
+                        raise
+                    except Exception as e:
+                        self._answered = self._mono()
+                        self._log(redact(f"{self.job['id']}: no answer on whether to give way ({e}); going on"))
+        return self._give_way
 
     def results(self, prefix, run_id=None):
         """(key, value) of a run's results whose key starts with prefix (this run by default), by key."""
@@ -367,12 +400,18 @@ def load_handler(kind):
     return getattr(importlib.import_module(module), func)
 
 
+def lane_need_s(lane):
+    """The longest need_s of a lane's foreground kinds (CONTRACT background_kinds left out)."""
+    return max((k["need_s"] for name, k in JOB_KINDS.items() if k["lane"] == lane and name not in BACKGROUND_KINDS),
+               default=0)
+
+
 def run_job(claim, api, deadline, environ, mono=time.monotonic, cpu=time.process_time, tmp_root=None, log=_log):
     """Run one claimed job's handler and report it. Returns the outcome sent (None when the lease was lost)."""
     job = claim["job"]
     cpu0, wall0 = cpu(), mono()
     tmp = tmp_dir(job, tmp_root)
-    ctx = StepContext(claim, api, deadline, tmp, mono=mono)
+    ctx = StepContext(claim, api, deadline, tmp, mono=mono, log=log)
     body = {"job_id": job["id"], "lease_token": job["lease_token"], "outcome": None, "cursor": None,
             "run_after": None, "reason": None, "pause_lane_until": None, "error": None, "results": [],
             "children": [], "run_meta": {}, "stop_run": False}
@@ -403,7 +442,7 @@ def run_job(claim, api, deadline, environ, mono=time.monotonic, cpu=time.process
         except outcomes.Later as e:
             body.update(outcome="later", run_after=e.run_after, reason=e.reason, pause_lane_until=e.pause_lane_until,
                         results=[], children=[], run_meta={}, stop_run=False)
-        except outcomes.OutOfTime:
+        except outcomes.OutOfTime:                 # GiveWay too: a foreground job waits for this background step
             body.update(outcome="partial", cursor=ctx.cursor if ctx.cursor is not None else {}, results=[],
                         children=[], run_meta={}, stop_run=False)
         except Exception as e:
@@ -416,7 +455,11 @@ def run_job(claim, api, deadline, environ, mono=time.monotonic, cpu=time.process
                 log(redact(traceback.format_exc(), environ, limit=20_000, first_line=False))
         body["usage"] = {"cpu_ms": int((cpu() - cpu0) * 1000), "wall_ms": int((mono() - wall0) * 1000),
                          "units": ctx._units, "mem_mb": _mem_mb()}
-        body["continuing"] = deadline - mono() >= STEP["min_claim_left_s"]
+        # after a give-way the call claims again only with time for any job of the lane, else the job waiting
+        # might not fit: the Worker then wakes the lane for a fresh call
+        body["gave_way"] = ctx._give_way
+        need = max(STEP["min_claim_left_s"], lane_need_s(JOB_KINDS[job["kind"]]["lane"]) if ctx._give_way else 0)
+        body["continuing"] = deadline - mono() >= need
         if body["results"] and _size(body) > LIMITS["complete_body_bytes"] - BODY_ROOM:
             try:                                   # the results go ahead in checkpoints, the outcome after them
                 ctx.checkpoint(results=body["results"])
@@ -475,9 +518,11 @@ def serve(lane, t0, environ=None, cpu0=None, session=None, mono=time.monotonic, 
         if claim is None or not claim.get("job"):
             reported = True
             break
-        run_job(claim, api, deadline, environ, mono=mono, cpu=cpu, tmp_root=tmp_root, log=log)
+        sent = run_job(claim, api, deadline, environ, mono=mono, cpu=cpu, tmp_root=tmp_root, log=log)
         jobs += 1
         mark_cpu, mark_wall = cpu(), mono()
+        if sent is not None and not sent["continuing"]:
+            break                               # the Worker was told so, and wakes the lane for a fresh call
     if not reported:                            # the call's last seconds go to the ledger too
         try:
             api.request("POST", "/api/job/claim", {"lane": lane, "left_s": 0, "call": call, "spent": spent()})

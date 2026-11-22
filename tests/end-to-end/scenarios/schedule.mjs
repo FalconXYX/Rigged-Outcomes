@@ -189,7 +189,9 @@ try {
   report.row("schedule (setup)", "the stack and its clock", `stopped: ${e.stack ?? e.message}`.slice(0, 800), false);
 } finally {
   await browser?.close().catch(() => {});
-  if (args.keep && stack) say(`the stack keeps running (site ${stack.urls.site}); Ctrl-C stops it`);
-  else await stack?.stop({ keepState: report.rows.some((r) => !r.pass) });
+  if (args.keep && stack) {
+    report.uncap();
+    say(`the stack keeps running (site ${stack.urls.site}); Ctrl-C stops it`);
+  } else await stack?.stop({ keepState: report.rows.some((r) => !r.pass) });
 }
 if (!args.keep) report.finish();

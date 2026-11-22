@@ -12,7 +12,11 @@ Covers:
   - editing only the rubric file: a question's wording re-asks that question alone; weights, bands, a level's
     site label and a version bump cost no call and change the results; removing a factor re-asks everything
     with the factor gone from the text; a version bump with new wording re-asks only that question;
-  - cache hits skip calls; --refresh asks again;
+  - cache hits skip calls; --refresh asks again; --wallets asks only the listed wallets;
+  - the "tiered" combine: tiers by today's flags and the facts, floor, ceiling and span; check() on tiers;
+  - [about]: display() fills each {name} from the rubric (bands, tiers and their bounds, the flagged bands, the
+    weighted questions, the fact definitions) into one paragraph that follows the file; the tiers still share what
+    the text cites; check() names an unknown {name}, the page leaves that paragraph out, and scoring goes on;
   - 429 and 503 retried with back-off; a daily quota answer switches to the fallback scorer, whose answers are
     cached and reused; a 400 leaves only that wallet unscored; the daily cap; the pacer's token window;
   - export.py attaching the scores to a page and the index entry, and leaving a page without them as it was.
@@ -191,7 +195,7 @@ def test_the_rubric_file_checks():
     bad = bad.replace('false_description = "The wallet has a life of its own beyond this bet."', "")
     bad = bad.replace("min = 40", "min = 10")
     bad = bad.replace('id = "buy_fills"', 'id = "buy_filz"')
-    bad = bad.replace("overall = 0.40", "overal = 0.40")
+    bad = bad.replace("timing = 0.35, overall = 0.20", "timing = 0.35, overal = 0.20")
     bad = bad.replace('color = "--c-critical"', 'color = "red"')
     got = "\n".join(spec.check(rubric_from(bad)))
     for want in ("question timing: unknown key 'lable'", "single_purpose: a noul question needs false_description",
@@ -199,6 +203,157 @@ def test_the_rubric_file_checks():
                  "uses unknown factor 'buy_fills'", "combine.weights: unknown question 'overal'",
                  "band highly_suspicious: colour must be a --c-* token"):
         assert want in got, (want, got)
+
+
+def test_fact_definitions_in_descriptions():
+    """A factor description cites a fact definition as {name}: the model and the card read the number the
+    code computes with; an unknown {name} is a check() error."""
+    from backend.rubric.wallet_facts import DEFINITIONS
+    rubric = rubric_from(RUBRIC_TEXT)
+    move = next(f for f in rubric["factors"] if f["id"] == "hours_to_big_move")
+    assert "{big_move_points}" in move["description"]
+    assert f"stood {DEFINITIONS['big_move_points']} points above" in spec.factor_description(move)
+    text = prompt.render_input(rubric, {"title": "t"}, {})
+    assert "{" not in text and f"stood {DEFINITIONS['big_move_points']} points above" in text, text
+    bad = RUBRIC_TEXT.replace("{big_move_points} points", "{big_move_pts} points", 1)
+    assert any("description cites {big_move_pts}" in p for p in spec.check(rubric_from(bad)))
+
+
+def test_about_paragraph():
+    """[about]: display() carries the heading and text with every {name} filled in from the rubric, line breaks
+    joined into one paragraph; the words follow a change to bands, tiers or weights; check() names an unknown
+    {name} in the heading or the text, and the page then leaves the paragraph out; the backend's gate
+    (tokens=set()) never stops scoring over it."""
+    from backend.rubric.wallet_facts import DEFINITIONS
+    rubric = rubric_from(RUBRIC_TEXT)
+    ab = spec.display(rubric)["about"]
+    assert ab["heading"] and ab["text"] and not re.search(r"[{}\n]", ab["heading"] + ab["text"]), ab
+    # The shipped text cites one tier for what all three share ("one cut-off ... starts at {tier_new_account_band}",
+    # "led by {tier_both_old_markers_lead}", each cut-off's full-history bound): a tier edit that parts them fails
+    # here, as a reminder to reword the paragraph.
+    n = spec.about_names(rubric)
+    assert n["tier_new_account_band"] == n["tier_concentration_band"], n
+    assert n["tier_both_old_markers_lead"] == n["tier_new_account_lead"] == n["tier_concentration_lead"], n
+    assert n["tier_both_old_markers_prior_trades_max"] == n["tier_new_account_prior_trades_max"], n
+    assert n["tier_both_old_markers_concentration_pct_min"] == n["tier_concentration_concentration_pct_min"], n
+    rubric["about"] = {"heading": "How the {name} works",
+                       "text": "Rated {flagged} ({flagged_min} and up) from {questions};\n   both flags start at "
+                               "{tier_both_old_markers_band} ({tier_both_old_markers_floor}), led by "
+                               "{tier_both_old_markers_lead}; {band_unusual} is {band_unusual_min}-{band_unusual_max} "
+                               "of {scale_min}-{scale_max}; {cluster_hours} hours."}
+    assert spec.display(rubric)["about"] == {
+        "heading": "How the Insider score works",
+        "text": "Rated Suspicious or Highly suspicious (60 and up) from Timing, Account, Overall, Conviction and "
+                "Pattern; both flags start at Suspicious (60), led by Timing; Unusual is 40-60 of 0-100; "
+                f"{DEFINITIONS['cluster_hours']} hours."}
+
+    moved = spec.about_names(rubric_from(
+        RUBRIC_TEXT.replace('label = "Suspicious"', 'label = "Watch"').replace("min = 60", "min = 55")
+        .replace("floor = 60", "floor = 82").replace("timing = 0.35, overall", "timing = 0.05, overall")
+        .replace("prior_trades = { max = 10 }", "prior_trades = { max = 5 }")))
+    assert (moved["flagged"], moved["flagged_min"], moved["band_suspicious"]) == ("Watch or Highly suspicious", "55",
+                                                                                  "Watch")
+    assert (moved["tier_both_old_markers_floor"], moved["tier_both_old_markers_band"]) == ("82", "Highly suspicious")
+    assert moved["questions"] == "Account, Overall, Conviction, Pattern and Timing"
+    assert (moved["tier_new_account_prior_trades_max"], moved["tier_concentration_concentration_pct_min"]) == ("5", "40")
+
+    # Flagged bands with a gap give no range (as the site's flaggedBands): {flagged_min} is then unknown.
+    gap = rubric_from(RUBRIC_TEXT)
+    for b in gap["bands"]:
+        b["flagged"] = b["id"] in ("notable", "highly_suspicious")
+    names = spec.about_names(gap)
+    assert names["flagged"] == "Notable or Highly suspicious" and "flagged_min" not in names
+    assert "about.text: unknown placeholder {flagged_min}" in spec.check(gap)
+
+    bad = RUBRIC_TEXT.replace('heading = "', 'heading = "{nme} ', 1).replace('text = """', 'text = """{band_suspicous} ', 1)
+    got = spec.check(rubric_from(bad))
+    assert "about.heading: unknown placeholder {nme}" in got and "about.text: unknown placeholder {band_suspicous}" in got
+    assert spec.check(dict(rubric, about={"heading": "H", "txt": "x"})) == ["[about]: unknown key 'txt'",
+                                                                           "about.text is missing"]
+    # A slip in the paragraph: the page leaves it out, and the backend's gate (add_steps.score_on_add, steps.score
+    # pass tokens=set()) still scores; display=True asks for the paragraph's check there too.
+    for broken in (rubric_from(bad), gap, dict(rubric, about={"heading": "H", "txt": "x"})):
+        assert "about" not in spec.display(broken) and spec.check(broken, tokens=set()) == []
+    assert spec.check(rubric_from(bad), tokens=set(), display=True) == got
+
+
+def test_tiers():
+    """[combine] method "tiered": the base weighted mean for everyone; the first tier whose flags and facts all
+    hold lifts a wallet into its floor..ceiling by the tier's own weighted mean stretched over `span`."""
+    rubric = rubric_from(RUBRIC_TEXT)
+    assert rubric["combine"]["method"] == "tiered" and rubric["combine"]["tiers"]
+    toy = {"scale": [0, 100], "bands": [{"id": "low", "min": 0}, {"id": "mid", "min": 40}, {"id": "high", "min": 80}],
+           "questions": [{"id": "a", "type": "score", "levels": [{}] * 5}, {"id": "b", "type": "noul"}],
+           "combine": {"method": "tiered", "weights": {"a": 1.0, "b": 1.0},
+                       "tiers": [{"id": "both", "flags": {"is_first_x": True, "is_percent": True},
+                                  "facts": {"concentration_pct": {"min": 40}}, "floor": 60, "ceiling": 100,
+                                  "weights": {"a": 1.0}, "span": [0.25, 0.75]},
+                                 {"id": "one", "flags": {"is_first_x": True}, "floor": 40, "ceiling": 90}]}}
+    answers = lambda a, b: {"a": {"type": "score", "score": a}, "b": {"type": "noul", "p": b}}   # noqa: E731
+    both = {"is_first_x": True, "is_percent": True}
+    d = combine.detail(toy, answers(2.0, 0.0), {"concentration_pct": 100.0}, both)
+    assert d == {"score": 80.0, "band": "high", "tier": "both", "base": 25.0, "evidence": 0.5}, d
+    assert combine.spectrum(toy, answers(0.0, 0.0), {"concentration_pct": 100.0}, both) == (60.0, "mid")  # floor
+    assert combine.spectrum(toy, answers(4.0, 0.0), {"concentration_pct": 100.0}, both) == (100.0, "high")
+    # the fact check fails: the next tier that holds (one marker), on its own range with [combine] weights
+    d = combine.detail(toy, answers(2.0, 0.0), {"concentration_pct": 3.0}, both)
+    assert d["tier"] == "one" and d["score"] == 52.5, d
+    # a fact that is not known never holds; no tier at all: the base, and a base above the tier's range is kept
+    assert combine.detail(toy, answers(2.0, 0.0), {}, {"is_percent": True})["tier"] is None
+    assert combine.spectrum(toy, answers(2.0, 0.0), {}, {"is_percent": True}) == (25.0, "low")
+    assert combine.spectrum(toy, answers(4.0, 1.0), {}, {"is_first_x": True}) == (100.0, "high")
+    # weighted_mean ignores tiers and flags
+    plain = dict(toy, combine={"method": "weighted_mean", "weights": {"a": 1.0, "b": 1.0}})
+    assert combine.spectrum(plain, answers(2.0, 0.0), {"concentration_pct": 100.0}, both) == (25.0, "low")
+    assert combine.spectrum(toy, {}, {}, both) == (None, None)
+
+    # check() names every problem with a tier
+    bad = RUBRIC_TEXT.replace("flags = { is_first_x = true, is_percent = true }",
+                              "flags = { is_first_x = true, is_new = true }", 1)
+    bad = bad.replace("facts = { prior_trades = { max = 10 }, concentration_pct = { min = 40 } }",
+                      "facts = { prior_trades = { max = 10 }, concentration = { min = 40 } }", 1)
+    bad = bad.replace("floor = 60\nceiling = 100", "floor = 60\nceiling = 50", 1)
+    bad = bad.replace("span = [0.25, 0.80]", "span = [0.9, 0.2]", 1)
+    bad = bad.replace("weights = { timing = 0.45,", "weights = { timin = 0.45,", 1)
+    got = "\n".join(spec.check(rubric_from(bad)))
+    for want in ("tier both_old_markers: flags has no 'is_new'", "tier both_old_markers: facts has no 'concentration'",
+                 "tier both_old_markers: floor and ceiling must satisfy", "tier both_old_markers: span must be",
+                 "tier both_old_markers weights: unknown question 'timin'"):
+        assert want in got, (want, got)
+    flat = RUBRIC_TEXT.replace('method = "tiered"', 'method = "weighted_mean"')
+    assert 'combine.tiers: only combine.method = "tiered" has tiers' in spec.check(rubric_from(flat))
+    cut = RUBRIC_TEXT.index("\n[[combine.tiers]]")
+    none = RUBRIC_TEXT[:cut] + RUBRIC_TEXT[RUBRIC_TEXT.index("[backend]", cut):]
+    assert 'combine.method "tiered" needs at least one [[combine.tiers]] block' in spec.check(rubric_from(none))
+
+
+def test_tiers_in_a_scoring_run():
+    """A whale with both of today's flags (and its facts agreeing) is lifted to its tier's floor at least."""
+    fake()
+    rubric = spec.load_rubric()
+    doc = facts_doc(3)
+    doc["whales"][0]["flags"].update(is_first_x=True, is_percent=True)
+    doc["whales"][1]["flags"].update(is_first_x=True, is_percent=True)        # concentration 4%: not lifted
+    res, _ = run(rubric, doc=doc)
+    tier = rubric["combine"]["tiers"][0]
+    w0, w1 = res["whales"][:2]
+    assert w0["tier"] == tier["id"] and w0["score"] >= tier["floor"] and w0["score"] >= w0["base"]
+    assert w1["tier"] is None and w1["score"] == w1["base"]
+
+
+def test_only_listed_wallets_are_asked():
+    """score --wallets FILE (pipeline's `only`): the listed wallets are asked, the rest keep what is cached."""
+    fk = fake()
+    rubric = spec.load_rubric()
+    doc = facts_doc(3)
+    first = doc["whales"][0]["wallet"]
+    dry, _ = run(rubric, doc=doc, dry_run=True, only={first.upper()})
+    assert dry["stats"]["would_ask"] == 1 and dry["stats"]["skipped"] == 2 and fk.bodies == []
+    res, store = run(rubric, doc=doc, only={first})
+    assert res["stats"]["requests"] == 1 and len(fk.bodies) == 1 and res["stats"]["unscored"] == 2
+    assert [w["score"] is not None for w in res["whales"]] == [True, False, False]
+    rest, _ = run(rubric, store, doc=doc)
+    assert rest["stats"]["requests"] == 2 and rest["stats"]["cached"] == 1 and rest["stats"]["unscored"] == 0
 
 
 def test_scoring_through_the_api():
@@ -242,6 +397,10 @@ def test_cache_hits_skip_calls():
     assert fk.bodies == [] and third["stats"]["requests"] == 0
     fresh, _ = run(rubric, cache_mod.AnswerCache(path), refresh=True, max_requests=1)
     assert len(fk.bodies) == 1 and fresh["stats"]["stop"] == "max_requests"
+    waits, _ = run(rubric, cache_mod.AnswerCache(), stop_when=lambda: len(fk.bodies) == 3)   # a step giving way
+    st = waits["stats"]
+    assert len(fk.bodies) == 3 and st["requests"] == 2
+    assert (st["stop"], st["stopped"]) == ("give_way", "another job is waiting")
 
 
 def test_editing_only_the_rubric_file():
@@ -260,7 +419,7 @@ def test_editing_only_the_rubric_file():
 
     # weights, bands, a level's site label and the version: no call, other results
     fk.bodies.clear()
-    cheap = RUBRIC_TEXT.replace("overall = 0.40, timing = 0.20", "overall = 0.10, timing = 0.50")
+    cheap = RUBRIC_TEXT.replace("timing = 0.35, overall = 0.20", "timing = 0.10, overall = 0.50")
     cheap = cheap.replace("min = 60", "min = 45").replace('{ label = "Brand new",', '{ label = "First bet",')
     cheap = cheap.replace('version = "', 'version = "9-', 1)
     r3, _ = run(rubric_from(cheap), store)
@@ -270,7 +429,7 @@ def test_editing_only_the_rubric_file():
     for w in r3["whales"]:
         old = before[w["key"]]
         assert w["answers"] == old["answers"]
-        assert w["score"] == combine.spectrum(rub3, old["answers"])[0]
+        assert w["score"] == combine.spectrum(rub3, old["answers"], old["facts"], old["flags"])[0]
         assert w["band"] == spec.band_of(rub3, w["score"])
     assert any(w["score"] != before[w["key"]]["score"] for w in r3["whales"])
     assert r3["rubric"]["questions"][2]["levels"][-1] == "First bet"
@@ -278,8 +437,8 @@ def test_editing_only_the_rubric_file():
 
     # a version bump with new wording: only the reworded question
     fk.bodies.clear()
-    bumped = cheap.replace("Judge how much of itself the wallet committed to this one outcome.",
-                           "Judge how much of its money the wallet put on this one outcome.")
+    bumped = cheap.replace("Judge how much of itself the wallet staked on this one outcome,",
+                           "Judge how much of its money the wallet put on this one outcome,")
     run(rubric_from(bumped), store)
     assert [q for _, q in fk.asked()] == [["conviction"]] * 3
 
@@ -347,12 +506,58 @@ def test_retries_fallback_and_refusals():
 
     # the daily cap, across runs of one day (the ledger)
     led = cache_mod.Ledger(os.path.join(TMP, "usage.json"))
-    capped = rubric_from(RUBRIC_TEXT.replace("daily_cap = 2500", "daily_cap = 2").replace(
+    capped = rubric_from(RUBRIC_TEXT.replace("daily_cap = 3500", "daily_cap = 2").replace(
         'fallback = "interactions"', 'fallback = ""'))
     sc = scorers.get_scorer(capped, "decisions", key=KEY, url=fk.url, sleep=lambda s: None, ledger=led)
     res = pipeline.score_market(capped, facts_doc(3), cache_mod.AnswerCache(), scorer=sc)
     assert res["stats"]["requests"] == 2 and res["stats"]["stop"] == "unavailable"
     assert cache_mod.Ledger(os.path.join(TMP, "usage.json")).used("decisions") == 2
+
+    # a step's wait (it gives way first) reaches both scorers: Decisions' back-off and spacing, Gemini's retries
+    wait = lambda s: None  # noqa: E731
+    assert scorers.get_scorer(rubric, "decisions", sleep=wait).pacer.sleep is wait
+    assert scorers.get_scorer(rubric, "interactions", sleep=wait).client().sleep is wait
+
+
+def test_both_scorers_out_for_the_day():
+    """Decisions' daily quota spent and every regular-Gemini model answering 429 "per day": the run stops as
+    unavailable (a step publishes what it has), not busy (a step would come back every 5-10 minutes all day)."""
+    from watchlist import ai
+    fk = fake()
+    rubric = spec.load_rubric()
+    fk.bodies.clear()
+    fk.script += [(429, {"error": {"message": "You exceeded your current quota: decision_requests, limit: 10000 per day"}})]
+
+    class Resp:
+        status_code, headers = 429, {}
+        text = '{"error": {"message": "You exceeded your current quota: limit: 0 per day"}}'
+
+        def json(self):
+            return json.loads(self.text)
+
+    class Session:
+        posts = 0
+
+        def post(self, *a, **kw):
+            Session.posts += 1
+            return Resp()
+
+    models = rubric["scorer"]["interactions"]["models"]
+    make = lambda name: scorers.get_scorer(rubric, name, key=KEY, url=fk.url, sleep=lambda s: None,  # noqa: E731
+                                           client=ai.Client(models=models, session=Session(), sleep=lambda s: None))
+    saved = os.environ.get("GEMINI_API_KEY")
+    os.environ["GEMINI_API_KEY"] = KEY
+    try:
+        res = pipeline.score_market(rubric, facts_doc(2), cache_mod.AnswerCache(), scorer=make("decisions"),
+                                    make_scorer=make)
+    finally:
+        if saved is None:
+            os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            os.environ["GEMINI_API_KEY"] = saved
+    assert len(fk.bodies) == 1 and Session.posts == len(models)            # each model asked once, then skipped
+    assert res["stats"]["stop"] == "unavailable", res["stats"]
+    assert res["stats"]["unscored"] == 2 and res["scorer"] == "interactions"
 
 
 def test_the_pacer_keeps_the_token_window():

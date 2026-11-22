@@ -7,7 +7,7 @@
 import { CONTRACT, JOB_KINDS, type JobKind, type Lane, RUN_GRAPHS, type RunKind, isJobKind, toronto } from "./contract";
 import { addUsage, blockedText, capsOf, readBudget } from "./ledger";
 import { type Ctx, type Env, fail, int, json, list, noContent, obj, oneOf, randomHex, readBody, text } from "./lib";
-import { wakeReady } from "./wake";
+import { BACKGROUND, BLOCKED_NOW, foregroundReady, wakeReady } from "./wake";
 
 const C = CONTRACT;
 const L = C.limits;
@@ -145,7 +145,8 @@ const parsed = (s: string | null | undefined, fallback: unknown = null) => {
 /**
  * The claim (docs/BACKEND.md), plus: a non-final job of a run past its deadline is not handed out. In
  * the add lane the run with the fewest jobs left goes first, so a small add never waits behind a large one's
- * whale batches.
+ * whale batches; a background job (wallets.score) goes only while no foreground job is ready for its lane or the
+ * heavy slot (wake.ts foregroundReady), so no add and no daily walk waits behind a market's scoring.
  */
 const CLAIM = `UPDATE jobs SET state = 'leased', lease_token = ?1, lease_until = ?2 + ?3 + ?4, updated_at = ?2, step_nonce = NULL
 WHERE id = (
@@ -157,6 +158,7 @@ WHERE id = (
                     AND instr(',' || j.after || ',', ',' || d.kind || ',') > 0)
     AND NOT EXISTS (SELECT 1 FROM jobs l WHERE l.state = 'leased' AND l.lane = j.lane AND l.lease_until > ?2)
     AND (j.heavy = 0 OR NOT EXISTS (SELECT 1 FROM jobs h WHERE h.state = 'leased' AND h.heavy = 1 AND h.lease_until > ?2))
+    AND (j.kind NOT IN ${BACKGROUND} OR NOT ${foregroundReady("?2", "j.lane", "j.heavy", "?6")})
   ORDER BY j.priority,
     CASE WHEN j.lane = 'add' THEN (SELECT count(*) FROM jobs w WHERE w.run_id = j.run_id AND w.state IN ('queued', 'leased')) ELSE 0 END,
     j.run_after, j.created_at, j.id LIMIT 1)
@@ -271,9 +273,17 @@ const putResults = (env: Env, guard: string, binds: unknown[], rows: [string, st
   ).bind(...binds, ...Array(7 - binds.length).fill(null), JSON.stringify(rows), at);
 
 /**
+ * 1 when the job j is a background job a foreground job is ready to go before at `now` (the statement's parameter
+ * for it), the budget's level read in the statement; the CASE runs the subquery for a background job only.
+ */
+const giveWay = (now: string) => `CASE WHEN j.kind IN ${BACKGROUND} THEN ${foregroundReady(now, "j.lane", "j.heavy", BLOCKED_NOW)} ELSE 0 END`;
+
+/**
  * POST /api/job/checkpoint {job_id, lease_token, cursor?, results?, news?}: what a step found so far, saved while
  * its lease holds (409 lost otherwise): results upserted on (run_id, key), news searches on their key (the day
- * and time set here), and the cursor, when sent. A step killed after this loses only the item in flight.
+ * and time set here), and the cursor, when sent. A step killed after this loses only the item in flight. The
+ * answer is 204, or 200 {"give_way": true} for a background job a foreground job is ready to go before (its lane,
+ * or the heavy slot): the step then stops at its next safe point, as partial.
  */
 export async function checkpoint(ctx: Ctx): Promise<Response> {
   const { req, env } = ctx;
@@ -287,7 +297,7 @@ export async function checkpoint(ctx: Ctx): Promise<Response> {
   const at = await ctx.clock();
   const live = "j.id = ?1 AND j.lease_token = ?2 AND j.state = 'leased' AND j.lease_until > ?3";
   const [check] = await env.DB.batch([
-    env.DB.prepare(`SELECT 1 AS ok FROM jobs j WHERE ${live}`).bind(id, token, at),
+    env.DB.prepare(`SELECT 1 AS ok, ${giveWay("?3")} AS give_way FROM jobs j WHERE ${live}`).bind(id, token, at),
     ...(hasCursor
       ? [env.DB.prepare(`UPDATE jobs SET cursor = ?4, updated_at = ?3 WHERE id = (SELECT j.id FROM jobs j WHERE ${live})`).bind(id, token, at, cursor)]
       : []),
@@ -304,7 +314,7 @@ export async function checkpoint(ctx: Ctx): Promise<Response> {
       : []),
   ]);
   if (!check.results.length) fail(409, "lost", "The job's lease is gone.");
-  return noContent();
+  return (check.results[0] as { give_way: number }).give_way ? json({ give_way: true }) : noContent();
 }
 
 // ---------- complete ----------
@@ -320,6 +330,8 @@ interface JobRow {
   laters: number;
   partials: number;
   error: string | null;
+  /** 1 when it is a background job a foreground job is ready to go before (giveWay). */
+  give_way: number;
 }
 
 /** A spawned job, checked against the contract: its kind's lane, heavy, need_s and final, and its run's priority. */
@@ -353,12 +365,13 @@ function childRows(v: unknown, runKind: RunKind, at: number) {
 
 /**
  * POST /api/job/complete: the end of a step. done (with its results, spawned children, run_meta, or stop_run);
- * partial (queued again at once with its cursor; past partials_max: failed); later (queued at run_after, at most
- * two days on, the lane paused when asked; past laters_max: failed); error (retried with back-off; at
- * max_attempts: failed). One D1 batch: the job's update guarded by its lease token, then everything else guarded
- * by the nonce that update wrote (so two copies of one complete count once), the ledger, and the run's finish.
- * A repeat (the job no longer leased, the same token) is 200 repeated and changes nothing; another token is 409
- * lost. Lanes left with a ready job are woken after the answer.
+ * partial (queued again at once with its cursor; past partials_max: failed; a background job's partial sent with
+ * gave_way while a foreground job is ready is not counted: it stopped for that job, not for want of time); later
+ * (queued at run_after, at most two days on, the lane paused when asked; past laters_max: failed); error (retried
+ * with back-off; at max_attempts: failed). One D1 batch: the job's update guarded by its lease token, then
+ * everything else guarded by the nonce that update wrote (so two copies of one complete count once), the ledger,
+ * and the run's finish. A repeat (the job no longer leased, the same token) is 200 repeated and changes nothing;
+ * another token is 409 lost. Lanes left with a ready job are woken after the answer.
  */
 export async function complete(ctx: Ctx): Promise<Response> {
   const { req, env, waitUntil } = ctx;
@@ -375,10 +388,13 @@ export async function complete(ctx: Ctx): Promise<Response> {
   const runMeta = body.run_meta === undefined || body.run_meta === null ? null : jsonText(obj(body.run_meta, "run_meta"), "run_meta", L.run_meta_bytes);
   const stopRun = body.stop_run === true;
   const continuing = body.continuing === true;
+  const gaveWay = body.gave_way === true;
   const at = await ctx.clock();
 
-  const job = await env.DB.prepare("SELECT id, run_id, kind, lane, state, lease_token, attempt, laters, partials, error FROM jobs WHERE id = ?")
-    .bind(id)
+  const job = await env.DB.prepare(
+    `SELECT id, run_id, kind, lane, state, lease_token, attempt, laters, partials, error, ${giveWay("?2")} AS give_way FROM jobs j WHERE id = ?1`,
+  )
+    .bind(id, at)
     .first<JobRow>();
   if (!job || job.lease_token !== token) fail(409, "lost", "The job's lease is gone.");
   if (job.state !== "leased") return json({ ok: true, state: job.state, repeated: true });
@@ -397,7 +413,7 @@ export async function complete(ctx: Ctx): Promise<Response> {
     if (body.cursor === undefined || body.cursor === null) fail(400, "bad_request", "A partial step must send its cursor.");
     cursor = jsonText(body.cursor, "cursor", L.cursor_bytes);
     setCursor = true;
-    partials++;
+    if (!(gaveWay && job.give_way)) partials++;
     if (partials > C.retry.partials_max) {
       state = "failed";
       error = "no end in sight";

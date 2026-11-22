@@ -12,6 +12,12 @@ Covers:
     one add_market.build makes with that page part;
   - no WALLET_SCORES=on and key where the step runs (or score_on_add off): no wallets.score, the page as before;
   - the scorer busy part way: the step comes back later and asks only the whales not answered yet;
+  - a visitor's add made while the step walks the fills, reads the histories and asks its questions: each time the
+    step gives way (partial from that phase's cursor), the add's fetch goes next, and the step resumes from what it
+    saved: no Polymarket request made twice and no whale asked twice; one made while the busy scorer waits to try
+    again: the step gives way there, not after its retries; one made after a resumed step's claim, before its
+    facts: it asks first, and the facts are built once;
+  - both scorers out for the day: the step comes back when the quota resets, the lane left running;
   - a backfill job for a market already scored: the saved facts reused (no fill or history request), no
     Decisions request, the page left alone; after a question is reworded: only that question asked, the page
     published again with the new version;
@@ -22,6 +28,7 @@ import json
 import os
 import sys
 import threading
+import urllib.parse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -202,6 +209,202 @@ def test_busy_comes_back_for_the_rest():
     assert w.runs[rid2]["state"] == "done"
     inputs = [b["input"] for b in fk.bodies]
     assert len(inputs) == n - 3 and not set(inputs) & set(answered)
+    assert all(t.get("spectrum") for t in page(w, name)[1]["traders"]["traders"])
+
+
+def test_a_scoring_gives_way_to_an_add():
+    fx = P.fixture()
+    w = F.FakeWorker()
+    with world(fx, key=None):
+        rid = add_run(w)
+        drive(w, rid)
+    name = w.runs[rid]["meta"]["name"]
+    n = len(page(w, name)[1]["traders"]["traders"])
+    # a visitor's add made at the fills walk's first ask, the 3rd history saved and the 2nd answers saved: that
+    # checkpoint's answer is {"give_way": true}
+    plan, hits, adds = [(None, 1), ("rubric-hist:", 3), ("rubric-ans:", 2)], [0], []
+    real_checkpoint, real_complete = w.checkpoint, w.complete
+
+    def checkpoint(body):
+        keys = [r["key"] for r in body.get("results") or []]
+        if plan and (not keys if plan[0][0] is None else any(k.startswith(plan[0][0]) for k in keys)):
+            hits[0] += 1
+            if hits[0] == plan[0][1]:
+                plan.pop(0)
+                hits[0] = 0
+                adds.append(w.add_run("add", f"0x{'cd' * 32}:{len(adds)}"))
+        return real_checkpoint(body)
+
+    steps_seen = []                       # each wallets.score step: outcome, cursor phase, histories, requests
+
+    def complete(body):
+        if "|wallets.score|" in body["job_id"]:
+            steps_seen.append((body["outcome"], (body.get("cursor") or {}).get("phase"),
+                               sum(1 for (r, k) in w.results if k.startswith("rubric-hist:")), len(fk.bodies)))
+        return real_complete(body)
+
+    w.checkpoint, w.complete = checkpoint, complete
+    saved = steps.ASK_S, steps.WHALE_THREADS
+    steps.ASK_S, steps.WHALE_THREADS = 0, 1                 # ask after every fills page; one whale at a time
+    asked, lock = [], threading.Lock()
+    try:
+        with world(fx) as fk:
+            inner = api.get_json
+
+            def get_json(url, params=None, timeout=30, retry=api.RETRY):
+                with lock:
+                    asked.append((url.rsplit("/", 1)[-1], json.dumps(params or {}, sort_keys=True)))
+                return inner(url, params, timeout, retry)
+
+            api.get_json = get_json
+            start = len(w.completes)
+            rid2 = score_run(w, name, 2)
+            drive(w, rid2)
+    finally:
+        steps.ASK_S, steps.WHALE_THREADS = saved
+    order = [f"{c['job_id'].split('|')[1]} {c['outcome']}" for c in w.completes[start:]]
+    assert order == ["wallets.score partial", "add.fetch done"] * 3 + ["wallets.score done"], order
+    assert len(adds) == 3 and not plan
+    hist = steps_seen[-1][2]
+    assert steps_seen == [("partial", "fills", 0, 0), ("partial", "history", 3, 0), ("partial", "score", hist, 2),
+                          ("done", None, hist, n)], steps_seen
+    assert w.completes[start]["cursor"]["fills"]["blob"].startswith("scratch:")
+    assert hist == n and len(asked) == len(set(asked)) and sum(1 for k, _ in asked if k == "trades") >= 2
+    inputs = [b["input"] for b in fk.bodies]
+    assert len(set(inputs)) == len(inputs) == n                              # no whale asked twice
+    assert w.runs[rid2]["state"] == "done" and all(t.get("spectrum") for t in page(w, name)[1]["traders"]["traders"])
+
+
+def test_a_busy_scorer_gives_way_in_its_back_off():
+    """The Decisions API busy (503) and a visitor's add made while the scorer waits to try again: the step gives
+    way there (partial from the score phase, not counted) instead of after its retries; the add's fetch goes next
+    and the step comes back for the whales not answered yet."""
+    fx = P.fixture()
+    w = F.FakeWorker()
+    with world(fx, key=None):
+        rid = add_run(w)
+        drive(w, rid)
+    name = w.runs[rid]["meta"]["name"]
+    n = len(page(w, name)[1]["traders"]["traders"])
+    adds, seen = [], []
+    real_checkpoint, real_complete = w.checkpoint, w.complete
+
+    def checkpoint(body):                       # the scorer's first wait to try again asks: the add comes then
+        if not adds and "results" not in body and len(fk.bodies) == 3:
+            adds.append(w.add_run("add", f"0x{'cd' * 32}:9"))
+            fk.answer_only = None                                   # and the API answers again
+        return real_checkpoint(body)
+
+    def complete(body):
+        if "|wallets.score|" in body["job_id"]:
+            seen.append((body["outcome"], (body.get("cursor") or {}).get("phase"), len(fk.bodies)))
+        return real_complete(body)
+
+    w.checkpoint, w.complete = checkpoint, complete
+    saved = steps.ASK_S
+    steps.ASK_S = 0
+    try:
+        with world(fx) as fk:
+            start = len(w.completes)
+            rid2 = score_run(w, name, 2)
+            fk.answer_only = 2                                      # two answers, then busy
+            drive(w, rid2)
+    finally:
+        steps.ASK_S = saved
+    order = [f"{c['job_id'].split('|')[1]} {c['outcome']}" for c in w.completes[start:]]
+    assert order == ["wallets.score partial", "add.fetch done", "wallets.score done"], order
+    assert seen == [("partial", "score", 3), ("done", None, n + 1)], seen          # 3: no retry after the 503
+    assert w.job("wallets.score", run=rid2)["partials"] == 0 and w.runs[rid2]["state"] == "done"
+    answered = [b["input"] for i, b in enumerate(fk.bodies) if i != 2]
+    assert len(set(answered)) == len(answered) == n                                 # no whale asked twice
+
+
+def test_a_resumed_scoring_asks_before_the_facts():
+    """A scoring resumed with every history saved asks the Worker before it builds the facts, so an add made
+    since its claim goes first and the facts are built once, after it."""
+    from backend.rubric import wallet_facts as wf
+    fx = P.fixture()
+    w = F.FakeWorker()
+    with world(fx, key=None):
+        rid = add_run(w)
+        drive(w, rid)
+    name = w.runs[rid]["meta"]["name"]
+    n = len(page(w, name)[1]["traders"]["traders"])
+    adds, reads, seen, built = [], [], [], []
+    real_checkpoint, real_complete, real_request, real_facts = w.checkpoint, w.complete, w.request, wf.market_facts
+
+    def checkpoint(body):                       # the last history saved: an add (the step stops before the facts)
+        if not adds and sum(k.startswith("rubric-hist:") for (r, k) in w.results if r == rid2) == n - 1 and \
+                any(r["key"].startswith("rubric-hist:") for r in body.get("results") or []):
+            adds.append(w.add_run("add", f"0x{'cd' * 32}:1"))
+        return real_checkpoint(body)
+
+    def request(method, path, body=None):       # the resumed step reads its histories: another add, after its claim
+        if "rubric-hist" in urllib.parse.unquote(path):
+            reads.append(path)
+            if len(reads) == 2:
+                adds.append(w.add_run("add", f"0x{'cd' * 32}:2"))
+        return real_request(method, path, body)
+
+    def complete(body):
+        if "|wallets.score|" in body["job_id"]:
+            seen.append((body["outcome"], (body.get("cursor") or {}).get("phase")))
+        return real_complete(body)
+
+    def facts(*a, **kw):
+        built.append(1)
+        return real_facts(*a, **kw)
+
+    w.checkpoint, w.request, w.complete, wf.market_facts = checkpoint, request, complete, facts
+    saved = steps.ASK_S, steps.WHALE_THREADS
+    steps.ASK_S, steps.WHALE_THREADS = 0, 1
+    try:
+        with world(fx) as fk:
+            start = len(w.completes)
+            rid2 = score_run(w, name, 2)
+            drive(w, rid2)
+    finally:
+        steps.ASK_S, steps.WHALE_THREADS = saved
+        wf.market_facts = real_facts
+    order = [f"{c['job_id'].split('|')[1]} {c['outcome']}" for c in w.completes[start:]]
+    assert order == ["wallets.score partial", "add.fetch done"] * 2 + ["wallets.score done"], order
+    assert seen == [("partial", "history"), ("partial", "history"), ("done", None)], seen
+    assert len(adds) == 2 and len(built) == 1 and len(fk.bodies) == n and w.runs[rid2]["state"] == "done"
+
+
+def test_out_for_the_day_waits_for_the_reset():
+    """Decisions' daily quota spent and every fallback model answering 429 "per day": the step comes back when the
+    quota resets (later, model_quota, the add lane not paused), then asks every whale and publishes."""
+    from backend import contract
+    fx = P.fixture()
+    w = F.FakeWorker()
+    with world(fx, key=None):
+        rid = add_run(w)
+        drive(w, rid)
+    name = w.runs[rid]["meta"]["name"]
+    n = len(page(w, name)[1]["traders"]["traders"])
+    models = spec.load_rubric()["scorer"]["interactions"]["models"]
+    day = {"error": {"message": "You exceeded your current quota: requests, limit: 10000 per day"}}
+    saved_url = ai.URL
+    with world(fx) as fk:
+        ai.URL = fk.url                                     # the fallback's requests reach the fake, never Google
+        try:
+            rid2 = score_run(w, name, 2)
+            w.runs[rid2]["deadline"] = w.now() + 36 * 3600   # an add run's deadline
+            fk.script += [(429, day)] * (1 + len(models))
+            F.serve(w, "add")
+            job = w.job("wallets.score", run=rid2)
+            later = w.completes[-1]
+            assert job["state"] == "queued" and job["laters"] == 1, job
+            assert later["outcome"] == "later" and later["reason"] == "model_quota" and later["pause_lane_until"] is None
+            assert job["run_after"] == contract.next_quota_reset(w.now()) and len(fk.bodies) == 1 + len(models)
+            assert "rubric" not in page(w, name)[1]["traders"]
+            fk.bodies.clear()
+            job["run_after"] = 0                            # the reset
+            drive(w, rid2)
+        finally:
+            ai.URL = saved_url
+    assert w.runs[rid2]["state"] == "done" and len(fk.bodies) == n
     assert all(t.get("spectrum") for t in page(w, name)[1]["traders"]["traders"])
 
 

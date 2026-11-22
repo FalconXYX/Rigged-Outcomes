@@ -50,7 +50,7 @@ import {
   shows,
   watch,
 } from "../lib/scenario.mjs";
-import { parseArgs, stackOptions, startStack } from "../stack.mjs";
+import { TERMINAL, parseArgs, stackOptions, startStack } from "../stack.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const BASE = Number(args["port-base"] ?? 9520);
@@ -60,7 +60,7 @@ const STATE = args.state ?? join(tmpdir(), "rigged-e2e-add");
 const WAIT_MS = Number(args.wait ?? 15) * 60_000;
 /** an on-demand add is "live on the main page within minutes": this long */
 const WITHIN_MS = 5 * 60_000;
-const report = new Report("add", args.shots ?? join(tmpdir(), "e2e-shots", "add"));
+const report = new Report("add", args.shots ?? join(tmpdir(), "e2e-shots", "add"), ONLY ? ONLY.join("-") : "all");
 const say = (s) => report.say(s);
 
 // ---------- one add, the page left open ----------
@@ -86,11 +86,11 @@ async function addAndWait(stack, page, pick, tag, { ms = WAIT_MS, reads, before 
   return { pick, t, w, landed, why: got.why };
 }
 
-/** The stages of an add from its click: the POST, its run and the card. */
-async function stages(stack, res) {
+/** The stages of an add from its click: the POST, its run and the card (skew: the Worker's clock minus the real one, ms). */
+async function stages(stack, res, skew = 0) {
   const runs = await addRuns(stack, res.pick.condition_id);
   const s = (x) => (x ? `+${secs(res.t.click, x)} s` : "-");
-  const lines = await Promise.all(runs.map((r) => runLine(stack, r.id, res.t.click)));
+  const lines = await Promise.all(runs.map((r) => runLine(stack, r.id, res.t.click + skew)));
   return (
     `POST ${res.t.posted ? `${res.t.posted.status} ${s(res.t.posted.at)}` : "-"}; ${lines.join(" | ") || "no add run"}; ` +
     `card "On the main page →" ${res.landed ? s(res.t.landed) : `never (stopped waiting: ${res.why})`}`
@@ -526,32 +526,35 @@ await group("daily", 12, { daily: true, opts: { cron: false } }, 4, async (stack
   const forgotten = await forgetChecks(stack, unchecked);
   const seeded = await fetch(`${stack.urls.api}/api/data/closed.json`).then((r) => r.json());
   const A = await openWatchlist(browser, stack, a);
+  // the day's daily run, made now at any hour (the stack let today's run start; before 04:00 Toronto the Worker's
+  // clock is moved there first, so its times are `skew` ms ahead of the real ones)
+  const { id: daily, skew } = await stack.dailyRun();
   stack.cron.start();
-  await stack.tick(); // the day's daily run, made now (the stack let today's run start)
-  const daily = `daily:${stack.today}`;
-  const walk = await until(
-    async () => {
-      const got = await stack.run(daily);
-      return got?.jobs.find((j) => j.kind === "open.walk" && j.state === "leased") ? got : null;
-    },
-    { ms: 10 * 60_000, every: 1000, what: "the daily run's Open now walk" },
-  ).catch(() => null);
+  await stack.tick();
+  // asked every second (the walk's lease can be short); a run that ends first stops the wait there
+  const walking = (jobs) => jobs.some((j) => j.kind === "open.walk" && j.state === "leased");
+  const walk = await stack
+    .waitRun(daily, { ms: 10 * 60_000, every: 1000, pred: (run, jobs) => walking(jobs) || TERMINAL.includes(run.state) })
+    .then((got) => (walking(got.jobs) ? got : null))
+    .catch(() => null);
   if (!walk) {
-    report.skip("add while the daily run is going", `the daily run's Open now walk did not start (${await runLine(stack, daily, Date.now())})`);
+    report.skip("add while the daily run is going", `the daily run's Open now walk did not start (${await runLine(stack, daily, Date.now() + skew)})`);
     return;
   }
   const res = await addAndWait(stack, A.page, a, "daily/walk");
   report.row(
     "add while the daily run is going",
     `"On the main page →" by itself within ${WITHIN_MS / 60_000} min of the click (an add does not wait for the daily lists; it waits at most for the heavy walk's lease)`,
-    `${res.w.seen("card")}. ${await stages(stack, res)}. The daily run meanwhile: ${await runLine(stack, daily, res.t.click)}`,
+    `${res.w.seen("card")}. ${await stages(stack, res, skew)}. The daily run meanwhile: ${await runLine(stack, daily, res.t.click + skew)}`,
     res.landed && took(res) <= WITHIN_MS && !hedges(res.w).length,
   );
   if (!res.landed) await report.shot(A.page, "daily-add");
   await A.context.close();
 
-  // the daily run to its end, then the picks it could not check again on the list it published
-  const end = await stack.waitRun(daily, { ms: 60 * 60_000 }).catch(() => null);
+  // the daily run to its end (it took about 6 min in watch and score on 2026-11-21), then the picks it could not
+  // check again on the list it published
+  let why = "";
+  const end = await stack.waitRun(daily, { ms: 30 * 60_000 }).catch((e) => ((why = e.message), null));
   const published = await fetch(`${stack.urls.api}/api/data/closed.json`).then((r) => r.json(), () => ({}));
   const pickIn = (doc, p) => (doc.days ?? []).find((d) => d.day === p.day)?.picks?.find((x) => x.condition_id === p.condition_id);
   const kept = unchecked.map((p) => ({ p, was: pickIn(seeded, p), now: pickIn(published, p) }));
@@ -560,7 +563,7 @@ await group("daily", 12, { daily: true, opts: { cron: false } }, 4, async (stack
   report.row(
     "the daily run keeps the picks it could not check again",
     "a pick whose check the daily run could not make again (its model did not answer) stays on the list it published, as it was; no day has more than 3",
-    `${forgotten} saved check(s) taken out before the run (${unchecked.map((p) => p.slug).join(", ")}); ${end ? await runLine(stack, daily, Date.now()) : "the daily run did not end within an hour"}; ` +
+    `${forgotten} saved check(s) taken out before the run (${unchecked.map((p) => p.slug).join(", ")}); ${end ? await runLine(stack, daily, Date.now() + skew) : `the daily run did not end (${why})`}; ` +
       `on the published list: ${kept.map((k) => `${k.p.slug} ${k.now ? (JSON.stringify(k.now) === JSON.stringify(k.was) ? "as it was" : `changed (verdict ${k.now.verdict})`) : "missing"}`).join(", ")}; days over 3: ${over.join(", ") || "none"}`,
     !!end && forgotten === unchecked.length && same && !over.length,
   );

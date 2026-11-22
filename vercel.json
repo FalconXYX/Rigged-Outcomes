@@ -4,7 +4,7 @@
   "functions": {
     "api/step.py": {
       "maxDuration": 300,
-      "includeFiles": "{backend/**,watchlist/**,pipeline/**,markets.json}"
+      "includeFiles": "{backend/**,watchlist/**,pipeline/**,rubric/**,markets.json}"
     }
   },
   "routes": [

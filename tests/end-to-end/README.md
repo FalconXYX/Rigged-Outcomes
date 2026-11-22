@@ -9,8 +9,9 @@ node tests/end-to-end/scenarios/smoke.mjs                       # "+ Add to main
 node tests/end-to-end/scenarios/add.mjs --only main             # every way an add can go: main, botfail, faults, daily (one process per group runs them side by side)
 node tests/end-to-end/scenarios/watch.mjs                       # "Watch this market", and the daily run adding a watched market
 node tests/end-to-end/scenarios/markers.mjs                     # timeline markers (again with --bot-fail --port-base 9660)
-node tests/end-to-end/scenarios/lists.mjs                       # 3 a day, a released game dropped from Open now, Toronto time with no UTC
+node tests/end-to-end/scenarios/lists.mjs                       # 3 a day, Toronto time with no UTC
 node tests/end-to-end/scenarios/schedule.mjs                    # 04:00 Toronto across daylight saving, a missed day, the catch-up, the budget ledger
+node tests/end-to-end/scenarios/score.mjs --only main           # the insider score after an add: main, concurrency, quota, busy, killed, fallback, daily, large, faults (one process per group)
 node tests/end-to-end/stack.mjs --port-base 9700                # a stack to click around in by hand (Ctrl-C stops it)
 ```
 
@@ -18,33 +19,39 @@ node tests/end-to-end/stack.mjs --port-base 9700                # a stack to cli
 |---|---|---|
 | smoke | 9500–9503 | 1 min |
 | add (main, botfail, faults, daily) | 9520–9535 | 1 to 10 min a group |
-| lists | 9560–9563 | the daily run, 20 to 40 min |
-| schedule | 9580–9583 | 10 min |
+| lists | 9560–9563 | the daily run (about 6 min), 10 min |
+| schedule | 9580–9583 | 4 min |
 | watch | 9600–9603 | the daily run plus 15 min |
-| markers | 9640–9643 | 10 min |
+| markers | 9640–9643 | 2 min |
+| score (main, concurrency, quota, busy, killed, fallback, daily, large, faults) | 9740–9775 | 0.5 to 13 min a group (busy waits out its 5 to 10 min later, killed and faults a lease, daily the daily run) |
+
+Each scenario process is capped at `E2E_CAP_MIN` minutes (default 60): then it fails with a row naming its last step, prints the table and stops every stack it started (groups in one process share the cap, so run long ones with `--only`).
 
 ## What a stack is (`stack.mjs`)
 
 Four ports from `--port-base`: the API, Vercel, the site, wrangler's inspector.
 
 - **Code:** a snapshot of the working tree (tracked and new files, uncommitted changes included, ignored ones left out), taken at start. node_modules are linked from the repo.
-- **API:** `wrangler dev --test-scheduled` with its own D1 folder; every setting is passed with `--var`, so `.dev.vars` is never read. Today's and yesterday's daily runs are recorded as done before it starts, so the first tick starts no full daily run (`daily: true` lets it).
+- **API:** `wrangler dev --test-scheduled` with its own D1 folder; every setting is passed with `--var`, so `.dev.vars` is never read. Today's and yesterday's daily runs are recorded as done before it starts, so the first tick starts no full daily run (`daily: true` lets it at any hour: `dailyRun()` moves the Worker's clock to 04:00 Toronto first when it is earlier).
 - **Cron:** `lib/cron.mjs` fires the Worker's `* * * * *` trigger at the start of every minute through wrangler's local scheduled path (`GET /cdn-cgi/handler/scheduled`), as Cloudflare does. The Worker decides what is due in Toronto time on its own clock; scenarios move that clock with `POST /api/dev/clock`.
 - **Vercel:** `python3 -m backend.dev_server --control` serves `api/step.py`'s own handler (`lib/vercel.mjs`). Calls share instance processes (Fluid compute), a call still going at 300 s is killed with its instance, and the Worker wakes it with signed wake-ups.
 - **Site:** `npm run build` (as `deploy.yml` builds it), served at `/Rigged-Outcomes/` with Pages-style caching. It reads every market and the lists from the Worker.
 - **Originals:** `python3 -m backend.site originals` saves the 7 original markets in the stack's D1, their CSVs read from this repository's `original-project` branch.
-- **Seed** (`seed.py`): real Polymarket markets closed in the last three Toronto days (at most 3 a day, at the closed list's own $10,000 floor), live open cards with Google News headlines, saved the way the backend saves them (`watchlist.state push --seed`, `watchlist.sync catalog`). `--big N` adds larger markets, `--crowd N` a day published with N picks.
+- **Seed** (`seed.py`): real Polymarket markets closed in the last three Toronto days (at most 3 a day, at the closed list's own $10,000 floor), live open cards with Google News headlines, saved the way the backend saves them (`watchlist.state push --seed`, `watchlist.sync catalog`). `--big N` adds larger markets, `--crowd N` a day published with N picks, `--min D` a higher floor, `--days N` a longer window, `--open-days-ago N` puts the open cards on the list of N days ago and saves it in the store too, as an earlier daily run would (lists uses 1).
+- **Scores** (`--scores answer|quota|busy|fallback`, off by default): the step function gets `WALLET_SCORES=on`, so an add goes on to `wallets.score`, and the Decisions API stand-in starts in that mode.
 
 ## For scenarios (`startStack()`)
 
-- **Backend:** `status()` (`GET /api/job/status`), `run(id)`, `runOf(cid)`, `waitRun(id)`, `clock(epoch | null)`, `workerNow()`, `tick()` (the scheduled path), `devTick()` (`POST /api/dev/tick`, which answers what it made), `api()` for the job endpoints.
-- **Faults:** `vercel.fault({status: 503, error: "DEPLOYMENT_PAUSED"})`, `vercel.fault({drop: n})` (lost wake-ups), `vercel.kill()` (every instance, mid-step), `vercel.maxSeconds(s)`, `vercel.calls()`; `stopApi()`/`startApi()`; `sql(statements)` runs SQL on the stack's D1 with the Worker stopped for it (the budget ledger's rows).
+- **Backend:** `status()` (`GET /api/job/status`), `run(id)`, `runOf(cid)`, `waitRun(id)` (rejects once the run is still not made 3 min in), `clock(epoch | null)`, `workerNow()`, `dailyRun()`, `tick()` (the scheduled path), `devTick()` (`POST /api/dev/tick`, which answers what it made), `api()` for the job endpoints.
+- **Faults:** `vercel.fault({status: 503, error: "DEPLOYMENT_PAUSED"})`, `vercel.fault({drop: n})` (lost wake-ups), `vercel.kill()` (every instance, mid-step), `vercel.maxSeconds(s)`, `vercel.calls()`; `stopApi()`/`startApi()`; `sql(statements)` runs SQL on the stack's D1 with the Worker stopped for it (the budget ledger's rows); `gemini("answer refuse")` switches the Decisions stand-in's mode and switches (a stack with scores) while it runs; `geminiCalls()` and `polymarketCalls()` read what the stand-in logged.
 - **Shared helpers:** `lib/scenario.mjs` (the results table, card faces, watchers, hedging words, run lines) and `lib/outcome.mjs` (stop a wait as soon as an add clearly went wrong).
 - Each stack stops only the processes it started, empties its state folder at start, and removes it when it stops cleanly; a scenario keeps the folder of a stack whose checks failed, and `--keep` keeps it always.
 
 ## Left out on purpose
 
 - **Gemini is never called.** `py/sitecustomize.py` answers the key check and answers every model request with "daily quota used up" (`E2E_GEMINI=busy`: "overloaded"). Python processes refuse production hosts.
+- **The Decisions API** (the wallet rubric's scorer) is a stand-in too. In a stack with scores it answers by `<state>/gemini-mode`, read on every call. The mode: `answer` (answers made from the facts in each request, 1 s each: a fresh wallet that bought hours before the reveal at long odds scores high, a veteran low), `quota` (429 "per day"; the fallback then gets the 429 above), `busy` (503) or `fallback` (429 "per day", and the rubric's fallback request answered the same way). Switches after it: `polymarket` (Polymarket answers the step function 503) and `refuse` (the first wallet asked is refused with a 400, every time). With a mode, its calls are logged as `decisions` in `gemini.jsonl`; without one they are logged as `model`, like any model request. The step function's Polymarket requests go to `polymarket.jsonl`.
+- **Polymarket failing** is simulated only for `wallets.score` (score's faults group, the `polymarket` switch); everywhere else Polymarket is reached for real.
 - **Package installs:** this Mac's `python3` with the repo's requirements and the repo's node_modules are used.
 - **Requirements:** `npm install` in `web/` and `worker/`, and playwright-core with Chromium (paths in `lib/browser.mjs`, or set `E2E_PLAYWRIGHT` and `E2E_CHROME`).
 

@@ -17,33 +17,35 @@
 //                                             [--verbose] [--keep]
 //
 // --keep leaves the stack running afterwards (Ctrl-C stops it) and keeps its state folder, which a pass removes
-// otherwise. Exit 0 passed, 1 failed.
+// otherwise. Each check is a row of the table it prints at the end (and writes as JSON to --shots). Exit 0
+// passed, 1 failed.
 
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { launch } from "../lib/browser.mjs";
 import { addGoesWrong, failedJobs, showsUnless } from "../lib/outcome.mjs";
 import { secs, sleep } from "../lib/proc.mjs";
+import { Report } from "../lib/scenario.mjs";
 import { parseArgs, stackOptions, startStack } from "../stack.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const opts = stackOptions({ "port-base": 9500, ...args, quiet: !args.verbose });
 const timeoutMs = Number(args.timeout ?? 15) * 60_000;
-const failures = [];
-const check = (ok, what) => {
-  console.log(`${ok ? "ok  " : "FAIL"} ${what}`);
-  if (!ok) failures.push(what);
-};
+const report = new Report("smoke", args.shots ?? join(tmpdir(), "e2e-shots", "smoke"));
+const say = (s) => report.say(s);
+const check = (ok, what) => report.row(what, "yes", ok ? "yes" : "no", ok);
 
 const t0 = Date.now();
 let clickAt = 0;
-console.log(`smoke: starting a stack on ports ${opts.portBase}-${opts.portBase + 3}`);
+say(`starting a stack on ports ${opts.portBase}-${opts.portBase + 3}`);
 let stack;
 let browser;
 let pick;
 try {
   stack = await startStack(opts);
-  console.log(`smoke: stack ready in ${secs(t0)} s (state ${stack.state})`);
+  say(`stack ready in ${secs(t0)} s (state ${stack.state})`);
   pick = stack.seed.picks[0];
-  console.log(`smoke: adding "${pick.question}" (${pick.slug}, $${pick.volume.toLocaleString("en-US")} traded, closed ${pick.day})`);
+  say(`adding "${pick.question}" (${pick.slug}, $${pick.volume.toLocaleString("en-US")} traded, closed ${pick.day})`);
 
   browser = await launch({ headed: !!args.headed });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
@@ -87,7 +89,7 @@ try {
   await add.click();
   await card.locator(".wl-act-state", { hasText: "Adding to the main page" }).waitFor({ timeout: 60_000 });
   const addingAt = Date.now();
-  console.log(`  +${secs(clickAt, addingAt)} s  the card reads "Adding to the main page" (POST /api/request ${posted?.status ?? "?"})`);
+  say(`  +${secs(clickAt, addingAt)} s  the card reads "Adding to the main page" (POST /api/request ${posted?.status ?? "?"})`);
 
   const link = card.locator("a.wl-act-btn", { hasText: "On the main page" });
   const got = await showsUnless(link, timeoutMs, addGoesWrong(stack, card, clickAt, pick.condition_id));
@@ -96,7 +98,7 @@ try {
     throw new Error(`the card does not read "On the main page →": ${got.why} (the API has the add as ${req.request?.status ?? "nothing"})`);
   }
   const onMainAt = Date.now();
-  console.log(`  +${secs(clickAt, onMainAt)} s  the card reads "On the main page →" (no reload, nothing run by hand)`);
+  say(`  +${secs(clickAt, onMainAt)} s  the card reads "On the main page →" (no reload, nothing run by hand)`);
   check(navigations === loadedNavigations, "the page was never reloaded or navigated away while it waited");
 
   // the API's record of the add
@@ -174,17 +176,16 @@ try {
   const cpu = (r?.jobs ?? []).reduce((s, j) => s + (j.cpu_ms ?? 0), 0);
   console.log(`\n  ${calls.length} Vercel call(s), ${whales} whale batch(es), ${(cpu / 1000).toFixed(1)} s of step CPU; on the main page ${secs(clickAt, onMainAt)} s after the click`);
 } catch (e) {
-  failures.push(e.message);
-  console.log(`FAIL ${e.message}`);
+  report.row("smoke", "the add lands and every check runs", `stopped: ${e.message}`, false);
   if (stack && pick) console.log(await diagnose(stack, pick.condition_id).catch((x) => `(no diagnosis: ${x.message})`));
 } finally {
   await browser?.close();
   if (args.keep && stack) {
-    console.log(`\nsmoke: the stack keeps running (site ${stack.urls.site}); Ctrl-C stops it`);
+    report.uncap();
+    say(`the stack keeps running (site ${stack.urls.site}); Ctrl-C stops it`);
   } else {
-    await stack?.stop({ keepState: failures.length > 0 });
-    console.log(`\nsmoke: ${failures.length ? `FAILED (${failures.length})` : "passed"} in ${secs(t0)} s`);
-    process.exit(failures.length ? 1 : 0);
+    await stack?.stop({ keepState: report.rows.some((r) => !r.pass) });
+    report.finish();
   }
 }
 

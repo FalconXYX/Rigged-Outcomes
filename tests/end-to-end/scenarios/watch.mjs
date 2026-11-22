@@ -33,6 +33,7 @@ import { join } from "node:path";
 import { launch } from "../lib/browser.mjs";
 import { addGoesWrong, showsUnless } from "../lib/outcome.mjs";
 import { secs, sleep, until } from "../lib/proc.mjs";
+import { Report } from "../lib/scenario.mjs";
 import { dayShift, torontoAt } from "../lib/toronto.mjs";
 import { parseArgs, stackOptions, startStack } from "../stack.mjs";
 
@@ -43,13 +44,16 @@ const SHOTS = args.shots ?? join(SCRATCH, "e2e-shots", "watch");
 const ONLY = args.only ? new Set(String(args.only).split(",")) : new Set(["main", "bot", "slow"]);
 const STATE = (part) => join(args.state ?? join(SCRATCH, "e2e-state"), `watch-${part}`);
 /** Whether a row from `from` on failed (the part's stack then keeps its state folder). */
-const failedSince = (from) => rows.slice(from).some((r) => !r.ok);
+const failedSince = (from) => report.failedSince(from);
 mkdirSync(SHOTS, { recursive: true });
 
-const rows = [];
-const T0 = Date.now();
-const log = (s) => console.log(`[watch +${secs(T0)} s] ${s}`);
+const report = new Report("watch", SHOTS);
+const rows = report.rows;
+const log = (s) => report.say(s);
 let shotN = 0;
+/** The longest a daily run may take here (it took about 6 min on 2026-11-21; the second is optional). */
+const DAILY_MS = 30 * 60_000;
+const SECOND_DAILY_MS = 20 * 60_000;
 
 /** One scenario's row; a failing one gets a screenshot of `page`. */
 async function row(scenario, expected, happened, ok, page) {
@@ -58,8 +62,7 @@ async function row(scenario, expected, happened, ok, page) {
     shot = join(SHOTS, `${String(++shotN).padStart(2, "0")}-${scenario.replace(/[^a-z0-9]+/gi, "-").slice(0, 60)}.png`);
     await page.screenshot({ path: shot, fullPage: true }).catch(() => (shot = ""));
   }
-  rows.push({ scenario, expected, happened, ok, shot });
-  log(`${ok ? "PASS" : "FAIL"} ${scenario}: ${happened}${shot ? ` (screenshot ${shot})` : ""}`);
+  report.row(scenario, expected, `${happened}${shot ? ` (screenshot ${shot})` : ""}`, ok, { shot });
 }
 
 // ---------- what a person sees ----------
@@ -275,7 +278,7 @@ async function own(scenario, fn) {
     await fn();
   } catch (e) {
     log(`${scenario} stopped: ${e.stack ?? e.message}`);
-    rows.push({ scenario, expected: "-", happened: `could not finish: ${String(e.message).slice(0, 300)}`, ok: false, shot: "" });
+    report.row(scenario, "-", `could not finish: ${String(e.message).slice(0, 300)}`, false);
   }
 }
 
@@ -572,7 +575,7 @@ async function main(browser) {
         await sleep(3000);
       }
     })();
-    const done = await stack.waitRun(next.id, { ms: 75 * 60_000 }).catch(() => null);
+    const done = await stack.waitRun(next.id, { ms: DAILY_MS }).catch((e) => (log(`the daily run: ${e.message}`), null));
     await addsIdle(stack).catch(() => null);
     ended = Date.now();
     const daily = done?.run ?? (await stack.run(next.id))?.run;
@@ -701,7 +704,7 @@ async function main(browser) {
     if (args["second-run"]) {
       const n2 = await nextDaily(stack, next.day);
       log(`the second daily run ${n2.id} is made`);
-      const d2 = (await stack.waitRun(n2.id, { ms: 75 * 60_000 }).catch(() => null))?.run ?? { id: n2.id, state: "unfinished" };
+      const d2 = (await stack.waitRun(n2.id, { ms: SECOND_DAILY_MS }).catch(() => null))?.run ?? { id: n2.id, state: "unfinished" };
       await addsIdle(stack);
       const blobs3 = await addedBlobs(stack);
       const counts = [w1.expect?.slug, picks[1].slug, ladder?.expect.slug].filter(Boolean).map((s) => blobs3.filter((b) => bare(b.meta?.entry?.slug) === bare(s)).length);
@@ -839,7 +842,6 @@ async function slow(browser) {
 // ---------- run ----------
 
 let browser;
-let failed = false;
 try {
   browser = await launch({ headed: !!args.headed });
   for (const [part, f] of [
@@ -851,17 +853,12 @@ try {
     try {
       await f(browser);
     } catch (e) {
-      failed = true;
       log(`the ${part} part stopped: ${e.stack ?? e.message}`);
-      rows.push({ scenario: `${part}: could not finish`, expected: "-", happened: String(e.message).slice(0, 400), ok: false, shot: "" });
+      report.row(`${part}: could not finish`, "-", String(e.message).slice(0, 400), false);
     }
   }
 } finally {
   await browser?.close();
 }
 
-console.log("\nscenario | expected | what happened | result");
-for (const r of rows) console.log(`${r.scenario} | ${r.expected} | ${r.happened}${r.shot ? ` [${r.shot}]` : ""} | ${r.ok ? "PASS" : "FAIL"}`);
-writeFileSync(join(SHOTS, "results.json"), JSON.stringify(rows, null, 2));
-console.log(`\nwatch: ${rows.filter((r) => !r.ok).length} failed of ${rows.length} in ${secs(T0)} s`);
-process.exit(failed || rows.some((r) => !r.ok) ? 1 : 0);
+report.finish();

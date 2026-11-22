@@ -5,6 +5,8 @@ runtime.
 
   Later(run_after, reason, pause_lane_until=None)   come back at run_after (epoch seconds, the Worker's clock)
   OutOfTime                                         the step's deadline: it goes out as partial, from the last cursor
+  GiveWay                                           an OutOfTime: a foreground job waits for this background step's
+                                                    lane or the heavy slot (StepContext.give_way), so partial the same way
   Lost                                              the job's lease is gone: the call drops this job quietly
 
 While a step runs, the runtime sets three context variables (a thread pool copies them into its threads with
@@ -46,6 +48,11 @@ class Later(Exception):
 
 class OutOfTime(Exception):
     """The step's deadline came before the next operation could finish."""
+
+
+class GiveWay(OutOfTime):
+    """A foreground job waits for this background step's lane or the heavy slot (the Worker's answer to a
+    checkpoint, StepContext.give_way): the step goes out as partial from the last cursor, exactly like OutOfTime."""
 
 
 class Lost(Exception):

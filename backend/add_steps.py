@@ -13,7 +13,10 @@ pipeline as add_market.add, cut where a Vercel call can stop and carry on.
                04:00 in Toronto. An add of more than add_whales_reserve whales leaves that many of the day's
                allowance to the small ones, so one large add never holds up the rest until the next day.
   add.export   Scores the whales, builds the page with export.py, puts site:markets/<name>.json, market:<name>
-               and site:index.json (backend.site.put_market), the catalog, and reports the request added.
+               and site:index.json (backend.site.put_market), the catalog, and reports the request added. Then it
+               spawns wallets.score for the market (backend/rubric/steps.py: the wallet rubric's insider score)
+               where the step function's settings turn it on (WALLET_SCORES=on, with GEMINI_API_KEY) and the
+               rubric's [backend] score_on_add is true.
 
 A market that cannot be added (not closed, a different result, too many trades or whales, nothing traded) is
 reported failed by the step that finds it, which stops the run. A step that stopped part way (a batch failed
@@ -267,4 +270,24 @@ def export(ctx):
     ctx.api.request("PUT", "/api/job/catalog", {"markets": markets})
     report(ctx, cid, "added", entry["name"], None)
     ctx.meta(name=entry["name"])
+    if score_on_add():
+        ctx.child("wallets.score", "0", {"name": entry["name"]})
     return ctx.done()
+
+
+def score_on_add(environ=None):
+    """Whether an add goes on to wallets.score: WALLET_SCORES=on and GEMINI_API_KEY in the environment (Vercel's
+    settings: set them once the Worker that knows the kind is deployed; a local stack or a test without them never
+    spends the quota), and the rubric's [backend] score_on_add."""
+    import os
+    environ = os.environ if environ is None else environ
+    if str(environ.get("WALLET_SCORES") or "").strip().lower() not in ("1", "on", "true", "yes"):
+        return False
+    if not str(environ.get("GEMINI_API_KEY") or "").strip():
+        return False
+    try:
+        from backend.rubric import spec
+        rubric = spec.load_rubric()
+    except (OSError, ValueError):
+        return False
+    return bool((rubric.get("backend") or {}).get("score_on_add")) and not spec.check(rubric, tokens=set())

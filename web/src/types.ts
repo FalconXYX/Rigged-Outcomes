@@ -60,6 +60,8 @@ export interface MarketIndexEntry {
   flaggedWhaleCapitalPct: number | null;
   /** Number of named wallets (markets.json highlightedUsers), 0 when none. */
   namedWallets: number;
+  /** Present when the market's whales are scored by the wallet rubric. */
+  spectrum?: IndexSpectrum | null;
 }
 
 /** Downsampled series for the home-page card preview (display only, never for stats). */
@@ -72,6 +74,21 @@ export interface MarketPreview {
   whales: { t: number; v: number; hi: boolean }[];
   /** Whale capital (USD) per trader category on the Traders tab; null without insider data. */
   flagMix: Record<TraderCategory, number> | null;
+}
+
+/**
+ * A scored market's band split for its home card (export.py, from the page's traders.rubric and the scored
+ * whales): the card's bar, its Flagged accounts and Flagged capital, and the home ranking read it when present.
+ */
+export interface IndexSpectrum {
+  /** The rubric's name and version ("Insider score"). */
+  name: string;
+  version: string;
+  /** The rubric's bands, lowest first, with the scored whales' count and stake (USD) in each. */
+  bands: { id: string; label: string; color: string; flagged: boolean; count: number; stake: number }[];
+  /** Σ net profit of the timeline whales whose wallet sits in a flagged band (like flaggedWinnings); optional. */
+  flaggedWinnings?: number | null;
+  flaggedWinningsPct?: number | null;
 }
 
 export interface MarketIndex {
@@ -133,6 +150,65 @@ export interface Trader {
   /** Constellation coordinates in data units, both within [-130, 130]. */
   x: number;
   y: number;
+  /** The rubric's result (backend/rubric/pipeline.trader_fields); absent when the market is not scored. */
+  spectrum?: TraderSpectrum;
+}
+
+/* ── Wallet rubric (rubric/wallet_rubric.toml → backend/rubric) ──────────── */
+
+/** One band of the insider score: [min, max), the last one closed. color is a --c-* token name. */
+export interface RubricBand {
+  id: string;
+  label: string;
+  min: number;
+  max: number;
+  color: string;
+  flagged: boolean;
+}
+
+export interface RubricQuestion {
+  id: string;
+  type: "score" | "noul" | "choice";
+  label: string;
+  /** 0 = shown, not counted in the score. */
+  weight: number;
+  /** score questions: level labels, lowest first (a trader's p uses this order). */
+  levels?: string[];
+  /** choice questions. */
+  options?: { id: string; label: string }[];
+}
+
+export type RubricFormat = "usd" | "percent" | "probability" | "count" | "hours" | "days" | "x" | "flag";
+
+export interface RubricFactor {
+  id: string;
+  label: string;
+  format: RubricFormat;
+  description: string;
+}
+
+/** The rubric's display part (backend/rubric/spec.display), carried by each scored market page. */
+export interface RubricDisplay {
+  version: string;
+  name: string;
+  scale: [number, number];
+  bands: RubricBand[];
+  questions: RubricQuestion[];
+  factors: RubricFactor[];
+  /** The paragraph at the foot of the Insider score tab: the rubric file's [about], its {names} filled in. */
+  about?: { heading: string; text: string };
+}
+
+export type SpectrumAnswer =
+  | { p: number[]; level: number } // score: one probability per level
+  | { p: number } // noul: probability of yes
+  | { choice: string; p: number }; // choice: the likeliest option and its probability
+
+export interface TraderSpectrum {
+  score: number;
+  band: string;
+  q: Record<string, SpectrumAnswer>;
+  facts: Record<string, number | boolean | null>;
 }
 
 export interface TradersData {
@@ -143,6 +219,8 @@ export interface TradersData {
   flaggedAccounts: number;
   thresholds: { firstX: number; percentVolume: number };
   traders: Trader[];
+  /** Present when the market's whales are scored by the wallet rubric. */
+  rubric?: RubricDisplay;
 }
 
 export interface MarketData {

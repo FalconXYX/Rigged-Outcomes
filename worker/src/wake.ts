@@ -4,8 +4,8 @@
 // back-off: each wake-up sent adds one to lanes.unanswered and any claim sets it back to 0, so a step function
 // that is down or refusing is asked at most every 1, 2, 4, ... 60 minutes rather than every tick.
 
-import { CONTRACT, type Lane, toronto } from "./contract";
-import { addUsage, isBlocked, readBudget } from "./ledger";
+import { BACKGROUND_KINDS, type BudgetLevel, CONTRACT, type Lane, toronto } from "./contract";
+import { addUsage, blockedText, isBlocked, readBudget } from "./ledger";
 import { type Env, dev, log, now, randomHex } from "./lib";
 
 const W = CONTRACT.wake;
@@ -41,9 +41,46 @@ export function stepUrl(env: Env): string | null {
 /** Seconds a lane waits after its last wake-up before the next, with n of them unanswered: 60 × 2^(n−1), at most an hour. */
 export const backoff = (unanswered: number) => (unanswered <= 0 ? 0 : Math.min(W.backoff_base_s * 2 ** Math.min(unanswered - 1, 20), W.backoff_max_s));
 
+/** A contract constant as an SQL string literal, quoted in place. */
+const sqlText = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+/** The background kinds as an SQL list, "('wallets.score')". */
+export const BACKGROUND = `(${BACKGROUND_KINDS.map(sqlText).join(", ")})`;
+
+/** A level's WHEN of BLOCKED_NOW: its blocked text, NULL at stop; none for a level that blocks nothing. */
+const blockedWhen = (level: BudgetLevel) => {
+  const t = blockedText(level);
+  return t === "" ? "" : `WHEN ${sqlText(level)} THEN ${t === null ? "NULL" : sqlText(t)}`;
+};
+
+/**
+ * The claim's blocked text (blockedText, ',kind,kind,') for the level settings.budget holds, worked out inside a
+ * statement: '' when nothing is blocked (no row, or a value readBudget reads as ok), NULL at stop (every kind).
+ */
+export const BLOCKED_NOW = `(CASE (SELECT json_extract(s.value, '$.level') FROM settings s WHERE s.key = 'budget' AND json_valid(s.value))
+      ${CONTRACT.budget.levels.map(blockedWhen).filter(Boolean).join(" ")} ELSE '' END)`;
+
+/**
+ * "A foreground job is ready" for a background job whose lane and heavy are the SQL expressions `lane` and `heavy`,
+ * at `now` (the statement's own parameter for it), `blocked` the budget level's blocked text (the claim's own, else
+ * BLOCKED_NOW): a job of a kind not in BACKGROUND and not blocked, queued, due, its run live (a final, or before the
+ * run's deadline), its barrier clear (the claim's test) and its lane not paused, in that lane, or heavy when the
+ * background job is. need_s and live leases don't count (a call with the time comes, a lease ends); a blocked kind
+ * can't run before the level drops, so the scoring goes on while an add waits for the budget (up to its 36 h). The
+ * claim, the wake-ups and the checkpoint all use this test, so they agree.
+ */
+export const foregroundReady = (now: string, lane: string, heavy: string, blocked: string) => `EXISTS (SELECT 1 FROM jobs f JOIN runs fr ON fr.id = f.run_id
+      WHERE f.state = 'queued' AND f.run_after <= ${now} AND f.kind NOT IN ${BACKGROUND} AND instr(${blocked}, ',' || f.kind || ',') = 0
+        AND fr.state IN ('queued', 'running') AND (f.final = 1 OR fr.deadline > ${now})
+        AND NOT EXISTS (SELECT 1 FROM jobs fd WHERE fd.run_id = f.run_id AND fd.state IN ('queued', 'leased')
+                        AND instr(',' || f.after || ',', ',' || fd.kind || ',') > 0)
+        AND NOT EXISTS (SELECT 1 FROM lanes fl WHERE fl.lane = f.lane AND fl.paused_until > ${now})
+        AND (f.lane = ${lane} OR (${heavy} = 1 AND f.heavy = 1)))`;
+
 /**
  * The lanes with a job ready to claim (the claim's own conditions: queued, due, its run live, its barrier clear,
- * no live lease in its lane, the heavy rule) and the kinds ready in each, for the budget's blocked kinds.
+ * no live lease in its lane, the heavy rule, a background job only while no foreground job is ready for it) and the
+ * kinds ready in each, for the budget's blocked kinds.
  */
 const READY = `SELECT j.lane AS lane, group_concat(DISTINCT j.kind) AS kinds FROM jobs j JOIN runs r ON r.id = j.run_id
   WHERE j.state = 'queued' AND j.run_after <= ?1 AND r.state IN ('queued', 'running') AND (j.final = 1 OR r.deadline > ?1)
@@ -51,6 +88,7 @@ const READY = `SELECT j.lane AS lane, group_concat(DISTINCT j.kind) AS kinds FRO
                     AND instr(',' || j.after || ',', ',' || d.kind || ',') > 0)
     AND NOT EXISTS (SELECT 1 FROM jobs l WHERE l.state = 'leased' AND l.lane = j.lane AND l.lease_until > ?1)
     AND (j.heavy = 0 OR NOT EXISTS (SELECT 1 FROM jobs h WHERE h.state = 'leased' AND h.heavy = 1 AND h.lease_until > ?1))
+    AND (j.kind NOT IN ${BACKGROUND} OR NOT ${foregroundReady("?1", "j.lane", "j.heavy", BLOCKED_NOW)})
   GROUP BY j.lane`;
 
 /**

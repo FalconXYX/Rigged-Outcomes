@@ -12,18 +12,47 @@ export const HEDGE = /not available|not updated|paused|trial|beta|pending|queued
 
 export const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 
-/** The results table of one scenario file. */
+/** The most minutes a scenario process runs (E2E_CAP_MIN, default 60): then it fails and stops its stacks (cap()). */
+export const CAP_MIN = Number(process.env.E2E_CAP_MIN) > 0 ? Number(process.env.E2E_CAP_MIN) : 60;
+
+/** The results table of one scenario file (`tag` names its results-<tag>.json), and the process's cap. */
 export class Report {
-  constructor(name, shots) {
+  constructor(name, shots, tag = "all") {
     this.name = name;
     this.shots = shots;
+    this.tag = tag;
     this.rows = [];
     this.t0 = Date.now();
+    this.last = ""; // the last say() line: what the scenario is doing
+    this.ended = false; // finish() ran, or the cap fired
     mkdirSync(shots, { recursive: true });
+    this.capTimer = setTimeout(() => this.cap(), Math.min(CAP_MIN * 60_000, 2 ** 31 - 1));
+    this.capTimer.unref();
   }
 
   say(s) {
+    this.last = s;
     console.log(`[${String(secs(this.t0)).padStart(7)} s] ${s}`);
+  }
+
+  /**
+   * CAP_MIN minutes after the start (at most once, never after finish()): a FAIL row naming the cap and the last
+   * thing said, the table and its JSON as finish() writes them, then SIGTERM, which stack.mjs answers by stopping
+   * every stack of the process (each state folder removed) and exiting; exit 1 regardless 20 s later.
+   */
+  cap() {
+    if (this.ended) return;
+    this.ended = true;
+    process.exitCode = 1;
+    this.row(`${this.name}: the ${CAP_MIN}-minute cap`, `the scenario ends within ${CAP_MIN} min (E2E_CAP_MIN)`, `still going after ${CAP_MIN} min, so it was stopped while: ${norm(this.last) || "starting"}`, false);
+    this.table(this.tag);
+    setTimeout(() => process.exit(1), 20_000).unref();
+    process.kill(process.pid, "SIGTERM");
+  }
+
+  /** No cap from here on: the scenario is over and keeps its stack up for a person (--keep). */
+  uncap() {
+    clearTimeout(this.capTimer);
   }
 
   row(scenario, expected, happened, pass, extra = {}) {
@@ -47,15 +76,27 @@ export class Report {
     return file;
   }
 
-  /** Print the table, write it as JSON, and exit 0 when every row passed. */
-  finish(tag = "all") {
+  /** Write the table as JSON and print it; returns how many rows failed. */
+  table(tag = this.tag) {
     const out = join(this.shots, `results-${tag}.json`);
     writeFileSync(out, JSON.stringify(this.rows, null, 2));
     console.log("\nscenario | expected | what happened | result");
     for (const r of this.rows) console.log(`${r.scenario} | ${r.expected} | ${r.happened} | ${r.skipped ? "NOT RUN" : r.pass ? "PASS" : "FAIL"}`);
     const failed = this.rows.filter((r) => !r.pass);
     console.log(`\n${this.name}: ${this.rows.length - failed.length} of ${this.rows.length} passed in ${secs(this.t0)} s (results ${out}; screenshots ${this.shots})`);
-    process.exit(failed.length || !this.rows.length ? 1 : 0);
+    return failed.length;
+  }
+
+  /**
+   * Print the table, write it as JSON, and exit 0 when every row passed. After the cap it does nothing: the cap
+   * printed the table, and the signal it sent ends the process once every stack is stopped.
+   */
+  finish(tag = this.tag) {
+    clearTimeout(this.capTimer);
+    if (this.ended) return;
+    this.ended = true;
+    const failed = this.table(tag);
+    process.exit(failed || !this.rows.length ? 1 : 0);
   }
 }
 

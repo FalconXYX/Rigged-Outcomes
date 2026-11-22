@@ -324,7 +324,15 @@ def load_insiders(m, data_dir="data", df=None):
     return df
 
 
-def build_traders(df):
+def spectrum_key(user_id, trade_time):
+    """A whale row's key in a rubric page part (backend/rubric/pipeline.page_key): "<user_id>@<epoch>"."""
+    return f"{str(user_id).lower()}@{int(pd.to_datetime(trade_time, utc=True).timestamp())}"
+
+
+def build_traders(df, spectrum=None):
+    """The traders panel. spectrum: the wallet rubric's page part (backend/rubric/pipeline.page_part:
+    {"version", "rubric", "whales": {key: fields}}); with it the panel carries traders.rubric and each scored
+    row its traders[i].spectrum, next to today's fields."""
     df = df.copy()
 
     # calculate_network_metrics — same seeded jitter as the Dash app
@@ -364,7 +372,7 @@ def build_traders(df):
     if "market_title" in df.columns and pd.notnull(df["market_title"].iloc[0]):
         title = str(df["market_title"].iloc[0])
 
-    return title, {
+    out = {
         "totalVolume": rs(total_vol, 0),
         "suspiciousVolume": rs(suspicious_vol, 0),
         "pctSuspicious": rs(pct_suspicious, 1),
@@ -373,6 +381,47 @@ def build_traders(df):
         "thresholds": {"firstX": FIRST_X_TRADES, "percentVolume": PERCENT_VOLUME},
         "traders": traders,
     }
+    if spectrum and spectrum.get("whales"):
+        scored = spectrum["whales"]
+        for tr, (_, row) in zip(traders, df.iterrows()):
+            got = scored.get(spectrum_key(row["user_id"], row["target_trade_time"]))
+            if got is not None:
+                tr["spectrum"] = got
+        out["rubric"] = spectrum["rubric"]
+    return title, out
+
+
+def spectrum_summary(traders, prep=None):
+    """The index entry's part of a scored market (the site's IndexSpectrum): the rubric's name and version, its
+    bands lowest first with the scored whales' count and stake (USD) in each, and, with prep, the net profit of
+    the timeline whales whose wallet sits in a flagged band (flaggedWinnings, like the index's own). None when
+    no trader is scored."""
+    rubric = (traders or {}).get("rubric")
+    rows = [t for t in (traders or {}).get("traders") or [] if t.get("spectrum")]
+    if not rubric or not rows:
+        return None
+    count = {b["id"]: 0 for b in rubric["bands"]}
+    stake = {b["id"]: 0.0 for b in rubric["bands"]}
+    for t in rows:
+        band = t["spectrum"]["band"]
+        if band in count:
+            count[band] += 1
+            stake[band] += t["position"] or 0.0
+    out = {
+        "name": rubric["name"],
+        "version": rubric["version"],
+        "bands": [{"id": b["id"], "label": b["label"], "color": b["color"], "flagged": bool(b.get("flagged")),
+                   "count": count[b["id"]], "stake": rs(stake[b["id"]], 0)} for b in rubric["bands"]],
+    }
+    if prep is not None:
+        flagged = {b["id"] for b in rubric["bands"] if b.get("flagged")}
+        ids = {str(t["id"]).lower() for t in rows if t["spectrum"]["band"] in flagged}
+        w = prep.whales
+        won = float(w.loc[_lower_ids(w["user_id"]).isin(ids), "win_amount"].sum()) if len(w) else 0.0
+        total = prep.total_market_winnings
+        out["flaggedWinnings"] = rs(won, 0)
+        out["flaggedWinningsPct"] = rs(won / total * 100.0, 1) if total > 0 else None
+    return out
 
 
 # ── Home-page card preview (downsampled; display only) ───────────────────────
@@ -468,12 +517,14 @@ def build_ranking(prep, insiders):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def export_one(m, data_dir="data", clean=None, insiders=None):
+def export_one(m, data_dir="data", clean=None, insiders=None, spectrum=None):
     """One market's index.json entry and its markets/<name>.json payload, from
     <data_dir>/<Output>_clean.csv and, when it is there, _insiders.csv; or,
     with clean (a frame read from the clean CSV, as pd.read_csv reads it),
     from that and insiders (the insiders frame, None when it has none). "Add
-    to main page" builds an added market's page this way (add_market.py)."""
+    to main page" builds an added market's page this way (add_market.py).
+    spectrum: the wallet rubric's page part for this market (build_traders);
+    the index entry then carries "spectrum" (spectrum_summary)."""
     if clean is not None:
         prep = prepare_market(m, df=clean)
         insiders = load_insiders(m, data_dir, df=insiders) if insiders is not None else None
@@ -486,7 +537,7 @@ def export_one(m, data_dir="data", clean=None, insiders=None):
     title, timeline = build_timeline(prep)
     traders = None
     if insiders is not None:
-        t_title, traders = build_traders(insiders)
+        t_title, traders = build_traders(insiders, spectrum)
         title = title or t_title
 
     payload = {
@@ -517,6 +568,9 @@ def export_one(m, data_dir="data", clean=None, insiders=None):
         "preview": build_preview(timeline, traders),
         **build_ranking(prep, insiders),
     }
+    summary = spectrum_summary(traders, prep)
+    if summary is not None:
+        entry["spectrum"] = summary
     return entry, payload
 
 

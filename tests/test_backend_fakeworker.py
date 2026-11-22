@@ -4,7 +4,9 @@ A stand-in for the Worker's job API (docs/BACKEND.md) for the backend's offline 
 (claim, checkpoint, complete, results, news), the job endpoints the add steps call (work, done, catalog), and
 the blob endpoints (tests/fake_api.FakeApi, with the backend's blob names). Kept in memory, with the contract's
 rules: one live lease per lane, need_s, barriers (failed and cancelled count as finished, and come back as
-`missing`), the heavy rule, outcomes and their counters, body caps. FakeSession puts it behind
+`missing`), the heavy rule, a background job only while no job of another kind is ready for its lane or the heavy
+slot (its checkpoint answered {"give_way": true} once one is, and its partial sent with gave_way then not counted),
+outcomes and their counters, body caps, a checkpoint's cursor kept when it sends none. FakeSession puts it behind
 backend.runtime.WorkerClient, so the tests go through the real HTTP client code.
 
     python3 tests/test_backend_fakeworker.py      # the fake's own checks
@@ -25,7 +27,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import fake_api  # noqa: E402
-from backend.contract import CONTRACT, JOB_KINDS, LIMITS, RUN_GRAPHS  # noqa: E402
+from backend.contract import BACKGROUND_KINDS, CONTRACT, JOB_KINDS, LIMITS, RUN_GRAPHS  # noqa: E402
 from watchlist import sync  # noqa: E402
 
 NAMES = re.compile("|".join(f"(?:{p})" for p in CONTRACT["blob_names"].values()))
@@ -91,6 +93,15 @@ class FakeWorker:
         return [d for d in self.jobs.values() if d["run_id"] == j["run_id"] and d["kind"] in j["after"]
                 and d["state"] in ("queued", "leased")]
 
+    def _waited_for(self, j, now):
+        """A background job j has a foreground job ready to go before it (the Worker's foregroundReady, as far as
+        this fake keeps runs: no deadlines, pauses or budget): a job of another kind, queued, due, its run live,
+        its barrier clear, in j's lane, or heavy when j is."""
+        return j["kind"] in BACKGROUND_KINDS and any(
+            f["kind"] not in BACKGROUND_KINDS and f["state"] == "queued" and f["run_after"] <= now
+            and self.runs[f["run_id"]]["state"] in ("queued", "running") and not self._blocking(f)
+            and (f["lane"] == j["lane"] or (j["heavy"] and f["heavy"])) for f in self.jobs.values())
+
     def claim(self, lane, left_s):
         now = self.now()
         live = [j for j in self.jobs.values() if j["state"] == "leased" and j["lease_until"] > now]
@@ -99,7 +110,7 @@ class FakeWorker:
         ready = [j for j in self.jobs.values()
                  if j["state"] == "queued" and j["lane"] == lane and j["run_after"] <= now and j["need_s"] <= left_s
                  and self.runs[j["run_id"]]["state"] in ("queued", "running") and not self._blocking(j)
-                 and not (j["heavy"] and any(x["heavy"] for x in live))]
+                 and not (j["heavy"] and any(x["heavy"] for x in live)) and not self._waited_for(j, now)]
         if not ready:
             return None
         j = min(ready, key=lambda x: (CONTRACT["run_priority"][self.runs[x["run_id"]]["kind"]], x["run_after"],
@@ -139,7 +150,9 @@ class FakeWorker:
         self._save_results(j, body.get("results"))
         for n in body.get("news") or []:
             self.news[n["key"]] = {"day": "today", "fetched_at": self.now(), "body": copy.deepcopy(n["body"])}
-        j["cursor"] = copy.deepcopy(body.get("cursor"))
+        if "cursor" in body:
+            j["cursor"] = copy.deepcopy(body["cursor"])
+        return {"give_way": True} if self._waited_for(j, self.now()) else None
 
     def complete(self, body):
         assert len(json.dumps(body).encode()) <= LIMITS["complete_body_bytes"], "complete body over 256 KB"
@@ -163,7 +176,9 @@ class FakeWorker:
                         d.update(state="cancelled", error="the run was stopped")
         elif out == "partial":
             assert body.get("cursor") is not None, "a partial needs its cursor"
-            j.update(state="queued", run_after=now, cursor=copy.deepcopy(body["cursor"]), partials=j["partials"] + 1)
+            gave_way = body.get("gave_way") is True and self._waited_for(j, now)       # not counted
+            j.update(state="queued", run_after=now, cursor=copy.deepcopy(body["cursor"]),
+                     partials=j["partials"] + (0 if gave_way else 1))
             if j["partials"] > r["partials_max"]:
                 j.update(state="failed", error="no end in sight")
         elif out == "later":
@@ -295,6 +310,52 @@ def test_claim_follows_the_contract():
     assert w.runs[rid]["state"] == "running"
 
 
+def test_a_background_job_waits_and_gives_way():
+    w = FakeWorker()
+    rid = w.add_run("add", "0xabc:1")
+    for kind in ("add.fetch", "add.export"):
+        w.job(kind, run=rid)["state"] = "done"
+    w._insert(rid, "wallets.score", "0", {"name": "m"}, [])
+    other = w.add_run("add", "0xdef:2")                               # an add made after the scoring was queued
+
+    def lease(got):
+        return {"job_id": got["job"]["id"], "lease_token": got["job"]["lease_token"]}
+
+    def finish(got, outcome="done", **kw):
+        w.complete(dict(lease(got), outcome=outcome, **kw))
+
+    fetch = w.claim("add", 200)
+    assert fetch["job"]["kind"] == "add.fetch" and fetch["job"]["run_id"] == other    # first though made later
+    third = w.add_run("add", "0x123:3")
+    assert w.checkpoint(dict(lease(fetch), cursor=None)) is None       # another kind never gives way
+    finish(fetch)
+    for _ in range(3):                                                 # the export, the third add's fetch and export
+        finish(w.claim("add", 200))
+    bg = w.claim("add", 200)
+    assert bg["job"]["kind"] == "wallets.score" and w.job("add.export", run=third)["state"] == "done"
+    assert w.checkpoint(dict(lease(bg), cursor={"page": 1})) is None   # nothing waits
+    daily = w.add_run("daily", "2026-12-01")
+    assert w.checkpoint(dict(lease(bg), cursor={"page": 1})) is None   # daily.begin: another lane, not heavy
+    w.job("daily.begin", run=daily)["state"] = "done"                  # open.walk ready: the heavy slot
+    assert w.checkpoint(dict(lease(bg), cursor={"page": 2})) == {"give_way": True}
+    finish(bg, "partial", cursor={"page": 2}, gave_way=True)
+    assert w.claim("add", 200) is None                                 # waits for the heavy open.walk
+    w.job("open.walk", run=daily)["state"] = "done"
+    again = w.claim("add", 200)
+    assert again["job"]["id"] == bg["job"]["id"] and again["job"]["cursor"] == {"page": 2}
+    assert again["job"]["partials"] == 0                               # it gave way: not counted
+    fourth = w.add_run("add", "0x456:4")
+    assert w.checkpoint(dict(lease(again), results=[])) == {"give_way": True}           # an add in its lane
+    assert w.job("wallets.score")["cursor"] == {"page": 2}                              # no cursor sent: kept
+    for j in w.jobs.values():
+        if j["run_id"] == fourth:
+            j["state"] = "done"
+    finish(again, "partial", cursor={"page": 3}, gave_way=True)        # nothing waits by now: counted
+    assert w.job("wallets.score")["partials"] == 1
+
+
 if __name__ == "__main__":
     test_claim_follows_the_contract()
     print("PASS test_claim_follows_the_contract")
+    test_a_background_job_waits_and_gives_way()
+    print("PASS test_a_background_job_waits_and_gives_way")

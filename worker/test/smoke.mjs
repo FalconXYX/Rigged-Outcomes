@@ -783,6 +783,71 @@ async function queue() {
   check("add: ...and the market is on the main page", (await call("GET", `/api/request?cid=${pick.condition_id}`)).body?.request?.status === "added");
   check("failed jobs: in the status", (await backend())?.failed_jobs?.some((j) => j.kind === "add.whales" && j.error === "whale 5"));
 
+  // a background job (the contract's background_kinds: wallets.score) waits while any other job is ready for its lane
+  // or the heavy slot, and its checkpoint answers {"give_way": true} once one is: no add waits behind a scoring
+  {
+    const day = { "x-test-day": `${DAY_KEY}-bg` };
+    const addOf = async (p, visitor) => {
+      const r = await call("POST", "/api/request", { visitor, headers: day, body: { condition_id: p.condition_id, token: TOKEN } });
+      return `add:${p.condition_id}:${r.body?.request?.decided_at}`;
+    };
+    t += 60;
+    await setClock(t);
+    const sRun = await addOf(CLOSED[68], "bg1");
+    const sf = (await claim("add")).body?.job;
+    await complete(sf, "done");
+    const se = (await claim("add")).body?.job;
+    await complete(se, "done", { children: [{ kind: "wallets.score", part: "0", input: { name: `bg-${RUN}` } }] });
+    check("background: an add's export spawns its scoring", sf?.run_id === sRun && se?.kind === "add.export" && (await runOf(sRun))?.jobs?.some((j) => j.kind === "wallets.score" && j.state === "queued"), [sf, se]);
+    const fRun = await addOf(CLOSED[69], "bg2");
+    const ff = (await claim("add")).body?.job;
+    check("background: an add made after it is claimed first, though the scoring's run has fewer jobs left", ff?.kind === "add.fetch" && ff.run_id === fRun, ff);
+    await complete(ff, "done", { children: [0, 1].map((i) => ({ kind: "add.whales", part: String(i), input: { wallets: [`0x${i}`] } })) });
+    const fw0 = (await claim("add")).body?.job;
+    expect("background: another kind's checkpoint is 204, with more of its lane ready", await cp(fw0, { results: [] }), 204);
+    await complete(fw0, "done");
+    const fw1 = (await claim("add")).body?.job;
+    await complete(fw1, "done");
+    const fx = (await claim("add")).body?.job;
+    await complete(fx, "done");
+    check("background: ...and the add's batches and export too", fw0?.kind === "add.whales" && fw1?.kind === "add.whales" && fx?.kind === "add.export" && fx.run_id === fRun, [fw0, fw1, fx]);
+    const bg = (await claim("add")).body?.job;
+    check("background: the scoring is claimed once nothing else is ready", bg?.kind === "wallets.score" && bg.run_id === sRun, bg);
+    expect("background: its checkpoint is 204 while nothing waits", await cp(bg, { cursor: { phase: "fills" } }), 204);
+    const gRun = await addOf(CLOSED[64], "bg3");
+    const gw = await cp(bg, { results: [] });
+    check("background: ...and 200 {give_way: true} once an add is ready in its lane", gw.status === 200 && JSON.stringify(gw.body) === '{"give_way":true}', gw);
+    await complete(bg, "partial", { cursor: { phase: "fills" }, gave_way: true });
+    const gf = (await claim("add")).body?.job;
+    check("background: the add goes next; the scoring waits", gf?.kind === "add.fetch" && gf.run_id === gRun, gf);
+    // the heavy slot: a heavy job of another lane (an open.walk, due in a minute) holds the scoring back too
+    await complete(gf, "done", { children: [{ kind: "open.walk", part: "bg", run_after: t + 60 }] });
+    await complete((await claim("add")).body?.job, "done");
+    const bg2 = (await claim("add")).body?.job;
+    check("background: the scoring again once the add is done, from its cursor; giving way did not count as a partial", bg2?.id === bg?.id && bg2.cursor?.phase === "fills" && bg2.partials === 0, bg2);
+    expect("background: 204 while the other lane's heavy job is not due", await cp(bg2, { results: [] }), 204);
+    await setClock(t + 61);
+    const hv = await cp(bg2, { results: [] });
+    check("background: 200 {give_way: true} once a heavy job of another lane is ready (the heavy slot)", hv.status === 200 && hv.body?.give_way === true, hv);
+    for (const lane of ["add", "main"]) await claim(lane, 0); // a call's last report: no back-off, so a wake-up goes out at once
+    const [addWakes, mainWakes] = [(await wakesFor("add")).length, (await wakesFor("main")).length];
+    await complete(bg2, "partial", { cursor: { phase: "fills" }, gave_way: true });
+    const mainWoke = (await wokeAtLeast("main", mainWakes + 1)).length === mainWakes + 1;
+    await sleep(300);
+    check("background: its partial wakes the heavy job's lane, not its own", mainWoke && (await wakesFor("add")).length === addWakes, [addWakes, mainWakes, (await wakes()).slice(-2)]);
+    expect("background: ...and the scoring is not claimed (204)", await claim("add"), 204);
+    const hw = (await claim("main")).body?.job;
+    check("background: the main lane claims that heavy job", hw?.kind === "open.walk" && hw.run_id === gRun, hw);
+    await complete(hw, "done");
+    const bg3 = (await claim("add")).body?.job;
+    await complete(bg3, "partial", { cursor: { phase: "score" }, gave_way: true });
+    const bg4 = (await claim("add")).body?.job;
+    check("background: gave_way with nothing waiting counts as a partial", bg3?.partials === 0 && bg4?.id === bg?.id && bg4.partials === 1, [bg3, bg4]);
+    await complete(bg4, "done");
+    check("background: then the scoring ends, and its run with it", (await runOf(sRun))?.run?.state === "done", (await runOf(sRun))?.run);
+    t += 61;
+  }
+
   // a watched market sent to the main page gets its own add run; one too large reports itself and stops its run
   const wp = { ...CLOSED[66], condition_id: cid(0xabc001), slug: `watched-q-${RUN}` };
   const sent = await call("POST", "/api/job/requests", { auth: JOB, body: { requests: [wp] } });
@@ -820,13 +885,44 @@ async function queue() {
   check("dst: queued, its deadline 09:30 summer time", dst?.run?.state === "queued" && dst.run.deadline === iso("2027-03-15T13:30:00Z"), dst?.run);
   check("budget: a month on it is ok again", (await backend())?.budget?.level === "ok");
 
+  // what never holds a market's scoring back (it is claimed and its checkpoint is 204): a heavy job behind its
+  // barrier (the day's open.walk while daily.begin waits), in a paused lane, of a run past its deadline, and an add
+  // of a kind the budget blocks (at low, below)
+  const lowDay = { "x-test-day": `${DAY_KEY}-low` };
+  const lowAdd = async (p, visitor) => {
+    const q = await call("POST", "/api/request", { visitor, headers: lowDay, body: { condition_id: p.condition_id, token: TOKEN } });
+    return `add:${p.condition_id}:${q.body?.request?.decided_at}`;
+  };
+  const sRun2 = await lowAdd(CLOSED[61], "lw1");
+  await complete((await claim("add")).body?.job, "done");
+  await complete((await claim("add")).body?.job, "done", { children: [{ kind: "wallets.score", part: "0", input: { name: `lw-${RUN}` } }] });
+  const notHeld = async (what, outcome = "partial") => {
+    const s = (await claim("add")).body?.job;
+    const got = s ? await cp(s, { results: [] }) : null;
+    check(`background: ${what} never holds the scoring back`, s?.kind === "wallets.score" && s.run_id === sRun2 && got?.status === 204, [s, got?.status]);
+    await complete(s, outcome, outcome === "partial" ? { cursor: { phase: "score" } } : {});
+  };
+  await notHeld("a heavy job behind its barrier (open.walk while daily.begin waits)");
+
   // at low (65% of the month used) the blocked steps of the daily run are cancelled at once, so the open list's
   // searches (capped to the current cards) and its "already out" check still run, and the lists publish
   const heavy = (await claim("main")).body?.job;
   await complete(heavy, "done", { usage: { cpu_ms: 7_700_000, wall_ms: 1000, units: 0 } });
+  expect("background: the day's open.walk, its barrier clear now, holds the scoring back (204)", await claim("add"), 204);
+  const pausing = await claim("main");
+  const pausedAt = pausing.body?.now;
+  await complete(pausing.body?.job, "later", { reason: "waiting", run_after: pausedAt, pause_lane_until: pausedAt + 600 });
+  await notHeld("a heavy job in a paused lane (the main lane, its open.walk ready)");
   await setClock(iso("2027-03-16T08:00:00Z"));
+  await notHeld("a heavy job of a run past its deadline (the day before's open.walk)");
   r = await tick();
   check("low: the budget is low the next day", (await backend())?.budget?.level === "low" && r?.created?.includes("daily:2027-03-16"), [(await backend())?.budget, r]);
+  await claim("add", 0); // a call's last report: no back-off, so a wake-up goes out at once
+  const lowWakes = (await wakesFor("add")).length;
+  const bRun = await lowAdd(CLOSED[62], "lw2");
+  check("low: a visitor's add, waiting for the budget, wakes the add lane for the scoring", (await wokeAtLeast("add", lowWakes + 1)).length === lowWakes + 1);
+  await notHeld("an add of a kind the budget blocks (add.fetch at low)", "done");
+  check("low: ...the scoring ends while the add waits", (await runOf(sRun2))?.run?.state === "done" && (await runOf(bRun))?.jobs?.find((j) => j.kind === "add.fetch")?.state === "queued", [await runOf(sRun2), await runOf(bRun)]);
   const lowRun = Object.fromEntries(((await runOf("daily:2027-03-16"))?.jobs ?? []).map((j) => [j.kind, j]));
   check("low: open.name and open.read are cancelled at once, for the budget", ["open.name", "open.read"].every((k) => lowRun[k]?.state === "cancelled" && lowRun[k].error === "budget"), lowRun);
   check("low: open.news and open.out wait to run", ["open.news", "open.out"].every((k) => lowRun[k]?.state === "queued"));

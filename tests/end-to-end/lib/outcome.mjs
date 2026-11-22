@@ -72,8 +72,10 @@ export function addGoesWrong(stack, card, since, cid) {
     if (!got) return null;
     const { run, jobs } = got;
     if (["failed", "partial", "cancelled", "skipped"].includes(run.state)) return `its run ${id} ended ${run.state} (${failedJobs(jobs)})`;
-    if (run.state === "done" && run.finished_at && now - run.finished_at * 1000 >= STUCK_MS) {
-      return `its run ${id} finished ${Math.round(now / 1000 - run.finished_at)} s ago and the card has not changed`;
+    if (run.state === "done" && run.finished_at) {
+      // on the Worker's clock, which a scenario may have moved (finished_at is the Worker's)
+      const ago = (await stack.workerNow()) - run.finished_at;
+      if (ago * 1000 >= STUCK_MS) return `its run ${id} finished ${Math.round(ago)} s ago and the card has not changed`;
     }
     return null;
   };

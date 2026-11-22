@@ -1,0 +1,376 @@
+# The wallet rubric: everything that decides a whale's insider score.
+# Edit this file only; no code change is needed for wording, levels, weights,
+# bands or which factors are used. Check it with:  python3 -m backend.rubric check
+# Guide: docs/WALLET_RUBRIC.md
+
+version = "2026-11-20.6"           # bump on every change; it is shown with each score
+name = "Insider score"             # the spectrum's name on the site
+scale = [0, 100]
+
+# ── Scorer ──────────────────────────────────────────────────────────────────
+# use: "decisions" (Gemini Decisions API) or "interactions" (regular Gemini,
+# structured output). fallback is used when `use` cannot run (key refused,
+# endpoint missing, daily cap reached).
+[scorer]
+use = "decisions"
+fallback = "interactions"
+
+[scorer.decisions]
+model = "gemini-decision-1"
+wallets_per_request = 1            # one wallet's input per request (the API reads one input)
+rpm = 180                          # requests a minute (free tier: 200)
+tpm = 45000                        # tokens a minute: input plus every question's text (free tier: 50,000)
+daily_cap = 3500                   # requests this rubric may spend in one day (free tier: 10,000)
+
+[scorer.interactions]
+models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+wallets_per_request = 8
+temperature = 0.0
+daily_cap = 300
+
+# ── What the model reads ────────────────────────────────────────────────────
+# Placeholders: any field of the facts file's "market" part: {title} {outcome}
+# {volume_usd} {whales} {reveal} {close} {news} {news_label}, plus {facts}
+# and {side} (the position's side, worded by `sides`). Times read as
+# "2026-02-28 06:45 UTC". Each fact line uses {label} {value} {description}.
+# A fact that is not known for a wallet is written as `unknown_value`.
+[input]
+template = """
+Polymarket prediction market: {title}
+It resolved {outcome}. The market priced the answer as public from {reveal}; trading ended {close}.
+Total traded: {volume_usd}. Large winning positions in this market: {whales}.
+
+One wallet's large position on the winning outcome ({side}), and its trading history up to its first trade in this market:
+{facts}
+"""
+fact_line = "- {label}: {value}. {description}"
+unknown_value = "not known"
+sides = { BUY = "shares it bought", SELL = "shares it sold" }
+
+# ── Factors ─────────────────────────────────────────────────────────────────
+# id: a factor registered in backend/rubric/wallet_facts.py (FACTORS). Every
+# registered factor is computed for every whale; the blocks below choose the
+# ones the model reads and the card shows, and how they are named.
+# format (optional, else the factor's unit): usd | percent | probability |
+#   count | hours | days | x | flag
+# send: written into the model's input.  card: shown on the wallet card.
+# description may cite the numbers that define a factor as {name}: big_move_points,
+# reveal_points, rise_hours, fresh_trades, fresh_days, cluster_hours (from
+# wallet_facts.DEFINITIONS). Those are fact definitions, not weights: changing
+# one means rebuilding the facts (fact_sources.py), and every whale is asked again.
+
+[[factors]]
+id = "hours_before_reveal"
+label = "Lead time"
+description = "Hours from the wallet's first buy here to the moment the answer became public; negative means it bought after."
+send = true
+card = true
+
+[[factors]]
+id = "hours_to_big_move"
+label = "Time to the big move"
+description = "Hours from the wallet's first buy until the winning side's chance first stood {big_move_points} points above where it was just before (or at the reveal level, if lower); negative means the move came first."
+send = true
+card = false
+
+[[factors]]
+id = "entry_price"
+label = "Entry odds"
+description = "Average price paid for the winning outcome: the chance the market gave it."
+send = true
+card = true
+
+[[factors]]
+id = "position_usd"
+label = "Position"
+description = "Dollars put on the winning outcome."
+send = true
+card = false
+
+[[factors]]
+id = "share_of_volume_pct"
+label = "Share of market"
+description = "This position as a share of all money traded in the market."
+send = true
+card = true
+
+[[factors]]
+id = "concentration_pct"
+label = "Portfolio concentration"
+description = "This position as a share of everything the wallet had staked, this bet included."
+send = true
+card = true
+
+[[factors]]
+id = "prior_trades"
+label = "Prior trades"
+description = "Trades the wallet made in other markets before its first buy here."
+send = true
+card = true
+
+[[factors]]
+id = "wallet_age_days"
+label = "Wallet age"
+description = "Days from the wallet's first Polymarket trade to its first buy here."
+send = true
+card = true
+
+[[factors]]
+id = "prior_markets"
+label = "Prior markets"
+description = "Distinct other markets the wallet had traded before this one."
+send = true
+card = false
+
+[[factors]]
+id = "buy_fills"
+label = "Fills"
+description = "Separate buys that built the position."
+send = true
+card = false
+
+[[factors]]
+id = "build_span_hours"
+label = "Build time"
+description = "Hours from the position's first buy to its last."
+send = true
+card = false
+
+[[factors]]
+id = "sold_before_reveal_pct"
+label = "Sold before the reveal"
+description = "Share of the winning shares bought that the wallet sold before the answer was public (selling after it is cashing in a win)."
+send = true
+card = false
+
+[[factors]]
+id = "fresh_whales_same_window"
+label = "Fresh wallets alongside"
+description = "Other large winning wallets with {fresh_trades} or fewer prior trades, or {fresh_days} days old or less, whose first buy came within {cluster_hours} hours of this one."
+send = true
+card = true
+
+# ── Questions (sent to the scorer) ──────────────────────────────────────────
+# type: score (ordered levels, lowest first) | noul (yes/no) | choice (options)
+# levels: label is shown on the site; criterion is what the model reads.
+# uses: the factors the question weighs (shown on the card, checked by `check`).
+# Ids must stay the same across edits of a question's wording: they key the cache.
+
+[[questions]]
+id = "timing"
+type = "score"
+label = "Timing"
+uses = ["hours_before_reveal", "hours_to_big_move", "entry_price"]
+instructions = "Judge how shortly before the outcome became public (or before the big price move toward it) this wallet first bought, and how unlikely the outcome looked at the price it paid. Lead time comes first; long odds make a short lead time more telling."
+levels = [
+  { label = "After the news",  criterion = "Bought after the outcome was public or after the big move (negative lead time), or at odds above 85%: no foreknowledge was needed." },
+  { label = "Ordinary",        criterion = "Bought more than a month before the reveal, or at odds from 50% to 85%, in step with the rest of the market." },
+  { label = "Weeks before",    criterion = "Bought one to four weeks before the reveal, at odds under 50%." },
+  { label = "Days before",     criterion = "Bought two to seven days before the reveal or the big move, at odds under 50%." },
+  { label = "Hours before",    criterion = "Bought within about 48 hours before the reveal or the big move, at odds under 50%." },
+]
+
+[[questions]]
+id = "conviction"
+type = "score"
+label = "Conviction"
+uses = ["position_usd", "share_of_volume_pct", "concentration_pct", "sold_before_reveal_pct"]
+instructions = "Judge how much of itself the wallet staked on this one outcome, and whether it kept the position until the outcome was public. Selling after the outcome was public is cashing in a win, not doubt."
+levels = [
+  { label = "Side bet",   criterion = "Under a tenth of the wallet's money, or most of the position sold before the outcome was public." },
+  { label = "Measured",   criterion = "A tenth to a third of the wallet's money, one bet among many." },
+  { label = "Committed",  criterion = "A third or more of the wallet's money, or a top stake in this market, kept until the outcome was public." },
+  { label = "All in",     criterion = "Half or more of the wallet's money on this one outcome, kept until the outcome was public." },
+  { label = "All in, outsized", criterion = "Nearly all of the wallet's money and one of the biggest stakes in the market, kept until the outcome was public." },
+]
+
+[[questions]]
+id = "account"
+type = "score"
+label = "Account"
+uses = ["prior_trades", "wallet_age_days", "prior_markets"]
+instructions = "Judge how established the wallet was before its first trade in this market. The count of prior trades matters more than the wallet's age."
+levels = [
+  { label = "Seasoned",    criterion = "Hundreds or thousands of prior trades across many markets." },
+  { label = "Established", criterion = "About 50 to a few hundred prior trades in several markets." },
+  { label = "Light",       criterion = "About 11 to 50 prior trades, in a handful of markets." },
+  { label = "Fresh",       criterion = "10 or fewer prior trades, whatever the wallet's age." },
+  { label = "Brand new",   criterion = "No prior trades, or a wallet first used within a few days of this bet." },
+]
+
+[[questions]]
+id = "pattern"
+type = "score"
+label = "Pattern"
+uses = ["buy_fills", "build_span_hours", "sold_before_reveal_pct", "fresh_whales_same_window"]
+instructions = "Judge how the position was built and whether other fresh wallets moved the same way at the same time."
+levels = [
+  { label = "Routine",     criterion = "Traded in and out, sold most of the position before the outcome was public, or bought along with the crowd." },
+  { label = "Steady",      criterion = "Built over a long period in several small buys, with no burst." },
+  { label = "Focused",     criterion = "Built in one short burst of a few buys, then kept until the outcome was public." },
+  { label = "Paired",      criterion = "One quick build, with one or two other fresh wallets buying the same outcome within 6 hours." },
+  { label = "Clustered",   criterion = "One of three or more fresh wallets that bought the same outcome within the same 6 hours." },
+]
+
+[[questions]]
+id = "overall"
+type = "score"
+label = "Overall"
+uses = ["hours_before_reveal", "hours_to_big_move", "entry_price", "concentration_pct", "prior_trades", "wallet_age_days", "sold_before_reveal_pct", "fresh_whales_same_window"]
+instructions = "Considering everything above, how likely is it that this wallet traded on non-public information about the outcome? Match the wallet to the description that fits it best."
+levels = [
+  { label = "Very unlikely", criterion = "A busy, long-standing wallet's ordinary bet, or a buy after the outcome was public." },
+  { label = "Unlikely",      criterion = "One unusual detail (a new wallet, or a big bet), but bought weeks ahead or at middling odds." },
+  { label = "Possible",      criterion = "A new wallet or a big part of its money on a long shot, but weeks before the reveal, or sold before the reveal." },
+  { label = "Likely",        criterion = "A new or single-purpose wallet putting much of its money on a long shot within days of the reveal or the big move." },
+  { label = "Very likely",   criterion = "A new or single-purpose wallet putting most of its money on a long shot within hours of the reveal or the big move, kept until it was public, often alongside other fresh wallets." },
+]
+
+[[questions]]
+id = "single_purpose"
+type = "noul"
+label = "Single-purpose wallet"
+uses = ["prior_trades", "wallet_age_days", "concentration_pct"]
+instructions = "This wallet was set up or funded for this one bet."
+true_description = "The wallet exists for this bet: little or no history and nearly all its money here."
+false_description = "The wallet has a life of its own beyond this bet."
+
+[[questions]]
+id = "profile"
+type = "choice"
+label = "Reads as"
+uses = ["hours_before_reveal", "entry_price", "prior_trades", "sold_before_reveal_pct", "buy_fills"]
+instructions = "Which description fits this wallet's behaviour in this market best?"
+options = [
+  { id = "early_informed", label = "Early, informed buyer", criterion = "Bought cheap shortly before the reveal, with conviction, from a thin history." },
+  { id = "analyst",        label = "Sharp analyst",         criterion = "An experienced trader who took a well-reasoned position early." },
+  { id = "momentum",       label = "Momentum follower",     criterion = "Bought as the price was already rising with the crowd." },
+  { id = "collector",      label = "Late collector",        criterion = "Bought after the outcome was clear to collect a near-certain payout." },
+  { id = "regular",        label = "Diversified regular",   criterion = "A busy wallet for which this was one bet among many." },
+  { id = "liquidity",      label = "Market maker",          criterion = "Many fills on both sides, trading for the spread rather than the outcome." },
+]
+
+# ── Combining answers into the 0-100 score ──────────────────────────────────
+# score question -> expected level / (levels - 1), levels counted from 0
+# (the API's own score); noul -> probability of yes; choice -> expected
+# option `value` (counted only when every option has a value from 0 to 1).
+# Weight 0 = shown, not counted.
+#
+# method "weighted_mean": the score is the weighted mean x 100.
+# method "tiered": that weighted mean is every wallet's base score. Each
+# [[combine.tiers]] block lifts the wallets that match all its conditions
+# (today's yes/no `flags`, and `facts`: a value to equal, or { min, max })
+# into floor..ceiling. Where a wallet lands in that range is the tier's own
+# weighted mean of answers (`weights`), stretched so that `span` [low, high]
+# covers the whole range; a wallet keeps its base if that is higher. The
+# first matching tier applies. Everything here is free to change: cached
+# answers are combined again.
+[combine]
+method = "tiered"
+weights = { timing = 0.35, overall = 0.20, account = 0.25, conviction = 0.10, pattern = 0.10, single_purpose = 0.0, profile = 0.0 }
+
+# Both old markers (10 or fewer earlier trades, and a bet of 80% or more of
+# its earlier stake): Suspicious at least; timing, conviction and the crowd
+# decide who reaches Highly suspicious. The fact checks keep out the flags an
+# old, cut-short history made (veterans with hundreds of trades, or whose bet
+# is a sliver of their money). The span's top (0.80) keeps middling evidence
+# (a long lead, ordinary odds, a position sold before the reveal) in Suspicious.
+[[combine.tiers]]
+id = "both_old_markers"
+flags = { is_first_x = true, is_percent = true }
+facts = { prior_trades = { max = 10 }, concentration_pct = { min = 40 } }
+floor = 60
+ceiling = 100
+weights = { timing = 0.45, overall = 0.25, conviction = 0.15, pattern = 0.15 }
+span = [0.25, 0.80]
+
+# One old marker: Unusual at least; only strong timing reaches the top band.
+[[combine.tiers]]
+id = "new_account"
+flags = { is_first_x = true }
+facts = { prior_trades = { max = 10 } }
+floor = 40
+ceiling = 90
+weights = { timing = 0.50, overall = 0.25, conviction = 0.15, pattern = 0.10 }
+span = [0.20, 0.90]
+
+[[combine.tiers]]
+id = "concentration"
+flags = { is_percent = true }
+facts = { concentration_pct = { min = 40 } }
+floor = 40
+ceiling = 90
+weights = { timing = 0.50, overall = 0.25, conviction = 0.15, pattern = 0.10 }
+span = [0.20, 0.90]
+
+# ── Backend ─────────────────────────────────────────────────────────────────
+# score_on_add: score a market's whales right after "Add to main page" puts it
+# there (the wallets.score step; it runs where the step function has
+# WALLET_SCORES=on and GEMINI_API_KEY).
+[backend]
+score_on_add = true
+
+# ── Bands shown on the site (lowest first; min inclusive) ───────────────────
+# color: a token from web/src/styles/tokens.css. flagged: counted in the
+# "flagged" totals (stat tiles, home ranking).
+[[bands]]
+id = "typical"
+label = "Typical"
+min = 0
+color = "--c-normal"
+flagged = false
+
+[[bands]]
+id = "notable"
+label = "Notable"
+min = 20
+color = "--c-notable"
+flagged = false
+
+[[bands]]
+id = "unusual"
+label = "Unusual"
+min = 40
+color = "--c-new"
+flagged = false
+
+[[bands]]
+id = "suspicious"
+label = "Suspicious"
+min = 60
+color = "--c-highlight"
+flagged = true
+
+[[bands]]
+id = "highly_suspicious"
+label = "Highly suspicious"
+min = 80
+color = "--c-critical"
+flagged = true
+
+# ── About: the paragraph at the foot of the Insider score tab ───────────────
+# One paragraph (line breaks are joined). heading and text may cite, filled in
+# from this file: {name} {scale_min} {scale_max}; {questions} (the weighted
+# ones, heaviest first); per band {band_<id>} (its label) {band_<id>_min}
+# {band_<id>_max}; {flagged} (the flagged bands) and {flagged_min} (when they
+# run to the top); per tier {tier_<id>_floor} {tier_<id>_ceiling}
+# {tier_<id>_band} (the band its floor is in) {tier_<id>_lead} (its heaviest
+# question) and its facts' bounds, e.g. {tier_new_account_prior_trades_max};
+# and the fact definitions named under Factors. check names any other (the
+# page then leaves the paragraph out; scoring is not affected). The text cites
+# one tier for what the three share (bands, lead, bounds); the tests fail if
+# the tiers stop sharing them.
+[about]
+heading = "How the {name} works"
+text = """
+Gemini reads each whale's record for signs of insider trading: how long before
+the outcome went public it bought, at what odds, how new it is, how much of its
+money it staked, and how many fresh whales bought alongside it. Gemini's
+answers, weighted, give a base score from {scale_min} to {scale_max}. A wallet
+meeting one cut-off on the Flagged traders tab starts at
+{tier_new_account_band}, one meeting both at {tier_both_old_markers_band}, if
+its full history confirms each ({tier_new_account_prior_trades_max} or fewer
+earlier trades; {tier_concentration_concentration_pct_min}% or more of its
+money here); the answers, led by {tier_both_old_markers_lead}, decide how far
+it rises. Wallets scoring {flagged_min} and up ({flagged}) are flagged here.
+"""

@@ -6,6 +6,8 @@ markets (markets.json's) and the ones added with "Add to main page", stored the 
   site:closed.json, site:open.json   the published lists, byte for byte          put_list
   site:markets/<name>.json           a market's page, as export.py writes it
   market:<name>                      its data record: {"entry", "index", "data"} (the clean and insiders CSVs)
+  rubric:<name>                      its whales' insider scores (backend/rubric/store.py); every page built here
+                                     carries them
   site:index.json                    the markets' index: {"markets": [index entry + "v"], "updated_at"}
 
 put_market saves the page, then the record, then the index entry carrying "v", the page's version (the site
@@ -199,7 +201,7 @@ def put_originals(c, read=None, now=None, by="local"):
     for i, m in enumerate(markets, 1):
         clean, insiders = (read(f"data/{m['output']}{s}.csv") for s in ("_clean", "_insiders"))
         cid = condition_of(clean)
-        index, page, data = add_market.build(m, clean, insiders)
+        index, page, data = add_market.build(m, clean, insiders, spectrum=_scores(c, m["name"]))
         if _served(c, m, index, page, data, cid, i, served.get(m["name"])):
             done.append((m["name"], "unchanged"))
         else:
@@ -216,13 +218,20 @@ def put_originals(c, read=None, now=None, by="local"):
 
 
 def remove_market(c, name, now=None, by="local"):
-    """Take a market off the main page: its index entry, its page and its record. False when it was not
-    there."""
+    """Take a market off the main page: its index entry, its page, its record and its wallet scores. False when
+    it was not there."""
     from watchlist import blobs
     there = any(e.get("name") == name for e in read_index(c)[1])
     update_index(c, lambda entries: [e for e in entries if e.get("name") != name], now, by)
-    gone = [blobs.delete(c, page_blob(name)), blobs.delete(c, record_blob(name))]
+    from backend.rubric import store
+    gone = [blobs.delete(c, page_blob(name)), blobs.delete(c, record_blob(name)), store.delete(c, name)]
     return there or any(gone)
+
+
+def _scores(c, name):
+    """The wallet rubric's page part saved for a market (rubric:<name>), so a page built again keeps its scores."""
+    from backend.rubric import store
+    return store.page_part(c, name)
 
 
 def _records(c):
@@ -266,7 +275,7 @@ def migrate(c, now=None):
         clean, insiders = (data.get(f"{(entry or {}).get('output')}{s}.csv") for s in ("_clean", "_insiders"))
         if isinstance(entry, dict) and isinstance(clean, str) and isinstance(insiders, str):
             try:
-                index, page, _ = add_market.build(entry, clean, insiders)
+                index, page, _ = add_market.build(entry, clean, insiders, spectrum=_scores(c, name))
             except Exception as e:
                 print(f"  ! {h['name']}: could not be built again ({type(e).__name__}: {str(e)[:160]}); its saved page "
                       f"is used", flush=True)

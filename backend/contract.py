@@ -1,8 +1,9 @@
 """
 The backend's shared constants (docs/BACKEND.md): job kinds and their lanes,
-run graphs, states, outcomes, deadlines, caps, the time zone, the schedule
-and the budget thresholds. worker/src/contract.ts holds the same CONTRACT
-object (tests/test_backend_contract.py compares the two), so the Vercel step
+the kinds that run in the background, run graphs, states, outcomes, deadlines,
+caps, the time zone, the schedule and the budget thresholds.
+worker/src/contract.ts holds the same CONTRACT object
+(tests/test_backend_contract.py compares the two), so the Vercel step
 function and the Worker always agree. Builders read this file.
 
 Standard library only, and nothing heavy at import: api/step.py imports it
@@ -56,8 +57,10 @@ CONTRACT = {
     "daily.end":      { "lane": "main",  "heavy": False, "need_s": 60,  "final": True,  "handler": "watchlist.steps:daily_end" },
     "add.fetch":      { "lane": "add",   "heavy": True,  "need_s": 120, "final": False, "handler": "backend.add_steps:fetch" },
     "add.whales":     { "lane": "add",   "heavy": False, "need_s": 60,  "final": False, "handler": "backend.add_steps:whales" },
-    "add.export":     { "lane": "add",   "heavy": True,  "need_s": 60,  "final": True,  "handler": "backend.add_steps:export" }
+    "add.export":     { "lane": "add",   "heavy": True,  "need_s": 60,  "final": True,  "handler": "backend.add_steps:export" },
+    "wallets.score":  { "lane": "add",   "heavy": True,  "need_s": 120, "final": False, "handler": "backend.rubric.steps:score" }
   },
+  "background_kinds": ["wallets.score"],
   "run_graphs": {
     "daily": [
       { "kind": "daily.begin",    "after": [] },
@@ -196,7 +199,8 @@ CONTRACT = {
     "site": "^site:(index|closed|open)\\.json$",
     "site_market": "^site:markets/[a-z0-9][a-z0-9-]{1,31}\\.json$",
     "market": "^market:[a-z0-9][a-z0-9-]{1,31}$",
-    "scratch": "^scratch:[0-9a-f]{16}:[a-z0-9_.-]{1,40}$"
+    "scratch": "^scratch:[0-9a-f]{16}:[a-z0-9_.-]{1,40}$",
+    "rubric": "^rubric:[a-z0-9][a-z0-9-]{1,31}$"
   },
   "history_blobs": ["state", "site:index.json", "site:closed.json", "site:open.json"],
   "prune": {
@@ -224,6 +228,7 @@ JOB_TERMINAL = frozenset(CONTRACT["job_terminal"])
 OUTCOMES = tuple(CONTRACT["outcomes"])
 LATER_REASONS = tuple(CONTRACT["later_reasons"])
 JOB_KINDS = CONTRACT["job_kinds"]
+BACKGROUND_KINDS = frozenset(CONTRACT["background_kinds"])
 RUN_GRAPHS = CONTRACT["run_graphs"]
 RETRY = CONTRACT["retry"]
 STEP = CONTRACT["step"]

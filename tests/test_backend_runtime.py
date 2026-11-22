@@ -10,7 +10,11 @@ deadline (no claim under min_claim_left_s, left_s on the claim, a kind whose nee
 partial from a returned cursor and from OutOfTime at the last checkpoint, later (a handler's, Polymarket not
 answering), error text with every secret cut out, a lost lease (no complete), the job's own /tmp folder removed
 afterwards, checkpoints and completes split under 256 KB, children and stop_run, continuing, two calls in one
-process keeping their deadlines apart, and api/step.py's whole path with a signed wake-up.
+process keeping their deadlines apart, api/step.py's whole path with a signed wake-up, and a background step's
+give_way (the flag from a checkpoint's answer and never back, every_s asking with a read-only checkpoint only when
+the last answer is that old, an ask the Worker does not answer logged and gone on from) with GiveWay going out as
+partial from the last cursor, sent with gave_way (not counted), and the call claiming again after it only with
+time for the lane's longest need_s.
 """
 import os
 import sys
@@ -154,6 +158,130 @@ def test_big_checkpoints_and_completes_are_split():
     assert all(c["cursor"] is None for c in w.checkpoints[:2]) and w.checkpoints[2]["cursor"] == {"n": 7}
     assert sum(1 for (r, _k) in w.results if r == rid) == 7 and "q|w" in w.news
     assert w.completes[0]["results"] == [] and w.completes[0]["outcome"] == "done"
+
+
+def scoring(w):
+    """An add run whose fetch and export are done and whose wallets.score (a background job) is queued."""
+    rid = w.add_run("add", "0x" + "cd" * 32 + ":1")
+    for kind in ("add.fetch", "add.export"):
+        w.job(kind, run=rid)["state"] = "done"
+    w._insert(rid, "wallets.score", "0", {"name": "m"}, [])
+    return rid
+
+
+def test_a_background_step_hears_when_to_give_way():
+    w = F.FakeWorker()
+    scoring(w)
+    t, logged = [1000.0], []
+    claim = w.claim("add", 270)
+    ctx = runtime.StepContext(claim, w, t[0] + 270, F.SCRATCH, mono=lambda: t[0], log=logged.append)
+    asks = lambda: w.calls.count(("POST", "/api/job/checkpoint"))           # noqa: E731
+    assert claim["job"]["kind"] == "wallets.score" and ctx.give_way() is False
+    t[0] += 4
+    assert ctx.give_way(every_s=5) is False and not w.checkpoints          # 4 s since the claim: not asked
+    ctx.checkpoint(cursor={"page": 1})
+    assert ctx.give_way() is False                                        # 204: nothing waits
+    t[0] += 5
+    assert ctx.give_way(every_s=5) is False and len(w.checkpoints) == 2  # its answer 5 s old: asked once
+    assert w.checkpoints[-1] == {"job_id": claim["job"]["id"], "lease_token": claim["job"]["lease_token"]}
+    assert w.job("wallets.score")["cursor"] == {"page": 1} == ctx.cursor  # a read: the cursor left alone
+    assert ctx.give_way(every_s=5) is False and len(w.checkpoints) == 2  # just answered: not again
+    t[0] += 5
+    w.fail["/api/job/checkpoint"] = [sync.ApiError(503, "error")]         # the Worker not answering the ask
+    assert ctx.give_way(every_s=5) is False and asks() == 3 and len(logged) == 1   # logged, the step goes on
+    t[0] += 4
+    assert ctx.give_way(every_s=5) is False and asks() == 3              # asked again only every_s later
+    t[0] += 1
+    w.fail["/api/job/checkpoint"] = [sync.ApiError(409, "lost")]
+    try:
+        ctx.give_way(every_s=5)
+        raise AssertionError("a lost lease must raise Lost")
+    except outcomes.Lost:
+        pass
+    t[0] += 5
+    assert ctx.give_way(every_s=5) is False and asks() == 5 and len(w.checkpoints) == 3
+    other = w.add_run("add", "0x" + "ef" * 32 + ":2")                     # a visitor's add, its fetch ready
+    assert ctx.give_way() is False and ctx.give_way(every_s=5) is False   # nobody asked since
+    t[0] += 6
+    assert ctx.give_way(every_s=5) is True and len(w.checkpoints) == 4
+    assert ctx.give_way(every_s=0) is True and len(w.checkpoints) == 4   # once true, no more asking
+    for j in w.jobs.values():
+        if j["run_id"] == other:
+            j["state"] = "done"
+    ctx.checkpoint(cursor={"page": 2})                                    # 204 again: it stays true
+    assert ctx.give_way() is True and ctx.cursor == {"page": 2}
+
+
+def test_give_way_goes_out_as_partial_from_the_last_cursor():
+    w = F.FakeWorker()
+    rid = scoring(w)
+    seen = []
+
+    def score(ctx):
+        seen.append(ctx.cursor)
+        if len(seen) == 1:
+            ctx.checkpoint(cursor={"phase": "history"}, results=[("rubric-hist:0x1:1", {"n": 1})])
+            assert ctx.give_way() is False
+            w.add_run("add", "0x" + "ef" * 32 + ":2")                     # a visitor's add meanwhile
+            ctx.checkpoint(results=[("rubric-hist:0x2:2", {"n": 2})])
+            if ctx.give_way():
+                raise outcomes.GiveWay("another job waits")
+        return ctx.done()
+
+    F.serve(w, "add", handlers={"wallets.score": score, "add.fetch": lambda ctx: ctx.done(stop_run=True)})
+    outs = [(c["job_id"].split("|")[1], c["outcome"]) for c in w.completes]
+    assert outs == [("wallets.score", "partial"), ("add.fetch", "done"), ("wallets.score", "done")], outs
+    assert w.completes[0]["cursor"] == {"phase": "history"} and seen == [None, {"phase": "history"}]
+    assert [c["gave_way"] for c in w.completes] == [True, False, False]
+    assert w.job("wallets.score", run=rid)["partials"] == 0 and w.runs[rid]["state"] == "done"   # not counted
+    assert {k for (r, k) in w.results if r == rid} == {"rubric-hist:0x1:1", "rubric-hist:0x2:2"}
+
+
+def serve_at(w, t, handlers):
+    """One call on the add lane against the fake, on the clock t[0] (seconds, which the handlers move)."""
+    orig = runtime.load_handler
+    runtime.load_handler = lambda kind: handlers[kind] if kind in handlers else orig(kind)
+    try:
+        return runtime.serve("add", t[0], environ=dict(F.ENV), session=F.FakeSession(w), mono=lambda: t[0],
+                             tmp_root=os.path.join(F.SCRATCH, "ro"), log=lambda m: None)
+    finally:
+        runtime.load_handler = orig
+
+
+def test_after_a_give_way_the_call_claims_again_only_with_time_for_the_lane():
+    """A step that gave way with less left than the lane's longest need_s (add.fetch's 120 s) sends continuing
+    false and the call ends: the Worker wakes the lane for a fresh call, since this one could not take the add's
+    fetch. With more left, the same call claims the fetch, then the scoring again."""
+    assert runtime.lane_need_s("add") == 120 and runtime.lane_need_s("main") == 150
+    for spent, more in ((160, False), (60, True)):
+        w = F.FakeWorker()
+        rid = scoring(w)
+        t, calls = [1000.0], []
+
+        def score(ctx):
+            calls.append(round(ctx.left()))
+            if len(calls) == 1:
+                t[0] += spent                                             # the step's work so far
+                w.add_run("add", "0x" + "ef" * 32 + ":2")                 # a visitor's add meanwhile
+                ctx.checkpoint(cursor={"phase": "score"})
+                return ctx.partial(ctx.cursor) if ctx.give_way() else ctx.done()
+            return ctx.done()
+
+        handlers = {"wallets.score": score, "add.fetch": lambda ctx: ctx.done(stop_run=True)}
+        serve_at(w, t, handlers)
+        first = w.completes[0]
+        assert first["outcome"] == "partial" and first["gave_way"] is True and first["continuing"] is more, first
+        assert w.job("wallets.score", run=rid)["partials"] == 0
+        if more:
+            outs = [(c["job_id"].split("|")[1], c["outcome"]) for c in w.completes]
+            assert outs == [("wallets.score", "partial"), ("add.fetch", "done"), ("wallets.score", "done")], outs
+        else:
+            assert [c["left_s"] for c in w.claims] == [270, 0] and len(w.completes) == 1   # the call ended
+            t[0] += 30                                                    # the fresh call the Worker wakes
+            serve_at(w, t, handlers)
+            outs = [(c["job_id"].split("|")[1], c["outcome"]) for c in w.completes[1:]]
+            assert outs == [("add.fetch", "done"), ("wallets.score", "done")], outs
+        assert w.runs[rid]["state"] == "done" and calls[0] == 270
 
 
 def test_stop_run_cancels_the_rest():
